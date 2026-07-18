@@ -180,7 +180,7 @@ func (s *ModelIQService) Get(ctx context.Context) (*ModelIQView, error) {
 func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create Codex Radar request: %w", err)
+		return nil, fmt.Errorf("create codex radar request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.apiToken)
@@ -188,27 +188,27 @@ func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request Codex Radar: %w", err)
+		return nil, fmt.Errorf("request codex radar: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Codex Radar returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("codex radar returned HTTP %d", resp.StatusCode)
 	}
 	if !isJSONMediaType(resp.Header.Get("Content-Type")) {
-		return nil, fmt.Errorf("Codex Radar returned a non-JSON response")
+		return nil, fmt.Errorf("codex radar returned a non-JSON response")
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, modelIQMaxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Codex Radar response: %w", err)
+		return nil, fmt.Errorf("read codex radar response: %w", err)
 	}
 	if len(body) > modelIQMaxResponseBytes {
-		return nil, fmt.Errorf("Codex Radar response exceeds %d bytes", modelIQMaxResponseBytes)
+		return nil, fmt.Errorf("codex radar response exceeds %d bytes", modelIQMaxResponseBytes)
 	}
 	body = bytes.TrimSpace(body)
 	if len(body) == 0 || !json.Valid(body) {
-		return nil, fmt.Errorf("Codex Radar returned invalid JSON")
+		return nil, fmt.Errorf("codex radar returned invalid JSON")
 	}
 
 	var upstream struct {
@@ -217,7 +217,7 @@ func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 		ModelIQ     ModelIQData `json:"model_iq"`
 	}
 	if err := json.Unmarshal(body, &upstream); err != nil {
-		return nil, fmt.Errorf("decode Codex Radar response: %w", err)
+		return nil, fmt.Errorf("decode codex radar response: %w", err)
 	}
 	if err := validateModelIQData(upstream.ModelIQ); err != nil {
 		return nil, err
