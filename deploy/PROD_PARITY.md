@@ -52,6 +52,10 @@ development tree documented in `..\RECOVERY.md`.
 - The moderation adapter uses the authorized production API key and the public
   production relay (`https://sub.scitrace.cc`). Local moderation tests therefore
   consume production capacity and create production-side request records.
+- The local adapter keeps the production trust boundary: `MODERATION_API_KEY`
+  authenticates Sub2API to the adapter, while `MODERATION_RELAY_API_KEY`
+  authenticates the adapter to the production relay. Both values belong only in
+  the Git-ignored local `.env`.
 - Production has no stored `prompt_audit_config`, so prompt auditing remains at
   its production default (disabled). Content moderation and Model IQ are active.
 
