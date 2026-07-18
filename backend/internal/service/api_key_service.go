@@ -27,6 +27,7 @@ var (
 	ErrGroupNotAllowed      = infraerrors.Forbidden("GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
 	ErrAPIKeyExists         = infraerrors.Conflict("API_KEY_EXISTS", "api key already exists")
 	ErrAPIKeyTooShort       = infraerrors.BadRequest("API_KEY_TOO_SHORT", "api key must be at least 16 characters")
+	ErrAPIKeyTooLong        = infraerrors.BadRequest("API_KEY_TOO_LONG", "api key must be at most 128 characters")
 	ErrAPIKeyInvalidChars   = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
 	ErrAPIKeyRateLimited    = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
 	ErrAPIKeyAuthOverloaded = infraerrors.ServiceUnavailable("API_KEY_AUTH_OVERLOADED", "api key authentication is temporarily overloaded")
@@ -340,6 +341,9 @@ func (s *APIKeyService) ValidateCustomKey(key string) error {
 	// 检查长度
 	if len(key) < 16 {
 		return ErrAPIKeyTooShort
+	}
+	if len(key) > MaxAPIKeyCredentialBytes {
+		return ErrAPIKeyTooLong
 	}
 
 	// 检查字符：只允许字母、数字、下划线、连字符
