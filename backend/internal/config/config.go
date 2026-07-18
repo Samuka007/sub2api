@@ -92,6 +92,7 @@ type Config struct {
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
+	CodexRadar              CodexRadarConfig              `mapstructure:"codex_radar"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
@@ -150,6 +151,16 @@ type GeminiTierQuotaConfig struct {
 	ProRPD          *int64 `mapstructure:"pro_rpd" json:"pro_rpd"`
 	FlashRPD        *int64 `mapstructure:"flash_rpd" json:"flash_rpd"`
 	CooldownMinutes *int   `mapstructure:"cooldown_minutes" json:"cooldown_minutes"`
+}
+
+// CodexRadarConfig controls the server-side Codex Radar model IQ proxy.
+// API tokens are read only by the backend and are never exposed to clients.
+type CodexRadarConfig struct {
+	Enabled  bool          `mapstructure:"enabled"`
+	BaseURL  string        `mapstructure:"base_url"`
+	APIToken string        `mapstructure:"api_token"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
 
 type UpdateConfig struct {
@@ -1541,6 +1552,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
 	}
+	if err := viper.BindEnv("codex_radar.api_token", "CODEX_RADAR_API_TOKEN"); err != nil {
+		return nil, fmt.Errorf("bind CODEX_RADAR_API_TOKEN: %w", err)
+	}
 
 	// 默认值
 	setDefaults()
@@ -1918,6 +1932,12 @@ func setDefaults() {
 	viper.SetDefault("batch_image.vertex_output_retention_hours", 72)
 	viper.SetDefault("batch_image.vertex_batch_prediction_base_url", "")
 	viper.SetDefault("batch_image.vertex_gcs_base_url", "")
+
+	// Codex Radar model IQ proxy
+	viper.SetDefault("codex_radar.enabled", false)
+	viper.SetDefault("codex_radar.base_url", "https://codexradar.com/api/v1/current")
+	viper.SetDefault("codex_radar.timeout", 15*time.Second)
+	viper.SetDefault("codex_radar.cache_ttl", 5*time.Minute)
 
 	// Image storage (async image task result offload to S3-compatible object storage)
 	viper.SetDefault("image_storage.enabled", false)

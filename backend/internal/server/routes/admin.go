@@ -75,6 +75,9 @@ func RegisterAdminRoutes(
 		// 运维监控（Ops）
 		registerOpsRoutes(admin, h)
 
+		// 模型雷达（公开来源快照）
+		registerModelRadarRoutes(admin, h)
+
 		// 系统管理
 		registerSystemRoutes(admin, h)
 
