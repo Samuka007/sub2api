@@ -783,58 +783,6 @@ export default {
     }
   },
 
-  modelIq: {
-    title: 'GPT模型智商排行',
-    description: '对比不同 GPT 模型配置的最新基准分数、稳定性、耗时与成本。',
-    updatedAt: '数据生成于 {time}',
-    refresh: '刷新',
-    refreshing: '刷新中...',
-    loading: '正在加载最新排行...',
-    staleTitle: '排行数据可能已过期',
-    staleRefreshFailed: '本次刷新失败，当前仍展示最近一次成功获取的排行。',
-    staleSource: '上游排行服务暂时不可用，当前展示最近一次成功获取的数据。',
-    errorTitle: '无法加载排行',
-    retry: '重试',
-    emptyTitle: '暂无排行数据',
-    emptyDescription: '基准数据源暂未提供可展示的模型对比结果。',
-    tableLabel: 'GPT 模型智商排行',
-    columns: {
-      rank: '排名',
-      model: '模型',
-      effort: '推理强度',
-      score: '智商分',
-      status: '状态',
-      passRate: '通过率',
-      trend: '7日趋势',
-      duration: '耗时',
-      cost: '成本',
-      date: '测试日期',
-    },
-    status: {
-      green: '优秀',
-      yellow: '中等',
-      red: '偏低',
-      unknown: '未知',
-    },
-    effort: {
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-      max: 'max',
-    },
-    period: {
-      am: '上午',
-      pm: '下午',
-    },
-    errors: {
-      unauthorized: '排行数据授权不可用，请联系管理员。',
-      rateLimited: '排行服务当前繁忙，请稍后重试。',
-      network: '无法连接排行服务，请检查网络后重试。',
-      loadFailed: '排行服务暂时不可用，请稍后重试。',
-    },
-  },
-
   // Empty States
   empty: {
     noData: '暂无数据'

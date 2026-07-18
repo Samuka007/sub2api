@@ -71,28 +71,24 @@
                 :value="model.pricing.input_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
               <PricingRow
                 :label="t(prefixKey('outputPrice'))"
                 :value="model.pricing.output_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
               <PricingRow
                 :label="t(prefixKey('cacheWritePrice'))"
                 :value="model.pricing.cache_write_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
               <PricingRow
                 :label="t(prefixKey('cacheReadPrice'))"
                 :value="model.pricing.cache_read_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
               <PricingRow
                 v-if="model.pricing.image_input_price != null && model.pricing.image_input_price > 0"
@@ -100,7 +96,6 @@
                 :value="model.pricing.image_input_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
               <PricingRow
                 v-if="model.pricing.image_output_price != null && model.pricing.image_output_price > 0"
@@ -108,7 +103,6 @@
                 :value="model.pricing.image_output_price"
                 :unit="t(prefixKey('unitPerMillion'))"
                 :scale="perMillionScale"
-                :multiplier="model.pricing.reference_multiplier"
               />
             </template>
 
@@ -121,7 +115,6 @@
               :value="model.pricing.per_request_price"
               :unit="t(prefixKey('unitPerRequest'))"
               :scale="1"
-              :multiplier="model.pricing.reference_multiplier"
             />
 
             <PricingRow
@@ -133,7 +126,6 @@
               :value="model.pricing.image_output_price"
               :unit="t(prefixKey('unitPerRequest'))"
               :scale="1"
-              :multiplier="model.pricing.reference_multiplier"
             />
 
             <div

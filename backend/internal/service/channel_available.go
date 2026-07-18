@@ -38,8 +38,6 @@ type AvailableChannel struct {
 	SupportedModels    []SupportedModel
 }
 
-const featureKeyPricingReference = "pricing_reference"
-
 // ListAvailable 返回所有渠道的可用视图：每个渠道附带关联分组信息与支持模型列表。
 //
 // 支持模型通过 (*Channel).SupportedModels() 计算（mapping ∪ pricing 并联）。
@@ -93,7 +91,6 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 
 		supported := ch.SupportedModels()
 		s.fillGlobalPricingFallback(supported)
-		applyPricingReference(supported, ch.FeaturesConfig)
 
 		out = append(out, AvailableChannel{
 			ID:                 ch.ID,
@@ -134,74 +131,6 @@ func (s *ChannelService) fillGlobalPricingFallback(models []SupportedModel) {
 			continue
 		}
 		models[i].Pricing = synthesizePricingFromLiteLLM(lp, models[i].Pricing)
-	}
-}
-
-// applyPricingReference attaches display-only official-price multipliers from
-// channel FeaturesConfig. It does not change billing prices or resolver caches.
-func applyPricingReference(models []SupportedModel, featuresConfig map[string]any) {
-	source, multipliers := pricingReferenceConfig(featuresConfig)
-	if len(multipliers) == 0 {
-		return
-	}
-	for i := range models {
-		if models[i].Pricing == nil {
-			continue
-		}
-		multiplier, ok := lookupPricingReferenceMultiplier(multipliers, models[i].Name)
-		if !ok {
-			continue
-		}
-		models[i].Pricing.ReferenceMultiplier = &multiplier
-		models[i].Pricing.ReferenceSource = source
-	}
-}
-
-func pricingReferenceConfig(featuresConfig map[string]any) (string, map[string]any) {
-	if len(featuresConfig) == 0 {
-		return "", nil
-	}
-	raw, ok := featuresConfig[featureKeyPricingReference].(map[string]any)
-	if !ok {
-		return "", nil
-	}
-	source, _ := raw["source"].(string)
-	multipliers, ok := raw["multipliers"].(map[string]any)
-	if !ok {
-		return source, nil
-	}
-	return source, multipliers
-}
-
-func lookupPricingReferenceMultiplier(multipliers map[string]any, model string) (float64, bool) {
-	if multiplier, ok := positiveFloat64(multipliers[model]); ok {
-		return multiplier, true
-	}
-	modelLower := strings.ToLower(model)
-	for key, raw := range multipliers {
-		if strings.ToLower(key) != modelLower {
-			continue
-		}
-		return positiveFloat64(raw)
-	}
-	return 0, false
-}
-
-func positiveFloat64(raw any) (float64, bool) {
-	switch v := raw.(type) {
-	case float64:
-		return v, v > 0
-	case float32:
-		f := float64(v)
-		return f, f > 0
-	case int:
-		f := float64(v)
-		return f, f > 0
-	case int64:
-		f := float64(v)
-		return f, f > 0
-	default:
-		return 0, false
 	}
 }
 

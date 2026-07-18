@@ -17,9 +17,3 @@ redis_data/
 # Temporary files
 *.tmp
 *.log
-.prod-image-parts/
-.prod-runtime-secret-*.tmp
-4sub-prod-images-*.tar
-4sub-prod-images-*.tar.gz
-sub2api-*.tar
-sub2api-*.tar.gz
