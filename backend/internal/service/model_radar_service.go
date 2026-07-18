@@ -153,7 +153,7 @@ func (s *ModelRadarService) fetchAndStore(ctx context.Context) (*ModelRadarSnaps
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("source returned HTTP %d", resp.StatusCode)

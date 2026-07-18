@@ -180,7 +180,7 @@ func (s *ModelIQService) Get(ctx context.Context) (*ModelIQView, error) {
 func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create Codex Radar request: %w", err)
+		return nil, fmt.Errorf("create codex radar request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.apiToken)
@@ -188,27 +188,27 @@ func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request Codex Radar: %w", err)
+		return nil, fmt.Errorf("request codex radar: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Codex Radar returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("codex radar returned HTTP %d", resp.StatusCode)
 	}
 	if !isJSONMediaType(resp.Header.Get("Content-Type")) {
-		return nil, fmt.Errorf("Codex Radar returned a non-JSON response")
+		return nil, fmt.Errorf("codex radar returned a non-JSON response")
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, modelIQMaxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Codex Radar response: %w", err)
+		return nil, fmt.Errorf("read codex radar response: %w", err)
 	}
 	if len(body) > modelIQMaxResponseBytes {
-		return nil, fmt.Errorf("Codex Radar response exceeds %d bytes", modelIQMaxResponseBytes)
+		return nil, fmt.Errorf("codex radar response exceeds %d bytes", modelIQMaxResponseBytes)
 	}
 	body = bytes.TrimSpace(body)
 	if len(body) == 0 || !json.Valid(body) {
-		return nil, fmt.Errorf("Codex Radar returned invalid JSON")
+		return nil, fmt.Errorf("codex radar returned invalid JSON")
 	}
 
 	var upstream struct {
@@ -217,7 +217,7 @@ func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
 		ModelIQ     ModelIQData `json:"model_iq"`
 	}
 	if err := json.Unmarshal(body, &upstream); err != nil {
-		return nil, fmt.Errorf("decode Codex Radar response: %w", err)
+		return nil, fmt.Errorf("decode codex radar response: %w", err)
 	}
 	if err := validateModelIQData(upstream.ModelIQ); err != nil {
 		return nil, err
@@ -279,21 +279,21 @@ func isJSONMediaType(value string) bool {
 func validateModelIQBaseURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed == nil {
-		return fmt.Errorf("Codex Radar base URL is invalid")
+		return fmt.Errorf("codex radar base URL is invalid")
 	}
 	if !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.User != nil {
-		return fmt.Errorf("Codex Radar base URL must be an absolute HTTPS URL without userinfo")
+		return fmt.Errorf("codex radar base URL must be an absolute HTTPS URL without userinfo")
 	}
 	return nil
 }
 
 func validateModelIQData(data ModelIQData) error {
 	if len(data.Comparisons) == 0 {
-		return fmt.Errorf("Codex Radar response has no model IQ comparisons")
+		return fmt.Errorf("codex radar response has no model IQ comparisons")
 	}
 	for key, comparison := range data.Comparisons {
 		if strings.TrimSpace(key) == "" || strings.TrimSpace(comparison.Label) == "" || strings.TrimSpace(comparison.Model) == "" {
-			return fmt.Errorf("Codex Radar response contains an invalid comparison")
+			return fmt.Errorf("codex radar response contains an invalid comparison")
 		}
 	}
 	return nil

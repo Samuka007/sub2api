@@ -2,7 +2,7 @@
 
 本文档用于说明 4Sub2 的私有功能、源代码架构，以及团队后续协作开发时应遵循的约定。
 
-[查看源码恢复记录](RECOVERY.md)
+[查看 Git 协作与上游同步规范](GIT_WORKFLOW.md) | [查看源码恢复记录](RECOVERY.md)
 
 ## 仓库信息
 
@@ -11,11 +11,12 @@
 | 私有仓库 | `Jonesxq/4Sub2` |
 | 主分支 | `main` |
 | 上游项目 | `Wei-Shaw/sub2api` |
-| 上游基线 | `v0.1.160` / `8bfbc5ca99bf2c0ac96e0f29ffd35eb6aca27e62` |
-| 上游基线导入提交 | `ad2fd00` |
-| 私有功能恢复提交 | `538ddd7` |
+| 上游基线 | `v0.1.161` / `19149ca196eeae4a4482e5299dc6fa4ba0b06c8c` |
+| 上游升级标签 | `v0.1.161` |
+| 私有功能恢复提交 | `baa4271` |
 | 对应生产镜像 | `sub2api:pricing-model-iq-v0.1.160-v2` |
-| 对应运行版本 | `0.1.160+pricing-radar.model-iq.2` |
+| 当前生产运行版本 | `0.1.160+pricing-radar.model-iq.2` |
+| 当前开发运行版本 | `0.1.161+pricing-radar.model-iq.3` |
 
 当前私有功能源码由官方基线、部署时保留的源码冻结包以及生产补丁重建而成。
 它是一个功能等价、可以继续协作开发的源码版本，但不能声称与已经丢失的原始生产提交逐字节一致。
@@ -23,7 +24,7 @@
 如需查看相对官方基线新增的全部私有代码，可执行：
 
 ```bash
-git diff ad2fd00..main
+git diff v0.1.161..HEAD
 ```
 
 ## 私有新增功能
@@ -365,28 +366,16 @@ frontend/src/views/user/__tests__/ModelIqView.spec.ts
 
 `backend/internal/securityaudit/prompt_module.go` 中新增的一行 `PromptAdminService` Wire 绑定
 属于官方基线构建图修复，不属于私有业务功能。图片输入价格字段原本已经存在于官方
-`v0.1.160` 基线，也不属于本次私有新增功能。
+`v0.1.161` 基线，也不属于本次私有新增功能。
 
 ## 团队开发流程
 
-克隆私有仓库，并保留官方上游远程：
+本仓库采用 `vendor/main + main + feature/* + fix/* + sync/* + release tag` 模型。
+`dev_xq`、`dev_sh` 仅作为迁移前的归档分支，不再用于新开发。
 
-```bash
-git clone git@github.com:Jonesxq/4Sub2.git
-cd 4Sub2
-git remote add upstream https://github.com/Wei-Shaw/sub2api.git
-```
-
-每项功能使用独立分支：
-
-```bash
-git switch main
-git pull --ff-only origin main
-git switch -c feature/short-description
-```
-
-正常团队开发不要直接提交到 `main`。应通过 Pull Request 合并，并要求相关测试通过。
-提交应保持聚焦、说明清楚，禁止对团队共享分支进行强制推送。
+完整的分支职责、上游同步、Pull Request、发布、部署和回滚规则见
+[`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。正常开发不得直接提交到 `main`，每项需求必须从
+最新 `main` 创建独立临时分支并通过 Pull Request 合入。
 
 ### 前端检查
 
@@ -424,7 +413,7 @@ wire ./cmd/server
 - 新增外部数据源时，必须限制请求超时和最大响应大小。
 - 应保存解析后的结构化外部数据，不保存不受控的第三方原始页面。
 - 新增业务逻辑时应补充后端 Service、Handler 测试和前端状态测试。
-- 合并新的官方版本时，应对照 `ad2fd00` 重新评估私有功能，不能仅凭 Git 自动合并成功
+- 合并新的官方版本时，应对照当前上游标签重新评估私有功能，不能仅凭 Git 自动合并成功
   就认为功能完全兼容。
 
 ## 当前恢复版本验证情况
