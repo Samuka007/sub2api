@@ -2,7 +2,7 @@
 
 本文档用于说明 4Sub2 的私有功能、源代码架构，以及团队后续协作开发时应遵循的约定。
 
-[查看源码恢复记录](RECOVERY.md)
+[查看 Git 协作与上游同步规范](GIT_WORKFLOW.md) | [查看源码恢复记录](RECOVERY.md)
 
 ## 仓库信息
 
@@ -370,24 +370,12 @@ frontend/src/views/user/__tests__/ModelIqView.spec.ts
 
 ## 团队开发流程
 
-克隆私有仓库，并保留官方上游远程：
+本仓库采用 `vendor/main + main + feature/* + fix/* + sync/* + release tag` 模型。
+`dev_xq`、`dev_sh` 仅作为迁移前的归档分支，不再用于新开发。
 
-```bash
-git clone git@github.com:Jonesxq/4Sub2.git
-cd 4Sub2
-git remote add upstream https://github.com/Wei-Shaw/sub2api.git
-```
-
-每项功能使用独立分支：
-
-```bash
-git switch main
-git pull --ff-only origin main
-git switch -c feature/short-description
-```
-
-正常团队开发不要直接提交到 `main`。应通过 Pull Request 合并，并要求相关测试通过。
-提交应保持聚焦、说明清楚，禁止对团队共享分支进行强制推送。
+完整的分支职责、上游同步、Pull Request、发布、部署和回滚规则见
+[`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。正常开发不得直接提交到 `main`，每项需求必须从
+最新 `main` 创建独立临时分支并通过 Pull Request 合入。
 
 ### 前端检查
 

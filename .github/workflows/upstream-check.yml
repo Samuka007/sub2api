@@ -1,0 +1,72 @@
+name: Upstream Release Check
+
+on:
+  schedule:
+    - cron: '15 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare tracked and latest releases
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source .upstream-version
+          latest_tag="$(gh api repos/Wei-Shaw/sub2api/releases/latest --jq '.tag_name')"
+
+          echo "tracked_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+          if [[ "$latest_tag" == "$UPSTREAM_TAG" ]]; then
+            echo "update_available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update upstream issue
+        if: steps.versions.outputs.update_available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRACKED_TAG: ${{ steps.versions.outputs.tracked_tag }}
+          LATEST_TAG: ${{ steps.versions.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+          title='[upstream] Sub2API update available'
+          body="Tracked: \`$TRACKED_TAG\`
+
+          Latest: \`$LATEST_TAG\`
+
+          Create branch \`sync/$LATEST_TAG\` and follow \`GIT_WORKFLOW.md\`."
+          issue_number="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [[ -z "$issue_number" ]]; then
+            gh issue create --title "$title" --body "$body"
+          else
+            current_body="$(gh issue view "$issue_number" --json body --jq '.body')"
+            if [[ "$current_body" != "$body" ]]; then
+              gh issue edit "$issue_number" --body "$body"
+            fi
+          fi
+
+      - name: Close resolved upstream issue
+        if: steps.versions.outputs.update_available == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title='[upstream] Sub2API update available'
+          issue_number="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" --comment 'Tracked upstream version is current.'
+          fi

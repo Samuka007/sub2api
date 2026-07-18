@@ -64,9 +64,9 @@ development tree documented in `..\RECOVERY.md`.
 Build the server architecture locally and export the resulting image:
 
 ```powershell
-$version = "0.1.161-pricing-model-iq.3"
+$version = "company-v0.1.161.1"
 docker build --platform linux/amd64 `
-  --build-arg VERSION="0.1.161+pricing-radar.model-iq.3" `
+  --build-arg VERSION="0.1.161+4sub2.1" `
   --tag "sub2api:$version" ..
 docker image save --output "sub2api-$version.tar" "sub2api:$version"
 ```
@@ -75,8 +75,12 @@ After uploading and loading the image, set `SUB2API_IMAGE` in the server `.env`
 and use the committed overlay to guarantee that Docker does not build or pull:
 
 ```bash
-docker image load --input /tmp/sub2api-0.1.161-pricing-model-iq.3.tar
-export SUB2API_IMAGE=sub2api:0.1.161-pricing-model-iq.3
+docker image load --input /tmp/sub2api-company-v0.1.161.1.tar
+export SUB2API_IMAGE=sub2api:company-v0.1.161.1
 docker compose -f docker-compose.yml -f docker-compose.server-image.yml \
   up -d --no-build sub2api
 ```
+
+Production releases must follow `..\GIT_WORKFLOW.md`: build from an internal Git
+tag, deploy the matching immutable image tag, record the image digest, and retain
+the previous image for rollback. Never deploy `latest` or an untagged branch build.

@@ -1,0 +1,46 @@
+name: Branch Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch name and upstream metadata
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+
+          case "$HEAD_BRANCH" in
+            feature/*|fix/*|hotfix/*|sync/v*|docs/*|chore/*|refactor/*|test/*)
+              ;;
+            *)
+              echo "Unsupported branch name: $HEAD_BRANCH"
+              echo "See GIT_WORKFLOW.md for the allowed branch prefixes."
+              exit 1
+              ;;
+          esac
+
+          if [[ "$HEAD_BRANCH" == sync/* ]]; then
+            source .upstream-version
+            expected_branch="sync/$UPSTREAM_TAG"
+
+            if [[ "$HEAD_BRANCH" != "$expected_branch" ]]; then
+              echo "Sync branch $HEAD_BRANCH does not match $expected_branch"
+              exit 1
+            fi
+
+            git cat-file -e "$UPSTREAM_COMMIT^{commit}"
+            git merge-base --is-ancestor "$UPSTREAM_COMMIT" HEAD
+          fi
