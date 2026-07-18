@@ -47,6 +47,23 @@ func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	require.Equal(t, 16384, cfg.APIKeyAuth.InvalidAbuse.Capacity)
 }
 
+func TestLoadCodexRadarConfigFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("CODEX_RADAR_ENABLED", "true")
+	t.Setenv("CODEX_RADAR_BASE_URL", "https://example.test/api/current")
+	t.Setenv("CODEX_RADAR_API_TOKEN", "environment-token")
+	t.Setenv("CODEX_RADAR_TIMEOUT", "9s")
+	t.Setenv("CODEX_RADAR_CACHE_TTL", "7m")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.CodexRadar.Enabled)
+	require.Equal(t, "https://example.test/api/current", cfg.CodexRadar.BaseURL)
+	require.Equal(t, "environment-token", cfg.CodexRadar.APIToken)
+	require.Equal(t, 9*time.Second, cfg.CodexRadar.Timeout)
+	require.Equal(t, 7*time.Minute, cfg.CodexRadar.CacheTTL)
+}
+
 func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	viper.Reset()
 	t.Setenv("JWT_SECRET", "")

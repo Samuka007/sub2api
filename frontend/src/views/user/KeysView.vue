@@ -141,18 +141,24 @@
                 class="-mx-2 -my-1 flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 transition-all duration-200 hover:bg-gray-100 dark:hover:bg-dark-700"
                 :title="t('keys.clickToChangeGroup')"
               >
-                <GroupBadge
+                <GroupPricingPopover
                   v-if="row.group"
-                  :name="row.group.name"
+                  :group-name="row.group.name"
                   :platform="row.group.platform"
-                  :subscription-type="row.group.subscription_type"
-                  :rate-multiplier="row.group.rate_multiplier"
-                  :user-rate-multiplier="userGroupRates[row.group.id]"
-                  :peak-rate-enabled="row.group.peak_rate_enabled"
-                  :peak-start="row.group.peak_start"
-                  :peak-end="row.group.peak_end"
-                  :peak-rate-multiplier="row.group.peak_rate_multiplier"
-                />
+                  :models="groupPricingModels[row.group.id] || []"
+                >
+                  <GroupBadge
+                    :name="row.group.name"
+                    :platform="row.group.platform"
+                    :subscription-type="row.group.subscription_type"
+                    :rate-multiplier="row.group.rate_multiplier"
+                    :user-rate-multiplier="userGroupRates[row.group.id]"
+                    :peak-rate-enabled="row.group.peak_rate_enabled"
+                    :peak-start="row.group.peak_start"
+                    :peak-end="row.group.peak_end"
+                    :peak-rate-multiplier="row.group.peak_rate_multiplier"
+                  />
+                </GroupPricingPopover>
                 <span v-else class="text-sm text-gray-400 dark:text-dark-500">{{
                   t('keys.noGroup')
                 }}</span>
@@ -1139,10 +1145,12 @@ import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import UseKeyModal from '@/components/keys/UseKeyModal.vue'
 	import EndpointPopover from '@/components/keys/EndpointPopover.vue'
 	import GroupBadge from '@/components/common/GroupBadge.vue'
+		import GroupPricingPopover from '@/components/keys/GroupPricingPopover.vue'
 	import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 	import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UpdateApiKeyRequest } from '@/types'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
+	import userChannelsAPI, { type UserSupportedModel } from '@/api/channels'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import {
@@ -1277,6 +1285,7 @@ const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
 const userGroupRates = ref<Record<number, number>>({})
+const groupPricingModels = ref<Record<number, UserSupportedModel[]>>({})
 
 const pagination = ref({
   page: 1,
@@ -1518,6 +1527,22 @@ const loadUserGroupRates = async () => {
     userGroupRates.value = await userGroupsAPI.getUserGroupRates()
   } catch (error) {
     console.error('Failed to load user group rates:', error)
+  }
+}
+
+const loadGroupPricingModels = async () => {
+  try {
+    const rows = await userChannelsAPI.getGroupPricing()
+    const next: Record<number, UserSupportedModel[]> = {}
+
+    rows.forEach((row) => {
+      next[row.group_id] = row.models
+    })
+
+    groupPricingModels.value = next
+  } catch (error) {
+    console.error('Failed to load group pricing models:', error)
+    groupPricingModels.value = {}
   }
 }
 
@@ -1955,6 +1980,7 @@ onMounted(() => {
   loadApiKeys()
   loadGroups()
   loadUserGroupRates()
+  loadGroupPricingModels()
   loadPublicSettings()
   document.addEventListener('click', closeGroupSelector)
   resetTimer = setInterval(() => { now.value = new Date() }, 60000)

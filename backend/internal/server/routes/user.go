@@ -22,6 +22,8 @@ func RegisterUserRoutes(
 	// 用户管理面变更类操作入审计（含 TOTP 启用/禁用、step-up 验证、密码修改等安全事件）
 	authenticated.Use(gin.HandlerFunc(auditLog))
 	{
+		authenticated.GET("/model-iq", h.ModelIQ.Get)
+
 		// 用户接口
 		user := authenticated.Group("/user")
 		{
@@ -81,6 +83,7 @@ func RegisterUserRoutes(
 		channels := authenticated.Group("/channels")
 		{
 			channels.GET("/available", h.AvailableChannel.List)
+			channels.GET("/group-pricing", h.AvailableChannel.GroupPricing)
 		}
 
 		// 使用记录
