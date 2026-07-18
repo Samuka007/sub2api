@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_SYNTAX: docker.1ms.run/docker/dockerfile:1.7
-        VERSION: ${SUB2API_VERSION:-0.1.160+pricing-radar.model-iq.2}
+        VERSION: ${SUB2API_VERSION:-0.1.161+pricing-radar.model-iq.3}
         NODE_IMAGE: docker.1ms.run/library/node:24-alpine
         GOLANG_IMAGE: docker.1ms.run/library/golang:1.26.5-alpine
         ALPINE_IMAGE: docker.1ms.run/library/alpine:3.21

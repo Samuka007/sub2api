@@ -24,8 +24,8 @@ topology and runtime configuration.
 
 ```powershell
 cd C:\code\4sub\deploy
-$env:SUB2API_VERSION = "0.1.160+pricing-radar.model-iq.2"
-$env:SUB2API_DEV_IMAGE = "sub2api:0.1.160-pricing-model-iq.2"
+$env:SUB2API_VERSION = "0.1.161+pricing-radar.model-iq.3"
+$env:SUB2API_DEV_IMAGE = "sub2api:0.1.161-pricing-model-iq.3"
 docker compose -f docker-compose.host-infra.yml up -d --build
 ```
 
@@ -60,9 +60,9 @@ development tree documented in `..\RECOVERY.md`.
 Build the server architecture locally and export the resulting image:
 
 ```powershell
-$version = "0.1.160-pricing-model-iq.2"
+$version = "0.1.161-pricing-model-iq.3"
 docker build --platform linux/amd64 `
-  --build-arg VERSION="0.1.160+pricing-radar.model-iq.2" `
+  --build-arg VERSION="0.1.161+pricing-radar.model-iq.3" `
   --tag "sub2api:$version" ..
 docker image save --output "sub2api-$version.tar" "sub2api:$version"
 ```
@@ -71,8 +71,8 @@ After uploading and loading the image, set `SUB2API_IMAGE` in the server `.env`
 and use the committed overlay to guarantee that Docker does not build or pull:
 
 ```bash
-docker image load --input /tmp/sub2api-0.1.160-pricing-model-iq.2.tar
-export SUB2API_IMAGE=sub2api:0.1.160-pricing-model-iq.2
+docker image load --input /tmp/sub2api-0.1.161-pricing-model-iq.3.tar
+export SUB2API_IMAGE=sub2api:0.1.161-pricing-model-iq.3
 docker compose -f docker-compose.yml -f docker-compose.server-image.yml \
   up -d --no-build sub2api
 ```

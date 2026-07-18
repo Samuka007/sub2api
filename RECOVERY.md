@@ -46,3 +46,13 @@ production release.
 This tree is a functionally equivalent, development-ready reconstruction of the
 referenced production feature set. It must not be described as byte-for-byte
 identical to the unavailable `2c0dbd7f...` source commit.
+
+## Current development baseline
+
+- Upstream release: `v0.1.161`
+- Upstream commit: `19149ca196eeae4a4482e5299dc6fa4ba0b06c8c`
+- Replayed private feature commit: `baa4271`
+- Development runtime version: `0.1.161+pricing-radar.model-iq.3`
+
+The production reference above remains pinned to `v0.1.160` for exact rollback
+and behavior comparison. New development builds use the `v0.1.161` baseline.
