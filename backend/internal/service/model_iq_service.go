@@ -279,21 +279,21 @@ func isJSONMediaType(value string) bool {
 func validateModelIQBaseURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed == nil {
-		return fmt.Errorf("Codex Radar base URL is invalid")
+		return fmt.Errorf("codex radar base URL is invalid")
 	}
 	if !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.User != nil {
-		return fmt.Errorf("Codex Radar base URL must be an absolute HTTPS URL without userinfo")
+		return fmt.Errorf("codex radar base URL must be an absolute HTTPS URL without userinfo")
 	}
 	return nil
 }
 
 func validateModelIQData(data ModelIQData) error {
 	if len(data.Comparisons) == 0 {
-		return fmt.Errorf("Codex Radar response has no model IQ comparisons")
+		return fmt.Errorf("codex radar response has no model IQ comparisons")
 	}
 	for key, comparison := range data.Comparisons {
 		if strings.TrimSpace(key) == "" || strings.TrimSpace(comparison.Label) == "" || strings.TrimSpace(comparison.Model) == "" {
-			return fmt.Errorf("Codex Radar response contains an invalid comparison")
+			return fmt.Errorf("codex radar response contains an invalid comparison")
 		}
 	}
 	return nil
