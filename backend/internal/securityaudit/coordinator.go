@@ -9,12 +9,14 @@ import (
 
 type LegacyEngine interface {
 	Check(ctx context.Context, req Request) (*LegacyDecision, error)
+	ObserveOnly(ctx context.Context, req Request) bool
 }
 
 type PromptEngine interface {
 	EffectiveMode() Mode
 	Enqueue(ctx context.Context, req Request) error
 	Evaluate(ctx context.Context, req Request) (*PromptDecision, error)
+	Observe(ctx context.Context, req Request) error
 }
 
 type Coordinator struct {
@@ -29,6 +31,13 @@ func NewCoordinator(legacy LegacyEngine, prompt PromptEngine) *Coordinator {
 func (c *Coordinator) Check(ctx context.Context, req Request) Decision {
 	if c == nil {
 		return allowDecision(nil, nil)
+	}
+	if c.observeOnly(ctx, req) {
+		if c.prompt != nil {
+			_ = c.prompt.Observe(ctx, req.Clone())
+		}
+		legacy, _ := c.checkLegacy(ctx, req)
+		return prioritize(legacy, nil)
 	}
 	mode := ModeOff
 	if c.prompt != nil {
@@ -47,6 +56,10 @@ func (c *Coordinator) Check(ctx context.Context, req Request) Decision {
 		legacy, _ := c.checkLegacy(ctx, req)
 		return prioritize(legacy, nil)
 	}
+}
+
+func (c *Coordinator) observeOnly(ctx context.Context, req Request) bool {
+	return c != nil && c.legacy != nil && c.legacy.ObserveOnly(ctx, req)
 }
 
 func (c *Coordinator) checkBlocking(ctx context.Context, req Request) Decision {
@@ -105,6 +118,9 @@ func prioritize(legacy *LegacyDecision, prompt *PromptDecision) Decision {
 			Kind: DecisionBlock, HTTPStatus: status, ErrorCode: code, ClientMessage: legacy.Message,
 			Legacy: legacy, Prompt: prompt, AllowNextStage: false,
 		}
+	}
+	if legacy != nil && legacy.ObserveOnly {
+		return allowDecision(legacy, prompt)
 	}
 	if prompt == nil {
 		return allowDecision(legacy, nil)

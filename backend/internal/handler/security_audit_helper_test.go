@@ -61,3 +61,7 @@ func (e *turnCountingEngine) Enqueue(context.Context, securityaudit.Request) err
 func (e *turnCountingEngine) Evaluate(context.Context, securityaudit.Request) (*securityaudit.PromptDecision, error) {
 	return &securityaudit.PromptDecision{Kind: securityaudit.DecisionAllow, AllowNextStage: true}, nil
 }
+func (e *turnCountingEngine) Observe(context.Context, securityaudit.Request) error {
+	e.enqueues.Add(1)
+	return nil
+}

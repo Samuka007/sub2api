@@ -138,6 +138,23 @@ func TestOpenAIForwardSucceededForScheduling(t *testing.T) {
 	}))
 }
 
+func TestOpenAIWSTurnResultUsesCurrentTurnModelWithoutMutatingForwardResult(t *testing.T) {
+	forwardResult := &service.OpenAIForwardResult{
+		Model:         "gpt-5.4",
+		UpstreamModel: "gpt-5.3-codex",
+		RequestID:     "resp_second_turn",
+	}
+
+	turnResult := openAIWSTurnResult(forwardResult, "gpt-5.3-codex")
+
+	require.NotSame(t, forwardResult, turnResult)
+	require.Equal(t, "gpt-5.3-codex", turnResult.Model)
+	require.Equal(t, "gpt-5.3-codex", turnResult.UpstreamModel)
+	require.Equal(t, "resp_second_turn", turnResult.RequestID)
+	require.Equal(t, "gpt-5.4", forwardResult.Model)
+	require.Nil(t, openAIWSTurnResult(nil, "gpt-5.3-codex"))
+}
+
 func TestResolveOpenAIMessagesMetadataSession_DoesNotDerivePromptCacheKey(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-5","metadata":{"user_id":"claude-code-session"},"messages":[{"role":"user","content":"hello"}]}`)
 
@@ -1167,6 +1184,10 @@ func (r *contentModerationHandlerTestRepo) CreateLog(ctx context.Context, log *s
 		r.logs = append(r.logs, *log)
 	}
 	return nil
+}
+
+func (r *contentModerationHandlerTestRepo) ExistingAPIKeyIDs(ctx context.Context, apiKeyIDs []int64) ([]int64, error) {
+	return append([]int64(nil), apiKeyIDs...), nil
 }
 
 func (r *contentModerationHandlerTestRepo) resetLogs() {

@@ -29,6 +29,10 @@ func (r *cyberOrderingTestRepo) CreateLog(ctx context.Context, log *ContentModer
 	return nil
 }
 
+func (r *cyberOrderingTestRepo) ExistingAPIKeyIDs(ctx context.Context, apiKeyIDs []int64) ([]int64, error) {
+	return apiKeyIDs, nil
+}
+
 func (r *cyberOrderingTestRepo) UpdateLogEmailSent(ctx context.Context, id int64, sent bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -299,4 +303,39 @@ func TestRecordCyberPolicyEvent_DefaultCountsTowardBan(t *testing.T) {
 	logs := repo.snapshotLogs()
 	require.Len(t, logs, 1)
 	require.GreaterOrEqual(t, logs[0].ViolationCount, 1, "默认路径行为不变（现状回归）")
+}
+
+func TestRecordCyberPolicyEvent_TrustedObserveSkipsViolationSideEffects(t *testing.T) {
+	repo := &banCountArgsTestRepo{}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1, Role: RoleUser, Status: StatusActive}}
+	invalidator := &contentModerationTestAuthCacheInvalidator{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled: "true",
+		}},
+		repo, nil, nil, userRepo, invalidator, nil,
+	)
+
+	svc.RecordCyberPolicyEvent(context.Background(), CyberPolicyRecordInput{
+		UserID:          1,
+		UserEmail:       "u@x.com",
+		Model:           "gpt-5",
+		Endpoint:        "/v1/responses",
+		UpstreamMessage: "flagged",
+		UpstreamStatus:  400,
+		TrustedObserve:  true,
+	})
+
+	require.Empty(t, repo.snapshotCountCalls(), "可信观察不得执行封号计数查询")
+	logs := repo.snapshotLogs()
+	require.Len(t, logs, 1, "可信 cyber 命中仍须留审计日志")
+	require.Equal(t, ContentModerationActionTrustedObserve, logs[0].Action)
+	require.True(t, logs[0].Flagged)
+	require.Equal(t, "cyber_policy", logs[0].HighestCategory)
+	require.Zero(t, logs[0].ViolationCount)
+	require.False(t, logs[0].AutoBanned)
+	require.False(t, logs[0].EmailSent)
+	require.Equal(t, StatusActive, userRepo.user.Status)
+	require.Empty(t, userRepo.updated)
+	require.Empty(t, invalidator.userIDs)
 }

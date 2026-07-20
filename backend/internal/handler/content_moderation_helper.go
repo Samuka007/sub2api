@@ -23,6 +23,13 @@ func contentModerationErrorCode(decision *service.ContentModerationDecision) str
 	return "content_policy_violation"
 }
 
+func (h *OpenAIGatewayHandler) isContentModerationTrustedAPIKey(ctx context.Context, apiKey *service.APIKey, model string, endpoint string) bool {
+	if h == nil || h.contentModerationService == nil || apiKey == nil {
+		return false
+	}
+	return h.contentModerationService.IsTrustedAPIKeyObserveOnly(ctx, apiKey.ID, model, endpoint)
+}
+
 func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
 	if svc == nil || c == nil || c.Request == nil {
 		return nil

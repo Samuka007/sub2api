@@ -372,7 +372,7 @@
         </div>
       </template>
 
-      <BaseDialog :show="settingsOpen" :title="t('admin.riskControl.settingsTitle')" width="extra-wide" @close="settingsOpen = false">
+      <BaseDialog :show="settingsOpen" :title="t('admin.riskControl.settingsTitle')" width="extra-wide" @close="closeSettings">
         <div class="space-y-6">
           <div class="flex gap-2 overflow-x-auto border-b border-gray-100 pb-3 dark:border-dark-700">
             <button
@@ -797,6 +797,123 @@
             </div>
           </div>
 
+          <div v-else-if="activeSettingsTab === 'trustedKeys'" class="space-y-5">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.trustedAPIKeys') }}</h3>
+                <p class="mt-1 max-w-3xl text-sm leading-6 text-gray-500 dark:text-gray-400">
+                  {{ t('admin.riskControl.trustedAPIKeysHint') }}
+                </p>
+              </div>
+              <button type="button" class="btn btn-secondary inline-flex items-center gap-2" @click="addTrustedAPIKey">
+                <Icon name="plus" size="sm" />
+                {{ t('admin.riskControl.addTrustedAPIKey') }}
+              </button>
+            </div>
+
+            <div
+              v-if="configForm.trusted_api_keys.length === 0"
+              class="flex min-h-36 flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 px-6 py-8 text-center dark:border-dark-700"
+            >
+              <Icon name="shield" size="lg" class="text-gray-300 dark:text-dark-500" />
+              <p class="mt-3 text-sm font-medium text-gray-700 dark:text-gray-200">{{ t('admin.riskControl.trustedAPIKeysEmpty') }}</p>
+              <p class="mt-1 max-w-xl text-xs leading-5 text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.trustedAPIKeysEmptyHint') }}</p>
+            </div>
+
+            <div v-else class="space-y-4">
+              <div
+                v-for="(row, index) in configForm.trusted_api_keys"
+                :key="`trusted-api-key-${index}`"
+                class="rounded-lg border border-gray-100 p-4 dark:border-dark-700"
+                :data-test="`trusted-api-key-${index}`"
+              >
+                <div class="mb-4 flex items-center justify-between gap-3">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-300">
+                      <Icon name="key" size="sm" />
+                    </span>
+                    <div class="min-w-0">
+                      <p class="truncate text-sm font-semibold text-gray-900 dark:text-white">
+                        {{ row.api_key_id ? `API Key ID ${row.api_key_id}` : t('admin.riskControl.newTrustedAPIKey') }}
+                      </p>
+                      <p
+                        class="text-xs"
+                        :class="isTrustedAPIKeyExpired(row) ? 'text-amber-600 dark:text-amber-300' : 'text-gray-500 dark:text-gray-400'"
+                        :data-test="`trusted-api-key-status-${index}`"
+                      >
+                        {{ isTrustedAPIKeyExpired(row) ? t('admin.riskControl.trustedAPIKeyExpired') : t('admin.riskControl.trustedObserveOnly') }}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md text-gray-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
+                    :title="t('admin.riskControl.removeTrustedAPIKey')"
+                    :aria-label="t('admin.riskControl.removeTrustedAPIKey')"
+                    @click="removeTrustedAPIKey(index)"
+                  >
+                    <Icon name="trash" size="sm" />
+                  </button>
+                </div>
+
+                <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <div>
+                    <label class="input-label">{{ t('admin.riskControl.trustedAPIKeyID') }}</label>
+                    <input
+                      v-model.number="row.api_key_id"
+                      type="number"
+                      min="1"
+                      step="1"
+                      class="input font-mono"
+                      :data-test="`trusted-api-key-id-${index}`"
+                      :placeholder="t('admin.riskControl.trustedAPIKeyIDPlaceholder')"
+                    />
+                  </div>
+                  <div>
+                    <label class="input-label">{{ t('admin.riskControl.trustedAPIKeyExpiresAt') }}</label>
+                    <input v-model="row.expires_at" type="datetime-local" class="input" :data-test="`trusted-api-key-expiry-${index}`" />
+                  </div>
+                  <div class="lg:col-span-2">
+                    <label class="input-label">{{ t('admin.riskControl.trustedAPIKeyReason') }}</label>
+                    <input
+                      v-model.trim="row.reason"
+                      type="text"
+                      maxlength="500"
+                      class="input"
+                      :data-test="`trusted-api-key-reason-${index}`"
+                      :placeholder="t('admin.riskControl.trustedAPIKeyReasonPlaceholder')"
+                    />
+                  </div>
+                  <div>
+                    <label class="input-label">{{ t('admin.riskControl.trustedAPIKeyModels') }}</label>
+                    <textarea
+                      v-model="row.models_text"
+                      class="input min-h-28 resize-y font-mono text-sm"
+                      :data-test="`trusted-api-key-models-${index}`"
+                      :placeholder="t('admin.riskControl.trustedAPIKeyModelsPlaceholder')"
+                    ></textarea>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.trustedAPIKeyModelsHint') }}</p>
+                  </div>
+                  <div>
+                    <label class="input-label">{{ t('admin.riskControl.trustedAPIKeyEndpoints') }}</label>
+                    <textarea
+                      v-model="row.endpoints_text"
+                      class="input min-h-28 resize-y font-mono text-sm"
+                      :data-test="`trusted-api-key-endpoints-${index}`"
+                      :placeholder="t('admin.riskControl.trustedAPIKeyEndpointsPlaceholder')"
+                    ></textarea>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.trustedAPIKeyEndpointsHint') }}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-200">
+              <Icon name="infoCircle" size="md" class="mt-0.5 flex-shrink-0" />
+              <p class="leading-6">{{ t('admin.riskControl.trustedAPIKeysSecurityNote') }}</p>
+            </div>
+          </div>
+
           <div v-else-if="activeSettingsTab === 'runtime'" class="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <div>
               <label class="input-label">{{ t('admin.riskControl.workerCount') }}</label>
@@ -1043,7 +1160,7 @@
 
         <template #footer>
           <div class="flex justify-end gap-2">
-            <button type="button" class="btn btn-secondary" @click="settingsOpen = false">{{ t('common.cancel') }}</button>
+            <button type="button" class="btn btn-secondary" :disabled="saving" @click="closeSettings">{{ t('common.cancel') }}</button>
             <button type="button" class="btn btn-primary inline-flex items-center gap-2" :disabled="saving" @click="saveConfig">
               <Icon v-if="saving" name="refresh" size="sm" class="animate-spin" />
               <Icon v-else name="check" size="sm" />
@@ -1133,6 +1250,7 @@ import type {
   ContentModerationModelFilterType,
   ContentModerationRuntimeStatus,
   ContentModerationTestAuditResult,
+  ContentModerationTrustedAPIKey,
   KeywordBlockingMode,
   ModerationMode,
   UpdateContentModerationConfig,
@@ -1142,7 +1260,7 @@ import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatDateTime as formatDateTimeValue } from '@/utils/format'
 
-type SettingsTab = 'basic' | 'scope' | 'runtime' | 'response' | 'riskThresholds' | 'retention' | 'keywords'
+type SettingsTab = 'basic' | 'scope' | 'trustedKeys' | 'runtime' | 'response' | 'riskThresholds' | 'retention' | 'keywords'
 type WorkerSlotState = 'active' | 'idle' | 'disabled'
 type APIKeysWriteMode = 'append' | 'replace'
 type OverviewIcon = 'shield' | 'key' | 'users' | 'document'
@@ -1167,11 +1285,20 @@ type RiskThresholdRow = {
   value: number
   defaultValue: number
 }
+type TrustedAPIKeyFormRow = {
+  api_key_id: number | null
+  models_text: string
+  endpoints_text: string
+  expires_at: string
+  reason: string
+}
 
 const maxModerationTestImages = 1
 const maxModerationTestImageSize = 8 * 1024 * 1024
 const maxVisibleApiKeyRows: number = 3
 const blockedKeywordMax = 10000
+const trustedScopeMaxItems = 100
+const trustedScopeMaxRunes = 200
 const riskThresholdDefaults: Record<string, number> = {
   harassment: 98,
   'harassment/threatening': 90,
@@ -1215,6 +1342,7 @@ const moderationTestImages = ref<string[]>([])
 const moderationTestResult = ref<ContentModerationTestAuditResult | null>(null)
 const inputDetailRow = ref<ContentModerationLog | null>(null)
 let statusTimer: number | null = null
+let settingsBaseline: ContentModerationConfig | null = null
 
 const configForm = reactive({
   enabled: false,
@@ -1252,6 +1380,7 @@ const configForm = reactive({
   keyword_blocking_mode: 'keyword_and_api' as KeywordBlockingMode,
   model_filter_type: 'all' as ContentModerationModelFilterType,
   model_filter_models: [] as string[],
+  trusted_api_keys: [] as TrustedAPIKeyFormRow[],
 })
 
 const pagination = reactive({
@@ -1273,6 +1402,7 @@ const filters = reactive({
 const settingsTabs = computed<Array<{ id: SettingsTab; label: string }>>(() => [
   { id: 'basic', label: t('admin.riskControl.tabs.basic') },
   { id: 'scope', label: t('admin.riskControl.tabs.scope') },
+  { id: 'trustedKeys', label: t('admin.riskControl.tabs.trustedKeys') },
   { id: 'runtime', label: t('admin.riskControl.tabs.runtime') },
   { id: 'response', label: t('admin.riskControl.tabs.response') },
   { id: 'riskThresholds', label: t('admin.riskControl.tabs.riskThresholds') },
@@ -1730,6 +1860,9 @@ function applyConfig(config: ContentModerationConfig) {
   const modelFilter = normalizeModelFilter(config.model_filter)
   configForm.model_filter_type = modelFilter.type
   configForm.model_filter_models = modelFilter.models
+  configForm.trusted_api_keys = Array.isArray(config.trusted_api_keys)
+    ? config.trusted_api_keys.map(trustedAPIKeyToFormRow)
+    : []
 }
 
 async function loadAll() {
@@ -1781,6 +1914,8 @@ async function saveConfig() {
       appStore.showError(t('admin.riskControl.modelFilterModelsRequired'))
       return
     }
+    const trustedAPIKeys = buildTrustedAPIKeysPayload()
+    if (trustedAPIKeys === null) return
     const payload: UpdateContentModerationConfig = {
       enabled: configForm.enabled,
       mode: configForm.mode,
@@ -1809,6 +1944,7 @@ async function saveConfig() {
       blocked_keywords: blockedKeywordList.value,
       keyword_blocking_mode: configForm.keyword_blocking_mode,
       model_filter: modelFilterPayload,
+      trusted_api_keys: trustedAPIKeys,
     }
     const keys = parseApiKeys(configForm.api_keys_text)
     if (!payload.clear_api_key && configForm.api_keys_mode === 'replace' && keys.length === 0) {
@@ -1826,6 +1962,7 @@ async function saveConfig() {
 
     const updated = await adminAPI.riskControl.updateConfig(payload)
     applyConfig(updated)
+    settingsBaseline = null
     settingsOpen.value = false
     appStore.showSuccess(t('admin.riskControl.saved'))
     await Promise.all([loadStatus(true), loadLogs()])
@@ -1926,9 +2063,25 @@ async function clearFlaggedHashes() {
   }
 }
 
-function openSettings() {
+async function openSettings() {
   activeSettingsTab.value = 'basic'
-  settingsOpen.value = true
+  try {
+    const config = await adminAPI.riskControl.getConfig()
+    settingsBaseline = cloneContentModerationConfig(config)
+    applyConfig(config)
+    settingsOpen.value = true
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.loadFailed')))
+  }
+}
+
+function closeSettings() {
+  if (saving.value) return
+  if (settingsBaseline) {
+    applyConfig(settingsBaseline)
+  }
+  settingsBaseline = null
+  settingsOpen.value = false
 }
 
 function reloadLogsFromFirstPage() {
@@ -2116,6 +2269,7 @@ function modeDescription(mode: ModerationMode): string {
 
 function resultLabel(row: ContentModerationLog): string {
   if (row.action === 'cyber_policy') return t('admin.riskControl.action.cyberPolicy')
+  if (row.action === 'trusted_observe') return t('admin.riskControl.action.trustedObserve')
   if (row.action === 'keyword_block') return t('admin.riskControl.action.keywordBlock')
   if (row.action === 'block') return t('admin.riskControl.action.block')
   if (row.action === 'error' || row.error) return t('admin.riskControl.action.error')
@@ -2126,6 +2280,7 @@ function resultLabel(row: ContentModerationLog): string {
 function resultBadgeClass(row: ContentModerationLog): string {
   if (row.action === 'block' || row.action === 'keyword_block' || row.action === 'cyber_policy') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
   if (row.action === 'error' || row.error) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+  if (row.action === 'trusted_observe') return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
   if (row.flagged) return 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-300'
   return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
 }
@@ -2304,6 +2459,109 @@ function clampPercent(value: unknown): number {
 
 function formatThresholdPercent(value: number): string {
   return `${clampPercent(value).toFixed(1)}%`
+}
+
+function addTrustedAPIKey() {
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+  configForm.trusted_api_keys.push({
+    api_key_id: null,
+    models_text: '',
+    endpoints_text: '/v1/responses',
+    expires_at: toDateTimeLocalInput(expiresAt.toISOString()),
+    reason: '',
+  })
+}
+
+function removeTrustedAPIKey(index: number) {
+  configForm.trusted_api_keys.splice(index, 1)
+}
+
+function trustedAPIKeyToFormRow(entry: ContentModerationTrustedAPIKey): TrustedAPIKeyFormRow {
+  return {
+    api_key_id: Number(entry.api_key_id) || null,
+    models_text: Array.isArray(entry.models) ? entry.models.join('\n') : '',
+    endpoints_text: Array.isArray(entry.endpoints) ? entry.endpoints.join('\n') : '',
+    expires_at: entry.expires_at ? toDateTimeLocalInput(entry.expires_at) : '',
+    reason: entry.reason || '',
+  }
+}
+
+function buildTrustedAPIKeysPayload(): ContentModerationTrustedAPIKey[] | null {
+  const entries: ContentModerationTrustedAPIKey[] = []
+  const seen = new Set<number>()
+  for (const row of configForm.trusted_api_keys) {
+    const apiKeyID = Number(row.api_key_id)
+    if (!Number.isSafeInteger(apiKeyID) || apiKeyID <= 0) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyInvalidID'))
+      return null
+    }
+    if (seen.has(apiKeyID)) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyDuplicate', { id: apiKeyID }))
+      return null
+    }
+    const reason = row.reason.trim()
+    if (!reason) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyReasonRequired', { id: apiKeyID }))
+      return null
+    }
+    const expiresAt = row.expires_at ? normalizeDateTimeLocal(row.expires_at) : undefined
+    if (row.expires_at && !expiresAt) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyInvalidExpiry', { id: apiKeyID }))
+      return null
+    }
+    seen.add(apiKeyID)
+    const models = parseTrustedScopeItems(row.models_text, t('admin.riskControl.trustedAPIKeyModels'), apiKeyID)
+    if (models === null) return null
+    const endpoints = parseTrustedScopeItems(row.endpoints_text, t('admin.riskControl.trustedAPIKeyEndpoints'), apiKeyID)
+    if (endpoints === null) return null
+    entries.push({
+      api_key_id: apiKeyID,
+      models,
+      endpoints,
+      expires_at: expiresAt,
+      reason,
+    })
+  }
+  return entries
+}
+
+function parseTrustedScopeItems(value: string, scope: string, apiKeyID: number): string[] | null {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of value.split(/[\r\n,]+/)) {
+    const item = raw.trim()
+    if (!item) continue
+    if (Array.from(item).length > trustedScopeMaxRunes) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyScopeTooLong', { id: apiKeyID, scope, max: trustedScopeMaxRunes }))
+      return null
+    }
+    const key = item.toLowerCase()
+    if (seen.has(key)) continue
+    if (out.length >= trustedScopeMaxItems) {
+      appStore.showError(t('admin.riskControl.trustedAPIKeyScopeTooMany', { id: apiKeyID, scope, max: trustedScopeMaxItems }))
+      return null
+    }
+    seen.add(key)
+    out.push(item)
+  }
+  return out
+}
+
+function isTrustedAPIKeyExpired(row: TrustedAPIKeyFormRow): boolean {
+  if (!row.expires_at) return false
+  const expiresAt = new Date(row.expires_at)
+  return !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= Date.now()
+}
+
+function cloneContentModerationConfig(config: ContentModerationConfig): ContentModerationConfig {
+  return JSON.parse(JSON.stringify(config)) as ContentModerationConfig
+}
+
+function toDateTimeLocalInput(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000)
+  return local.toISOString().slice(0, 16)
 }
 
 function parseBlockedKeywords(value: string): string[] {
