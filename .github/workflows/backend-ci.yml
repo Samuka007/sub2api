@@ -15,7 +15,9 @@ jobs:
       - name: Check deployment scripts
         run: |
           /bin/bash -n deploy/apple-container.sh
+          /bin/bash -n deploy/tests/model-iq-compose-env-test.sh
           /bin/bash deploy/tests/apple-container-test.sh
+          /bin/bash deploy/tests/model-iq-compose-env-test.sh
 
   test:
     runs-on: ubuntu-latest

@@ -55,6 +55,15 @@ services:
       - RUN_MODE=${RUN_MODE:-standard}
 
       # =======================================================================
+      # Model IQ (Codex Radar)
+      # =======================================================================
+      - CODEX_RADAR_ENABLED=${CODEX_RADAR_ENABLED:-false}
+      - CODEX_RADAR_BASE_URL=${CODEX_RADAR_BASE_URL:-https://codexradar.com/api/v1/current}
+      - CODEX_RADAR_API_TOKEN=${CODEX_RADAR_API_TOKEN:-}
+      - CODEX_RADAR_TIMEOUT=${CODEX_RADAR_TIMEOUT:-15s}
+      - CODEX_RADAR_CACHE_TTL=${CODEX_RADAR_CACHE_TTL:-5m}
+
+      # =======================================================================
       # Database Configuration (PostgreSQL)
       # =======================================================================
       - DATABASE_HOST=postgres
