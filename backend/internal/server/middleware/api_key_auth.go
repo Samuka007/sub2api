@@ -117,6 +117,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// apiKey 已加载（含 User/Group）。即便后续因分组停用/Key 停用/用户停用/
 		// IP 限制等早退中断，也让 Ops 错误日志能回退取到 user/group/platform。
 		SetOpsFallbackAPIKey(c, apiKey)
+		NotifyAPIKeyResolved(c, apiKey)
 
 		// ── 3. 基础鉴权（始终执行） ─────────────────────────────────
 
@@ -184,6 +185,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			if !billingInfoRequest {
 				_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
 			}
+			NotifyAPIKeyAccepted(c, apiKey)
 			c.Next()
 			return
 		}
@@ -283,6 +285,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
 		}
 
+		NotifyAPIKeyAccepted(c, apiKey)
 		c.Next()
 	}
 }
