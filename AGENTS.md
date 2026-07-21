@@ -5,7 +5,7 @@
 ## 远端与分支
 
 - 本仓库远端是 **GitHub**：`origin` = `git@github.com:Vitus213/sub2api.git`（个人 fork）。
-- 分支命名：功能分支 `<scope>/<short-slug>`。模型请求 OTEL→Langfuse 透传追踪这个特性（`backend/internal/modeltrace/`、`openspec/changes/add-model-request-otel-tracing/`、`skills/sub2api-model-trace-e2e/`）归在 `otel/` 前缀下，如 `otel/e2e-skill`。OTel 是功能特性名，不是分支体系。
+- 分支命名：功能分支 `<scope>/<short-slug>`。模型请求 OTEL→Langfuse 透传追踪这个特性（`backend/internal/modeltrace/`、`openspec/changes/add-model-request-otel-tracing/`、`skills/sub2api-model-trace-e2e/`）归在 `otel/` 前缀下，如 `otel/model-trace`。OTel 是功能特性名，不是分支体系。
 - **禁止**：把本仓库路由给 `antcode-skill`；本仓库与 AntCode 无关。涉及 PR / Issue / 分支 / pipeline 时使用 `gh` CLI 或 `git`。
 - 提交前 `git status --porcelain` + `git diff --cached --name-only` 自检；未授权不提交。
 
