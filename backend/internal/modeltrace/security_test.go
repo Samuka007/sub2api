@@ -126,6 +126,44 @@ func TestModelTraceFormURLEncodedRedactsSecretFields(t *testing.T) {
 	require.Contains(t, captured, "hello")
 }
 
+// TestModelTraceURLNetworkPathAndSchemeBypass covers round-2 findings:
+// protocol-relative //user:pass@host, JSON-escaped https:\/\/, and non-http
+// schemes (ftp://) with embedded credentials all bypassed the original fix.
+func TestModelTraceURLNetworkPathAndSchemeBypass(t *testing.T) {
+	type tc struct {
+		body string
+		host string
+	}
+	cases := []tc{
+		{`{"url":"//user:netpath-canary@cdn.example/path?token=np-canary#f"}`, "cdn.example"},
+		{`{"url":"https:\/\/user:esc-canary@host.example\/path?token=esc-canary#f"}`, "host.example"},
+		{`{"url":"ftp://user:ftp-canary@ftp.example/file?secret=ftp-q-canary"}`, "ftp.example"},
+	}
+	for _, c := range cases {
+		captured := captureModelContent([]byte(c.body), len(c.body), 4096, capturePolicy{})
+		require.NotContains(t, captured, "netpath-canary", c.body)
+		require.NotContains(t, captured, "np-canary", c.body)
+		require.NotContains(t, captured, "esc-canary", c.body)
+		require.NotContains(t, captured, "ftp-canary", c.body)
+		require.NotContains(t, captured, "ftp-q-canary", c.body)
+		require.Contains(t, captured, c.host, c.body)
+	}
+}
+
+// TestModelTraceFormURLEncodedMalformedFallback covers the ParseQuery failure
+// path: a form body with raw `;` separators (rejected by ParseQuery) must
+// still redact secret-keyed fields via the redactFormKV fallback.
+func TestModelTraceFormURLEncodedMalformedFallback(t *testing.T) {
+	// Raw `;` makes ParseQuery return an error in Go; redactFormKV must
+	// still scrub api_key and access_token.
+	raw := []byte("model=gpt-4;api_key=semi-canary;access_token=semi-token-canary;prompt=hi")
+	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	require.NotContains(t, captured, "semi-canary")
+	require.NotContains(t, captured, "semi-token-canary")
+	require.Contains(t, captured, "REDACTED")
+	require.Contains(t, captured, "gpt-4")
+}
+
 // TestModelTraceSanitizeErrorScrubsCredentials verifies the error sanitizer
 // used for both synchronous attempt status and async execution status/events.
 // Transport errors may embed URLs with userinfo, query tokens, or

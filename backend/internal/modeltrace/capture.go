@@ -25,7 +25,7 @@ var (
 	authorizationLine  = regexp.MustCompile(`(?im)\b(proxy-authorization|authorization)\s*:\s*[^\r\n]*`)
 	cookieLine         = regexp.MustCompile(`(?im)\b(set-cookie|cookie)\s*:\s*[^\r\n]*`)
 	dataURLPattern     = regexp.MustCompile(`(?i)data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9_+/=-]+)`)
-	absoluteURLPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>\\]+`)
+	absoluteURLPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|//)[^\s"'<>\\]+`)
 	camelCaseBoundary  = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 )
 
@@ -69,6 +69,9 @@ func captureModelContentWithType(raw []byte, originalBytes, limit int, contentTy
 	declaredType := strings.ToLower(strings.TrimSpace(strings.SplitN(trimmedContentType, ";", 2)[0]))
 	mediaType, params, err := mime.ParseMediaType(trimmedContentType)
 	if err != nil {
+		if strings.EqualFold(declaredType, "application/x-www-form-urlencoded") {
+			return sanitizeFormURLEncoded(raw, originalBytes, limit, policy)
+		}
 		if !strings.HasPrefix(declaredType, "multipart/") {
 			return captureModelContent(raw, originalBytes, limit, policy)
 		}
@@ -287,7 +290,10 @@ func needsStructuredSanitization(raw []byte) bool {
 		// Valid JSON without secret/media keys may still carry credentials
 		// embedded in URL string values (e.g. {"url":"https://user:pass@host"}).
 		// Force structured sanitization so sanitizeJSONValue can scrub them.
-		return bytes.Contains(raw, []byte("://"))
+		// Match literal "://", JSON-escaped ":\\/\\/", and network-path "//".
+		return bytes.Contains(raw, []byte("://")) ||
+			bytes.Contains(raw, []byte(":\\/\\/")) ||
+			bytes.Contains(raw, []byte("//"))
 	}
 	return bytesContainsFold(raw, []byte("authorization:")) ||
 		bytesContainsFold(raw, []byte("proxy-authorization:")) ||
@@ -554,7 +560,14 @@ func sanitizeUnstructuredText(value string, policy capturePolicy) string {
 
 func sanitizeCapturedURL(raw string) string {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil {
+		return "[URL OMITTED]"
+	}
+	// Network-path references (//host/path) have an empty scheme but a host.
+	// Scheme-bearing URLs (https://, ftp://, etc.) also qualify. In both
+	// cases we strip userinfo, query and fragment to prevent credential
+	// leakage regardless of transport protocol.
+	if parsed.Host == "" {
 		return "[URL OMITTED]"
 	}
 	parsed.User = nil
@@ -604,10 +617,10 @@ func sanitizeTraceError(msg string) string {
 func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capturePolicy) string {
 	values, err := url.ParseQuery(string(raw))
 	if err != nil {
-		// Fall back to conservative unstructured sanitization on parse failure
-		// so credentials are never exported raw.
-		sanitized := sanitizeUnstructuredText(string(validUTF8Prefix(raw, len(raw))), policy)
-		return boundCapture([]byte(sanitized), originalBytes, limit)
+		// ParseQuery rejects some malformed forms (e.g. raw `;` separators).
+		// Fall back to conservative redaction of form-style key=value pairs
+		// so secret fields are never exported raw even on parse failure.
+		return boundCapture([]byte(redactFormKV(string(raw))), originalBytes, limit)
 	}
 	for field := range values {
 		if isSecretKey(field) {
@@ -616,6 +629,29 @@ func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capture
 	}
 	encoded := values.Encode()
 	return boundCapture([]byte(encoded), originalBytes, limit)
+}
+
+// redactFormKV conservatively redacts values of secret-named keys in a
+// form-style "key=value&key2=value2" body when url.ParseQuery fails. It
+// splits on & and = and replaces the value of any field whose name matches
+// isSecretKey with [REDACTED]. This ensures malformed form bodies cannot
+// leak credentials through the ParseQuery fallback path.
+func redactFormKV(body string) string {
+	// Split on both & and ; since ParseQuery treats both as separators and
+	// the failure path may receive bodies using either delimiter.
+	normalized := strings.ReplaceAll(body, ";", "&")
+	pairs := strings.Split(normalized, "&")
+	for i, pair := range pairs {
+		eq := strings.IndexByte(pair, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(pair[:eq])
+		if isSecretKey(key) {
+			pairs[i] = key + "=" + redactedValue
+		}
+	}
+	return strings.Join(pairs, "&")
 }
 
 // boundCapture applies the common byte-limit and truncation-marker logic to
