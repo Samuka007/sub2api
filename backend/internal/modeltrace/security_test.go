@@ -164,6 +164,51 @@ func TestModelTraceFormURLEncodedMalformedFallback(t *testing.T) {
 	require.Contains(t, captured, "gpt-4")
 }
 
+// TestModelTraceURLUnicodeEscapeBypass covers the round-3 finding that
+// JSON \u002f (slash) escape sequences bypassed the needsStructuredSanitization
+// trigger. The decoder normalizes \u002f to /, but only if the structured
+// path runs at all.
+func TestModelTraceURLUnicodeEscapeBypass(t *testing.T) {
+	body := `{"url":"https:\u002f\u002fuser:uni-canary@host.example/path?token=uni-q-canary#f"}`
+	captured := captureModelContent([]byte(body), len(body), 4096, capturePolicy{})
+	require.NotContains(t, captured, "uni-canary")
+	require.NotContains(t, captured, "uni-q-canary")
+	require.Contains(t, captured, "host.example")
+}
+
+// TestModelTraceFormPercentEncodedKeyBypass covers the round-3 finding that
+// percent-encoded form keys (api%5Fkey) bypassed isSecretKey in the
+// redactFormKV fallback because the key was not QueryUnescaped first.
+func TestModelTraceFormPercentEncodedKeyBypass(t *testing.T) {
+	// %5F = underscore; api%5Fkey decodes to api_key which isSecretKey matches.
+	// `;` makes ParseQuery fail so the redactFormKV fallback is exercised.
+	raw := []byte("model=gpt-4;api%5Fkey=pct-canary;prompt=hi")
+	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	require.NotContains(t, captured, "pct-canary")
+	require.Contains(t, captured, "REDACTED")
+	require.Contains(t, captured, "gpt-4")
+}
+
+// TestModelTraceHostlessURLWithoutCredsPreserved covers the N1 finding:
+// file:///path has an empty host but no credentials, query, or fragment.
+// It must be preserved for observability rather than replaced with
+// [URL OMITTED].
+func TestModelTraceHostlessURLWithoutCredsPreserved(t *testing.T) {
+	fileURL := `{"url":"file:///tmp/data.json"}`
+	captured := captureModelContent([]byte(fileURL), len(fileURL), 4096, capturePolicy{})
+	require.Contains(t, captured, "file:///tmp/data.json")
+	require.NotContains(t, captured, "[URL OMITTED]")
+}
+
+// TestModelTraceNonURLTextWithDoubleSlashPreserved covers the N2 finding:
+// a JSON string value like "a//b?revision=1" is not a URL and must not
+// have its query-like suffix stripped by the network-path scrubber.
+func TestModelTraceNonURLTextWithDoubleSlashPreserved(t *testing.T) {
+	pathText := `{"path":"a//b?revision=1"}`
+	captured := captureModelContent([]byte(pathText), len(pathText), 4096, capturePolicy{})
+	require.Contains(t, captured, "a//b?revision=1")
+}
+
 // TestModelTraceSanitizeErrorScrubsCredentials verifies the error sanitizer
 // used for both synchronous attempt status and async execution status/events.
 // Transport errors may embed URLs with userinfo, query tokens, or

@@ -25,7 +25,7 @@ var (
 	authorizationLine  = regexp.MustCompile(`(?im)\b(proxy-authorization|authorization)\s*:\s*[^\r\n]*`)
 	cookieLine         = regexp.MustCompile(`(?im)\b(set-cookie|cookie)\s*:\s*[^\r\n]*`)
 	dataURLPattern     = regexp.MustCompile(`(?i)data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9_+/=-]+)`)
-	absoluteURLPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|//)[^\s"'<>\\]+`)
+	absoluteURLPattern = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://|(?:^|[^a-z0-9])//)[^\s"'<>\\]+`)
 	camelCaseBoundary  = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 )
 
@@ -287,13 +287,13 @@ func needsStructuredSanitization(raw []byte) bool {
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-		// Valid JSON without secret/media keys may still carry credentials
-		// embedded in URL string values (e.g. {"url":"https://user:pass@host"}).
-		// Force structured sanitization so sanitizeJSONValue can scrub them.
-		// Match literal "://", JSON-escaped ":\\/\\/", and network-path "//".
-		return bytes.Contains(raw, []byte("://")) ||
-			bytes.Contains(raw, []byte(":\\/\\/")) ||
-			bytes.Contains(raw, []byte("//"))
+		// Any root JSON object/array may carry credentials in URL string
+		// values under non-secret keys. Always run the structured sanitizer
+		// so sanitizeJSONValue scrubs them — the JSON decoder normalizes
+		// escape sequences (\u002f, \/) into literal characters that the
+		// URL pattern can match. This is security-first: the modest parse
+		// cost is acceptable given tracing is already opt-in and bounded.
+		return true
 	}
 	return bytesContainsFold(raw, []byte("authorization:")) ||
 		bytesContainsFold(raw, []byte("proxy-authorization:")) ||
@@ -563,17 +563,25 @@ func sanitizeCapturedURL(raw string) string {
 	if err != nil {
 		return "[URL OMITTED]"
 	}
-	// Network-path references (//host/path) have an empty scheme but a host.
-	// Scheme-bearing URLs (https://, ftp://, etc.) also qualify. In both
-	// cases we strip userinfo, query and fragment to prevent credential
-	// leakage regardless of transport protocol.
-	if parsed.Host == "" {
-		return "[URL OMITTED]"
+	hasAuthMaterial := parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != ""
+	// If the URL carries no userinfo, query, or fragment, there is nothing
+	// to scrub — preserve it for observability (e.g. file:///path, which
+	// legitimately has an empty host). Only strip auth material when it
+	// exists.
+	if !hasAuthMaterial {
+		return raw
 	}
 	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
+	// Host may be empty for hostless URIs like file:///path — reconstruct
+	// without the stripped auth material.
+	if parsed.Host == "" {
+		return parsed.Scheme + "://" + parsed.Path
+	}
 	return parsed.String()
 }
 
@@ -646,9 +654,13 @@ func redactFormKV(body string) string {
 		if eq < 0 {
 			continue
 		}
-		key := strings.TrimSpace(pair[:eq])
-		if isSecretKey(key) {
-			pairs[i] = key + "=" + redactedValue
+		rawKey := strings.TrimSpace(pair[:eq])
+		decodedKey, decErr := url.QueryUnescape(rawKey)
+		if decErr != nil {
+			decodedKey = rawKey
+		}
+		if isSecretKey(decodedKey) {
+			pairs[i] = rawKey + "=" + redactedValue
 		}
 	}
 	return strings.Join(pairs, "&")
