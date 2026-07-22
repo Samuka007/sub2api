@@ -41,7 +41,7 @@ const (
 	defaultMediaBytes       = 1 << 20
 	defaultExportTimeout    = 10 * time.Second
 	maxCaptureBytes         = 8 << 20
-	defaultMaxQueueSize     = 128
+	defaultMaxQueueSize     = 256
 	defaultMaxExportBatch   = 16
 	defaultBatchTimeout     = 1000 * time.Millisecond
 	exportHealthLogInterval = time.Minute

@@ -277,6 +277,73 @@ func TestModelTraceExporterFailOpen(t *testing.T) {
 	})
 }
 
+func TestModelTraceProductionQueueRetainsMaximumAsyncBatchBurst(t *testing.T) {
+	const maximumAsyncBatchItems = 200
+	exporter := &blockingCountingSpanExporter{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	processor := sdktrace.NewBatchSpanProcessor(
+		failOpenExporter{delegate: exporter},
+		sdktrace.WithMaxQueueSize(defaultMaxQueueSize),
+		sdktrace.WithMaxExportBatchSize(defaultMaxExportBatch),
+		sdktrace.WithBatchTimeout(defaultBatchTimeout),
+		sdktrace.WithExportTimeout(defaultExportTimeout),
+	)
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := provider.Tracer(tracerName)
+
+	// Fill one export batch and block it in the exporter. The following burst is
+	// the worst case produced by a maximum-sized async image job.
+	for i := 0; i < defaultMaxExportBatch; i++ {
+		_, span := tracer.Start(context.Background(), "preexisting")
+		span.End()
+	}
+	select {
+	case <-exporter.entered:
+	case <-time.After(time.Second):
+		t.Fatal("batch exporter did not start")
+	}
+	for i := 0; i < maximumAsyncBatchItems; i++ {
+		_, span := tracer.Start(context.Background(), "model.async.execution")
+		span.End()
+	}
+	close(exporter.release)
+	require.NoError(t, provider.Shutdown(context.Background()))
+	require.Equal(t, defaultMaxExportBatch+maximumAsyncBatchItems, exporter.count())
+}
+
+type blockingCountingSpanExporter struct {
+	mu       sync.Mutex
+	entered  chan struct{}
+	release  chan struct{}
+	exported int
+}
+
+func (e *blockingCountingSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	select {
+	case e.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	e.mu.Lock()
+	e.exported += len(spans)
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *blockingCountingSpanExporter) Shutdown(context.Context) error { return nil }
+
+func (e *blockingCountingSpanExporter) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.exported
+}
+
 type capturingImageTaskStore struct {
 	saved *service.ImageTaskRecord
 }
