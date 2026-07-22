@@ -51,6 +51,8 @@ type accountRepository struct {
 	schedulerCache service.SchedulerCache
 }
 
+var _ service.QuotaRecoveryAccountRepository = (*accountRepository)(nil)
+
 var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_primary_",
 	"codex_secondary_",
@@ -1963,6 +1965,138 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 		return nil, err
 	}
 	return r.accountsToService(ctx, accounts)
+}
+
+func quotaRecoveryCandidatePredicates(now time.Time) []dbpredicate.Account {
+	return []dbpredicate.Account{
+		dbaccount.DeletedAtIsNil(),
+		dbaccount.TypeEQ(service.AccountTypeOAuth),
+		dbaccount.PlatformIn(service.PlatformOpenAI, service.PlatformAnthropic),
+		dbaccount.StatusEQ(service.StatusActive),
+		dbaccount.SchedulableEQ(true),
+		dbaccount.RateLimitedAtNotNil(),
+		dbaccount.RateLimitResetAtGT(now),
+	}
+}
+
+// QuotaRecoveryCandidateUpperBound fixes the largest candidate ID visible at
+// cycle start so a continuous stream of newly inserted accounts cannot make a
+// single keyset scan chase the tail forever.
+func (r *accountRepository) QuotaRecoveryCandidateUpperBound(ctx context.Context, now time.Time) (int64, error) {
+	id, err := r.client.Account.Query().
+		Where(quotaRecoveryCandidatePredicates(now)...).
+		Order(dbent.Desc(dbaccount.FieldID)).
+		FirstID(ctx)
+	if dbent.IsNotFound(err) {
+		return 0, nil
+	}
+	return id, err
+}
+
+// ListQuotaRecoveryCandidates returns one deterministic, cycle-bounded keyset
+// page. Callers advance afterID to the largest ID returned until a short page is
+// reached; throughID remains fixed for the whole cycle.
+func (r *accountRepository) ListQuotaRecoveryCandidates(ctx context.Context, now time.Time, afterID, throughID int64, limit int) ([]service.Account, error) {
+	if limit <= 0 || throughID <= 0 || afterID >= throughID {
+		return []service.Account{}, nil
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+	predicates := quotaRecoveryCandidatePredicates(now)
+	predicates = append(predicates,
+		dbaccount.IDGT(afterID),
+		dbaccount.IDLTE(throughID),
+	)
+	accounts, err := r.client.Account.Query().
+		Where(predicates...).
+		Order(dbent.Asc(dbaccount.FieldID)).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.accountsToService(ctx, accounts)
+}
+
+// ClearRateLimitIfUnchanged clears only the account-level rate-limit generation
+// and account version observed by a recovery probe. The version guard prevents
+// an old provider response from clearing a limit after credentials or identity
+// changed. The conditional mutation and scheduler outbox event are one statement
+// so neither can commit without the other.
+func (r *accountRepository) ClearRateLimitIfUnchanged(
+	ctx context.Context,
+	observation service.QuotaRecoveryObservation,
+) (bool, error) {
+	if r == nil || r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH credential_owner AS MATERIALIZED (
+			SELECT owner.id
+			FROM accounts AS owner
+			WHERE owner.id = $5
+				AND owner.id <> $1
+				AND owner.deleted_at IS NULL
+				AND owner.updated_at = $6
+				AND owner.platform = 'openai'
+				AND owner.type = 'oauth'
+				AND owner.parent_account_id IS NULL
+			FOR SHARE
+		),
+		recovery_target AS MATERIALIZED (
+			SELECT $1::bigint AS account_id, $5::bigint AS credential_owner_id
+			WHERE $5 = $1
+			UNION ALL
+			SELECT $1::bigint, credential_owner.id
+			FROM credential_owner
+		),
+		updated AS (
+			UPDATE accounts AS a
+			SET rate_limited_at = NULL,
+				rate_limit_reset_at = NULL,
+				updated_at = NOW()
+				FROM recovery_target AS target
+				WHERE a.id = target.account_id
+					AND a.deleted_at IS NULL
+					AND a.status = 'active'
+					AND a.schedulable = TRUE
+					AND a.type = 'oauth'
+					AND a.platform IN ('openai', 'anthropic')
+					AND a.rate_limited_at = $2
+					AND a.rate_limit_reset_at = $3
+					AND a.updated_at = $4
+					AND (
+						(target.credential_owner_id = a.id AND a.parent_account_id IS NULL)
+						OR a.parent_account_id = target.credential_owner_id
+					)
+				RETURNING a.id
+			)
+			INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+			SELECT $7, updated.id, NULL, NULL FROM updated
+		`,
+		observation.AccountID,
+		observation.RateLimitedAt,
+		observation.RateLimitResetAt,
+		observation.AccountUpdatedAt,
+		observation.CredentialOwnerID,
+		observation.CredentialOwnerUpdatedAt,
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if updated == 0 {
+		return false, nil
+	}
+	// Keep the immediate cache refresh inside the caller's deadline. The atomic
+	// outbox row remains the durable fallback when that best-effort refresh times out.
+	r.syncSchedulerAccountSnapshot(ctx, observation.AccountID)
+	return true, nil
 }
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {

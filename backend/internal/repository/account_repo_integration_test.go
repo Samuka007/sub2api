@@ -83,7 +83,7 @@ type failAtomicSchedulerOutboxSQLExecutor struct {
 }
 
 func (e *failAtomicSchedulerOutboxSQLExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if strings.Contains(query, "WITH updated AS") && strings.Contains(query, "INSERT INTO scheduler_outbox") && len(args) > 0 {
+	if strings.Contains(query, "updated AS (") && strings.Contains(query, "INSERT INTO scheduler_outbox") && len(args) > 0 {
 		args = append([]any(nil), args...)
 		args[len(args)-1] = nil // event_type is NOT NULL; the whole statement must roll back.
 	}

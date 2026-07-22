@@ -17,6 +17,7 @@ func TestClaudeUsageResponse_FableWindowDecoding(t *testing.T) {
 }`
 		var resp ClaudeUsageResponse
 		require.NoError(t, json.Unmarshal([]byte(raw), &resp))
+		require.NotNil(t, resp.SevenDayOverageIncluded)
 		require.Equal(t, 56.0, resp.SevenDayOverageIncluded.Utilization)
 		require.Equal(t, "2026-07-08T03:00:00Z", resp.SevenDayOverageIncluded.ResetsAt)
 	})
@@ -25,6 +26,13 @@ func TestClaudeUsageResponse_FableWindowDecoding(t *testing.T) {
 		raw := `{"five_hour": {"utilization": 12.0, "resets_at": "2026-07-03T10:00:00Z"}}`
 		var resp ClaudeUsageResponse
 		require.NoError(t, json.Unmarshal([]byte(raw), &resp))
+		require.Nil(t, resp.SevenDayOverageIncluded)
+	})
+
+	t.Run("present empty object", func(t *testing.T) {
+		var resp ClaudeUsageResponse
+		require.NoError(t, json.Unmarshal([]byte(`{"seven_day_overage_included": {}}`), &resp))
+		require.NotNil(t, resp.SevenDayOverageIncluded)
 		require.Zero(t, resp.SevenDayOverageIncluded.Utilization)
 		require.Empty(t, resp.SevenDayOverageIncluded.ResetsAt)
 	})
@@ -37,7 +45,7 @@ func TestBuildUsageInfo_SevenDayFable(t *testing.T) {
 	resetAt := now.Add(72 * time.Hour).UTC().Truncate(time.Second)
 	var resp ClaudeUsageResponse
 	resp.FiveHour.Utilization = 10
-	resp.SevenDayOverageIncluded = ClaudeUsageWindow{
+	resp.SevenDayOverageIncluded = &ClaudeUsageWindow{
 		Utilization: 88,
 		ResetsAt:    resetAt.Format(time.RFC3339),
 	}

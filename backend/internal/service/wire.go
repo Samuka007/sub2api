@@ -170,6 +170,15 @@ func ProvideAccountUsageService(
 	return service
 }
 
+// ProvideQuotaRecoveryChecker binds the concrete read-only quota services to
+// the provider-neutral Hermes checker interfaces.
+func ProvideQuotaRecoveryChecker(
+	openAIQuotaService *OpenAIQuotaService,
+	accountUsageService *AccountUsageService,
+) *QuotaRecoveryChecker {
+	return NewQuotaRecoveryChecker(openAIQuotaService, accountUsageService)
+}
+
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
@@ -731,6 +740,8 @@ var ProviderSet = wire.NewSet(
 	NewAntigravityGatewayService,
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
+	ProvideQuotaRecoveryChecker,
+	ProvideQuotaRecoveryService,
 	ProvideAccountTestService,
 	ProvideUpstreamBillingProbeService,
 	ProvideSettingService,

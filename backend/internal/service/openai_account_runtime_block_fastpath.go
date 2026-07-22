@@ -13,10 +13,18 @@ const (
 	openAIAccountStateUpdateTimeout       = 5 * time.Second
 	openAIOAuth429FallbackCooldown        = 5 * time.Second
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
+	openAIQuotaRuntimeBlockReason         = "429"
+	openAIQuotaRuntimeResetTolerance      = time.Second
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormMaxAccountSwitches = 1
 )
+
+type openAIAccountRuntimeBlockMetadata struct {
+	quotaUntil      time.Time
+	quotaObservedAt time.Time
+	nonQuotaUntil   time.Time
+}
 
 // OpenAIOAuth429FailoverState tracks the request-local follow-up budget after
 // the first Grok OAuth 429. Once that 429 occurs, exactly one different account
@@ -167,7 +175,7 @@ func (s *OpenAIGatewayService) openAIAccountRuntimeBlockLock(accountID int64) *s
 	return mu
 }
 
-func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, _ string) (uint64, bool) {
+func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, reason string) (uint64, bool) {
 	generation := s.openaiAccountRuntimeBlockSequence.Add(1)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, generation)
 	now := time.Now()
@@ -181,6 +189,7 @@ func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, un
 		if !loaded {
 			actual, stored := s.openaiAccountRuntimeBlockUntil.LoadOrStore(account.ID, blockUntil)
 			if !stored {
+				s.storeAccountRuntimeBlockMetadataLocked(account.ID, time.Time{}, blockUntil, reason, now)
 				return generation, true
 			}
 			current = actual
@@ -189,17 +198,50 @@ func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, un
 		currentUntil, ok := current.(time.Time)
 		if !ok || currentUntil.IsZero() {
 			if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+				s.storeAccountRuntimeBlockMetadataLocked(account.ID, time.Time{}, blockUntil, reason, now)
 				return generation, true
 			}
 			continue
 		}
 		if !blockUntil.After(currentUntil) {
+			s.storeAccountRuntimeBlockMetadataLocked(account.ID, currentUntil, blockUntil, reason, now)
 			return generation, false
 		}
 		if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+			s.storeAccountRuntimeBlockMetadataLocked(account.ID, currentUntil, blockUntil, reason, now)
 			return generation, true
 		}
 	}
+}
+
+func (s *OpenAIGatewayService) storeAccountRuntimeBlockMetadataLocked(
+	accountID int64,
+	currentUntil time.Time,
+	blockUntil time.Time,
+	reason string,
+	observedAt time.Time,
+) {
+	metadata := openAIAccountRuntimeBlockMetadata{}
+	if currentUntil.After(observedAt) {
+		value, ok := s.openaiAccountRuntimeBlockMetadata.Load(accountID)
+		stored, valid := value.(openAIAccountRuntimeBlockMetadata)
+		if ok && valid {
+			metadata = stored
+		} else {
+			// An active block without trustworthy ownership remains non-quota
+			// until its existing deadline, so recovery cannot clear it.
+			metadata.nonQuotaUntil = currentUntil
+		}
+	}
+	if strings.TrimSpace(reason) == openAIQuotaRuntimeBlockReason {
+		// Bind recovery to the latest 429 observation, which is also the
+		// generation persisted by the account rate-limit write.
+		metadata.quotaUntil = blockUntil
+		metadata.quotaObservedAt = observedAt
+	} else if blockUntil.After(metadata.nonQuotaUntil) {
+		metadata.nonQuotaUntil = blockUntil
+	}
+	s.openaiAccountRuntimeBlockMetadata.Store(accountID, metadata)
 }
 
 func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
@@ -210,7 +252,161 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockMetadata.Delete(accountID)
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+}
+
+// AccountSchedulingBlockGeneration captures the local block generation used by
+// quota recovery. A later BlockAccountScheduling call always advances it.
+func (s *OpenAIGatewayService) AccountSchedulingBlockGeneration(accountID int64) uint64 {
+	if s == nil || accountID <= 0 {
+		return 0
+	}
+	value, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if !ok {
+		return 0
+	}
+	generation, _ := value.(uint64)
+	return generation
+}
+
+// GuardAccountSchedulingBlockGeneration serializes a quota-recovery CAS with
+// local 429 block installation. Callers must invoke the returned release
+// function after the persistent CAS finishes.
+func (s *OpenAIGatewayService) GuardAccountSchedulingBlockGeneration(accountID int64, observedGeneration uint64) (func(), bool) {
+	if s == nil || accountID <= 0 {
+		return nil, false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+
+	value, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if ok {
+		generation, valid := value.(uint64)
+		if !valid || generation != observedGeneration {
+			mu.Unlock()
+			return nil, false
+		}
+	} else if observedGeneration != 0 {
+		mu.Unlock()
+		return nil, false
+	}
+	return mu.Unlock, true
+}
+
+// GuardAccountSchedulingBlockForQuotaRecovery additionally binds the observed
+// generation to the candidate DB timestamps and a quota-owned runtime block.
+func (s *OpenAIGatewayService) GuardAccountSchedulingBlockForQuotaRecovery(
+	accountID int64,
+	observedGeneration uint64,
+	observedLimitedAt time.Time,
+	observedResetAt time.Time,
+) (func(), bool) {
+	if s == nil || accountID <= 0 {
+		return nil, false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	if !s.accountSchedulingBlockGenerationMatchesLocked(accountID, observedGeneration) ||
+		!s.accountSchedulingBlockMatchesQuotaCandidateLocked(accountID, observedLimitedAt, observedResetAt) {
+		mu.Unlock()
+		return nil, false
+	}
+	return mu.Unlock, true
+}
+
+// ClearAccountSchedulingBlockIfGeneration clears the local bridge only when no
+// newer scheduling block was recorded after the caller captured its generation.
+func (s *OpenAIGatewayService) ClearAccountSchedulingBlockIfGeneration(accountID int64, observedGeneration uint64) bool {
+	if s == nil || accountID <= 0 {
+		return false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	value, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if ok {
+		generation, valid := value.(uint64)
+		if !valid || generation != observedGeneration {
+			return false
+		}
+	} else if observedGeneration != 0 {
+		return false
+	}
+	if _, blocked := s.openaiAccountRuntimeBlockUntil.Load(accountID); !blocked {
+		return false
+	}
+	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockMetadata.Delete(accountID)
+	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+	return true
+}
+
+func (s *OpenAIGatewayService) ClearAccountSchedulingBlockForQuotaRecovery(
+	accountID int64,
+	observedGeneration uint64,
+	observedLimitedAt time.Time,
+	observedResetAt time.Time,
+) bool {
+	if s == nil || accountID <= 0 {
+		return false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	if !s.accountSchedulingBlockGenerationMatchesLocked(accountID, observedGeneration) ||
+		!s.accountSchedulingBlockMatchesQuotaCandidateLocked(accountID, observedLimitedAt, observedResetAt) {
+		return false
+	}
+	if _, blocked := s.openaiAccountRuntimeBlockUntil.Load(accountID); !blocked {
+		return false
+	}
+	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockMetadata.Delete(accountID)
+	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+	return true
+}
+
+func (s *OpenAIGatewayService) accountSchedulingBlockGenerationMatchesLocked(accountID int64, observedGeneration uint64) bool {
+	value, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	if !ok {
+		return observedGeneration == 0
+	}
+	generation, valid := value.(uint64)
+	return valid && generation == observedGeneration
+}
+
+func (s *OpenAIGatewayService) accountSchedulingBlockMatchesQuotaCandidateLocked(
+	accountID int64,
+	observedLimitedAt time.Time,
+	observedResetAt time.Time,
+) bool {
+	value, blocked := s.openaiAccountRuntimeBlockUntil.Load(accountID)
+	if !blocked {
+		return true
+	}
+	blockUntil, valid := value.(time.Time)
+	now := time.Now()
+	if !valid || blockUntil.IsZero() {
+		return false
+	}
+	if !blockUntil.After(now) {
+		return true
+	}
+	metadataValue, ok := s.openaiAccountRuntimeBlockMetadata.Load(accountID)
+	metadata, valid := metadataValue.(openAIAccountRuntimeBlockMetadata)
+	if !ok || !valid || metadata.quotaUntil.IsZero() || metadata.quotaObservedAt.IsZero() || observedLimitedAt.IsZero() || observedResetAt.IsZero() {
+		return false
+	}
+	if metadata.nonQuotaUntil.After(now) || metadata.quotaObservedAt.After(observedLimitedAt) {
+		return false
+	}
+	resetDelta := metadata.quotaUntil.Sub(observedResetAt)
+	if resetDelta < 0 {
+		resetDelta = -resetDelta
+	}
+	return resetDelta <= openAIQuotaRuntimeResetTolerance
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
@@ -227,6 +423,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	cooldownUntil, ok := value.(time.Time)
 	if !ok || cooldownUntil.IsZero() {
 		s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+		s.openaiAccountRuntimeBlockMetadata.Delete(account.ID)
 		s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 		return false
 	}
@@ -234,6 +431,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 		return true
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+	s.openaiAccountRuntimeBlockMetadata.Delete(account.ID)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 	return false
 }

@@ -125,6 +125,27 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// QuotaRecoveryObservation binds an upstream result to the account state and
+// credential-owning account version used for that request.
+type QuotaRecoveryObservation struct {
+	AccountID                int64
+	RateLimitedAt            time.Time
+	RateLimitResetAt         time.Time
+	AccountUpdatedAt         time.Time
+	CredentialOwnerID        int64
+	CredentialOwnerUpdatedAt time.Time
+}
+
+// QuotaRecoveryAccountRepository exposes the narrowly scoped persistence
+// operations used by quota-recovery workers. Keeping this separate from
+// AccountRepository avoids making unrelated repository test doubles implement
+// background-reconciliation capabilities they do not use.
+type QuotaRecoveryAccountRepository interface {
+	QuotaRecoveryCandidateUpperBound(ctx context.Context, now time.Time) (int64, error)
+	ListQuotaRecoveryCandidates(ctx context.Context, now time.Time, afterID, throughID int64, limit int) ([]Account, error)
+	ClearRateLimitIfUnchanged(ctx context.Context, observation QuotaRecoveryObservation) (bool, error)
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

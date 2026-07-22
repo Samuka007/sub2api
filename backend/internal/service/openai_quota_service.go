@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,73 @@ type OpenAIRateLimitWindow struct {
 	LimitWindowSeconds int64   `json:"limit_window_seconds"`
 	ResetAfterSeconds  int64   `json:"reset_after_seconds"`
 	ResetAt            int64   `json:"reset_at"`
+
+	decodedFromJSON          bool
+	usedPercentPresent       bool
+	limitWindowPresent       bool
+	resetAfterSecondsPresent bool
+	resetAtPresent           bool
+}
+
+func (w *OpenAIRateLimitWindow) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		UsedPercent        *float64 `json:"used_percent"`
+		LimitWindowSeconds *int64   `json:"limit_window_seconds"`
+		ResetAfterSeconds  *int64   `json:"reset_after_seconds"`
+		ResetAt            *int64   `json:"reset_at"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*w = OpenAIRateLimitWindow{decodedFromJSON: true}
+	if decoded.UsedPercent != nil {
+		w.UsedPercent = *decoded.UsedPercent
+		w.usedPercentPresent = true
+	}
+	if decoded.LimitWindowSeconds != nil {
+		w.LimitWindowSeconds = *decoded.LimitWindowSeconds
+		w.limitWindowPresent = true
+	}
+	if decoded.ResetAfterSeconds != nil {
+		w.ResetAfterSeconds = *decoded.ResetAfterSeconds
+		w.resetAfterSecondsPresent = true
+	}
+	if decoded.ResetAt != nil {
+		w.ResetAt = *decoded.ResetAt
+		w.resetAtPresent = true
+	}
+	return nil
+}
+
+func (w *OpenAIRateLimitWindow) hasQuotaRecoveryEvidence() bool {
+	if w == nil {
+		return false
+	}
+	if !w.decodedFromJSON {
+		return true
+	}
+	return w.usedPercentPresent &&
+		w.limitWindowPresent &&
+		(w.resetAtPresent || w.resetAfterSecondsPresent)
+}
+
+func (w *OpenAIRateLimitWindow) hasValidQuotaRecoveryReset() bool {
+	if w == nil {
+		return false
+	}
+	if !w.decodedFromJSON {
+		if w.ResetAt < 0 || w.ResetAfterSeconds < 0 {
+			return false
+		}
+		return w.ResetAt > 0 || w.ResetAfterSeconds >= 0
+	}
+	if w.resetAtPresent && w.ResetAt <= 0 {
+		return false
+	}
+	if w.resetAfterSecondsPresent && w.ResetAfterSeconds < 0 {
+		return false
+	}
+	return w.resetAtPresent || w.resetAfterSecondsPresent
 }
 
 // OpenAIRateLimit is a rate-limit envelope (primary + optional secondary window).
@@ -52,6 +120,40 @@ type OpenAIRateLimit struct {
 	LimitReached    bool                   `json:"limit_reached"`
 	PrimaryWindow   *OpenAIRateLimitWindow `json:"primary_window,omitempty"`
 	SecondaryWindow *OpenAIRateLimitWindow `json:"secondary_window,omitempty"`
+
+	decodedFromJSON     bool
+	allowedPresent      bool
+	limitReachedPresent bool
+}
+
+func (l *OpenAIRateLimit) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Allowed         *bool                  `json:"allowed"`
+		LimitReached    *bool                  `json:"limit_reached"`
+		PrimaryWindow   *OpenAIRateLimitWindow `json:"primary_window"`
+		SecondaryWindow *OpenAIRateLimitWindow `json:"secondary_window"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*l = OpenAIRateLimit{
+		PrimaryWindow:   decoded.PrimaryWindow,
+		SecondaryWindow: decoded.SecondaryWindow,
+		decodedFromJSON: true,
+	}
+	if decoded.Allowed != nil {
+		l.Allowed = *decoded.Allowed
+		l.allowedPresent = true
+	}
+	if decoded.LimitReached != nil {
+		l.LimitReached = *decoded.LimitReached
+		l.limitReachedPresent = true
+	}
+	return nil
+}
+
+func (l *OpenAIRateLimit) hasQuotaRecoveryEvidence() bool {
+	return l != nil && (!l.decodedFromJSON || (l.allowedPresent && l.limitReachedPresent))
 }
 
 // OpenAIAdditionalRateLimit describes a per-feature rate limit (e.g. Codex Spark).

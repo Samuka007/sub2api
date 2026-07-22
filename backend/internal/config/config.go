@@ -99,6 +99,7 @@ type Config struct {
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
 }
 
 type LogConfig struct {
@@ -189,6 +190,21 @@ type IdempotencyConfig struct {
 	CleanupIntervalSeconds int `mapstructure:"cleanup_interval_seconds"`
 	// CleanupBatchSize 每次清理的最大记录数。
 	CleanupBatchSize int `mapstructure:"cleanup_batch_size"`
+}
+
+// QuotaRecoveryConfig controls the Hermes account-level quota reconciliation
+// runner in both standard and simple run modes. It is disabled by default
+// because checks call upstream APIs with real credentials. Hermes is supported
+// only in single-application-process deployments: its PostgreSQL advisory lock
+// prevents duplicate runners but cannot invalidate runtime blocks across
+// application processes.
+type QuotaRecoveryConfig struct {
+	Enabled         bool `mapstructure:"enabled"`
+	IntervalSeconds int  `mapstructure:"interval_seconds"`
+	BatchSize       int  `mapstructure:"batch_size"` // Database page size; a cycle scans all pages.
+	Concurrency     int  `mapstructure:"concurrency"`
+	TimeoutSeconds  int  `mapstructure:"timeout_seconds"`
+	JitterSeconds   int  `mapstructure:"jitter_seconds"`
 }
 
 type BatchImageConfig struct {
@@ -2181,6 +2197,14 @@ func setDefaults() {
 	viper.SetDefault("idempotency.cleanup_interval_seconds", 60)
 	viper.SetDefault("idempotency.cleanup_batch_size", 500)
 
+	// Hermes account quota recovery. Opt-in because checks contact upstream.
+	viper.SetDefault("quota_recovery.enabled", false)
+	viper.SetDefault("quota_recovery.interval_seconds", 86400)
+	viper.SetDefault("quota_recovery.batch_size", 50)
+	viper.SetDefault("quota_recovery.concurrency", 3)
+	viper.SetDefault("quota_recovery.timeout_seconds", 25)
+	viper.SetDefault("quota_recovery.jitter_seconds", 10)
+
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
@@ -3017,6 +3041,26 @@ func (c *Config) Validate() error {
 	}
 	if c.Idempotency.CleanupBatchSize <= 0 {
 		return fmt.Errorf("idempotency.cleanup_batch_size must be positive")
+	}
+	if c.QuotaRecovery.Enabled {
+		if c.Database.MaxOpenConns < 2 {
+			return fmt.Errorf("quota_recovery requires database.max_open_conns >= 2")
+		}
+		if c.QuotaRecovery.IntervalSeconds <= 0 {
+			return fmt.Errorf("quota_recovery.interval_seconds must be positive")
+		}
+		if c.QuotaRecovery.BatchSize <= 0 {
+			return fmt.Errorf("quota_recovery.batch_size must be positive")
+		}
+		if c.QuotaRecovery.Concurrency <= 0 {
+			return fmt.Errorf("quota_recovery.concurrency must be positive")
+		}
+		if c.QuotaRecovery.TimeoutSeconds <= 0 {
+			return fmt.Errorf("quota_recovery.timeout_seconds must be positive")
+		}
+		if c.QuotaRecovery.JitterSeconds < 0 {
+			return fmt.Errorf("quota_recovery.jitter_seconds must be non-negative")
+		}
 	}
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
