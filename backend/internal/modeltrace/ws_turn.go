@@ -149,15 +149,15 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			attribute.String("langfuse.observation.input", captureModelContent(t.input, t.inputBytes, t.recorder.promptMaxBytes, t.policy)),
 			attribute.String("langfuse.observation.output", captureModelContent(output, outputBytes, t.limit, t.policy)),
 			attribute.String("langfuse.trace.metadata", string(metadataJSON)),
-			attribute.String("langfuse.trace.metadata.connection_request_id", t.metadata.ConnectionRequestID),
-			attribute.String("langfuse.trace.metadata.turn_request_id", t.metadata.TurnRequestID),
+			attribute.String("langfuse.trace.metadata.connection_request_id", scrubURLsInString(t.metadata.ConnectionRequestID)),
+			attribute.String("langfuse.trace.metadata.turn_request_id", scrubURLsInString(t.metadata.TurnRequestID)),
 			attribute.Int("langfuse.trace.metadata.turn_index", t.metadata.TurnIndex),
 			attribute.String("http.request.method", http.MethodGet),
 			attribute.String("url.path", t.metadata.Path),
 			attribute.String(streamStatusAttribute, stream.status),
 		}
 		if t.metadata.Model != "" {
-			attrs = append(attrs, attribute.String("gen_ai.request.model", t.metadata.Model))
+			attrs = append(attrs, attribute.String("gen_ai.request.model", scrubURLsInString(t.metadata.Model)))
 		}
 		if t.metadata.Identity.UserID > 0 {
 			attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(t.metadata.Identity.UserID, 10)))
@@ -169,7 +169,7 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", t.metadata.Identity.GroupID))
 		}
 		if t.metadata.SessionID != "" {
-			attrs = append(attrs, attribute.String("langfuse.session.id", t.metadata.SessionID))
+			attrs = append(attrs, attribute.String("langfuse.session.id", scrubURLsInString(t.metadata.SessionID)))
 		}
 		if stream.firstOutputMs != nil {
 			attrs = append(attrs, attribute.Int64(firstOutputMsAttribute, *stream.firstOutputMs))

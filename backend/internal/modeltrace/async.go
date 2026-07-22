@@ -89,7 +89,7 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 		observationCorrelation["submission_trace_id"] = submissionTraceID
 	}
 	if metadata.Model != "" {
-		attrs = append(attrs, attribute.String("gen_ai.request.model", metadata.Model))
+		attrs = append(attrs, attribute.String("gen_ai.request.model", scrubURLsInString(metadata.Model)))
 	}
 	if metadata.Operation != "" {
 		attrs = append(attrs, attribute.String("gen_ai.operation.name", metadata.Operation))

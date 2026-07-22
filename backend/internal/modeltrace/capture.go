@@ -544,8 +544,11 @@ func sanitizeUnstructuredText(value string, policy capturePolicy) string {
 	value = strings.ReplaceAll(value, `\u0040`, "@")
 	lines := strings.SplitAfter(value, "\n")
 	for i, line := range lines {
+		// Always scrub URLs, even inside SSE data: lines — a URL with
+		// credentials in an SSE JSON payload must not leak.
+		line = absoluteURLPattern.ReplaceAllStringFunc(line, sanitizeCapturedURL)
 		if !strings.HasPrefix(strings.TrimSpace(line), "data:") {
-			line = absoluteURLPattern.ReplaceAllStringFunc(line, sanitizeCapturedURL)
+			// Auth/cookie header patterns only apply to non-SSE text.
 			line = authorizationLine.ReplaceAllStringFunc(line, redactLineValue)
 			line = cookieLine.ReplaceAllStringFunc(line, redactLineValue)
 		}
@@ -635,6 +638,17 @@ func sanitizeTraceError(msg string) string {
 	if msg == "" {
 		return ""
 	}
+	// Unescape JSON Unicode escapes for URL punctuation so the URL pattern
+	// can match escaped URLs in error messages.
+	msg = strings.ReplaceAll(msg, `\u002f`, "/")
+	msg = strings.ReplaceAll(msg, `\u002F`, "/")
+	msg = strings.ReplaceAll(msg, `\/`, "/")
+	msg = strings.ReplaceAll(msg, `\u003a`, ":")
+	msg = strings.ReplaceAll(msg, `\u003A`, ":")
+	msg = strings.ReplaceAll(msg, `\u003f`, "?")
+	msg = strings.ReplaceAll(msg, `\u003F`, "?")
+	msg = strings.ReplaceAll(msg, `\u0023`, "#")
+	msg = strings.ReplaceAll(msg, `\u0040`, "@")
 	scrubbed := absoluteURLPattern.ReplaceAllStringFunc(msg, sanitizeCapturedURL)
 	scrubbed = authorizationLine.ReplaceAllStringFunc(scrubbed, redactLineValue)
 	scrubbed = cookieLine.ReplaceAllStringFunc(scrubbed, redactLineValue)

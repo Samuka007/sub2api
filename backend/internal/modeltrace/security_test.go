@@ -283,6 +283,28 @@ func TestModelTraceFormURLValueRedactsCredentials(t *testing.T) {
 	require.Contains(t, captured, "host.example", "host should remain observable")
 }
 
+// TestModelTraceSSEDataLineURLRedacts covers R5-P1-001: SSE data: lines
+// containing URLs with embedded credentials were not scrubbed because the
+// URL pattern was skipped for data: lines.
+func TestModelTraceSSEDataLineURLRedacts(t *testing.T) {
+	sse := []byte("data: {\"url\":\"https://user:sse-pass@host.example/path?token=sse-q\"}\n\n")
+	captured := captureModelContent(sse, len(sse), 4096, capturePolicy{})
+	require.NotContains(t, captured, "sse-pass")
+	require.NotContains(t, captured, "sse-q")
+	require.Contains(t, captured, "host.example")
+}
+
+// TestModelTraceSanitizeErrorEscapedURLRedacts covers R5-P1-003: error
+// messages with JSON-escaped URL separators (\u003a for colon, \u002f for
+// slash) bypassed the URL scrubber in sanitizeTraceError.
+func TestModelTraceSanitizeErrorEscapedURLRedacts(t *testing.T) {
+	errMsg := "Get https\\u003a\\u002f\\u002fuser:err-pass@host.example/path?token=err-q: failed"
+	scrubbed := sanitizeTraceError(errMsg)
+	require.NotContains(t, scrubbed, "err-pass")
+	require.NotContains(t, scrubbed, "err-q")
+	require.Contains(t, scrubbed, "host.example")
+}
+
 // TestModelTraceSanitizeErrorScrubsCredentials verifies the error sanitizer
 // used for both synchronous attempt status and async execution status/events.
 // Transport errors may embed URLs with userinfo, query tokens, or

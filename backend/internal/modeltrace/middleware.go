@@ -197,11 +197,12 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		traceTags = append(traceTags, "entry_protocol:"+entry.Protocol)
 	}
 	if entry.ClientModel != "" {
+		model := scrubURLsInString(entry.ClientModel)
 		attrs = append(attrs,
-			attribute.String("modeltrace.client.request.model", entry.ClientModel),
-			attribute.String("langfuse.trace.metadata.client_model", entry.ClientModel),
+			attribute.String("modeltrace.client.request.model", model),
+			attribute.String("langfuse.trace.metadata.client_model", model),
 		)
-		traceTags = append(traceTags, "client_model:"+entry.ClientModel)
+		traceTags = append(traceTags, "client_model:"+model)
 	}
 	if len(traceTags) > 0 {
 		attrs = append(attrs, attribute.StringSlice("langfuse.trace.tags", traceTags))
@@ -218,7 +219,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 			attrs = append(attrs, attribute.String("error.type", stream.errorType))
 		}
 	}
-	if reqID := clientRequestID(c); reqID != "" {
+	if reqID := scrubURLsInString(clientRequestID(c)); reqID != "" {
 		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", reqID))
 	}
 	if s.identity.UserID > 0 {
@@ -230,7 +231,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 	if s.identity.GroupID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", s.identity.GroupID))
 	}
-	if session := extractSession(clientInput, c); session != "" {
+	if session := scrubURLsInString(extractSession(clientInput, c)); session != "" {
 		attrs = append(attrs, attribute.String("langfuse.session.id", session))
 	}
 	s.span.SetAttributes(attrs...)
