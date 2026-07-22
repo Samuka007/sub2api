@@ -782,6 +782,7 @@ export default {
     title: 'GPT Model IQ Ranking',
     description: 'Compare the latest benchmark scores, reliability, time, and cost across GPT model configurations.',
     updatedAt: 'Data generated at {time}',
+    autoRefreshNote: 'The server updates hourly. Manual refresh checks upstream; repeats within 30 seconds reuse the latest result.',
     refresh: 'Refresh',
     refreshing: 'Refreshing...',
     loading: 'Loading the latest ranking...',

@@ -273,6 +273,13 @@ func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpirySe
 	return svc
 }
 
+// ProvideModelIQService creates and starts the hourly Model IQ cache refresh job.
+func ProvideModelIQService(cfg *config.Config) *ModelIQService {
+	svc := NewModelIQService(cfg)
+	svc.Start()
+	return svc
+}
+
 // ProvideProxyExpiryService creates and starts ProxyExpiryService.
 func ProvideProxyExpiryService(proxyRepo ProxyRepository) *ProxyExpiryService {
 	svc := NewProxyExpiryService(proxyRepo, time.Minute)
@@ -677,7 +684,7 @@ var ProviderSet = wire.NewSet(
 	NewBillingService,
 	ProvideBillingCacheService,
 	NewAnnouncementService,
-	NewModelIQService,
+	ProvideModelIQService,
 	NewAdminService,
 	NewGatewayService,
 	NewOpenAIGatewayService,

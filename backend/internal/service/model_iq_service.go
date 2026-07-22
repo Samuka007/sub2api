@@ -15,12 +15,15 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
 const (
 	modelIQMaxResponseBytes = 512 * 1024
 	modelIQDefaultTimeout   = 15 * time.Second
 	modelIQDefaultCacheTTL  = 5 * time.Minute
+	modelIQRefreshInterval  = time.Hour
+	modelIQManualCooldown   = 30 * time.Second
 )
 
 var (
@@ -32,6 +35,11 @@ var (
 		http.StatusBadGateway,
 		"MODEL_IQ_UPSTREAM_UNAVAILABLE",
 		"model IQ ranking is temporarily unavailable",
+	)
+	ErrModelIQRefreshRateLimited = infraerrors.New(
+		http.StatusTooManyRequests,
+		"MODEL_IQ_REFRESH_RATE_LIMITED",
+		"model IQ ranking refresh was requested too recently",
 	)
 )
 
@@ -104,6 +112,12 @@ type ModelIQService struct {
 	cached     *ModelIQView
 	retryAfter time.Time
 	fetchMu    sync.Mutex
+
+	refreshInterval time.Duration
+	startOnce       sync.Once
+	stopOnce        sync.Once
+	stop            context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 func NewModelIQService(cfg *config.Config) *ModelIQService {
@@ -137,15 +151,90 @@ func NewModelIQService(cfg *config.Config) *ModelIQService {
 				return http.ErrUseLastResponse
 			},
 		},
-		now: time.Now,
+		now:             time.Now,
+		refreshInterval: modelIQRefreshInterval,
 	}
+}
+
+// Start warms the cache immediately and refreshes it independently of page traffic.
+func (s *ModelIQService) Start() {
+	if !s.configured() {
+		return
+	}
+	if err := validateModelIQBaseURL(s.baseURL); err != nil {
+		return
+	}
+
+	s.startOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.stop = cancel
+		s.wg.Add(1)
+		go s.refreshLoop(ctx)
+	})
+}
+
+// Stop terminates the background refresh loop and any in-flight refresh request.
+func (s *ModelIQService) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		if s.stop != nil {
+			s.stop()
+		}
+	})
+	s.wg.Wait()
+}
+
+func (s *ModelIQService) refreshLoop(ctx context.Context) {
+	defer s.wg.Done()
+	s.refreshScheduled(ctx)
+
+	interval := s.refreshInterval
+	if interval <= 0 {
+		interval = modelIQRefreshInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.refreshScheduled(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *ModelIQService) refreshScheduled(ctx context.Context) {
+	s.fetchMu.Lock()
+	fresh, err := s.fetchAndCacheLocked(ctx)
+	s.fetchMu.Unlock()
+	if err != nil {
+		if ctx.Err() == nil {
+			s.markRefreshFailed()
+			logger.LegacyPrintf("service.model_iq", "[ModelIQ] scheduled refresh failed: %v", err)
+		}
+		return
+	}
+	logger.LegacyPrintf(
+		"service.model_iq",
+		"[ModelIQ] scheduled refresh completed (comparisons=%d, monitored_at=%s)",
+		len(fresh.ModelIQ.Comparisons),
+		fresh.MonitoredAt,
+	)
+}
+
+func (s *ModelIQService) configured() bool {
+	return s != nil && s.enabled && s.baseURL != "" && s.apiToken != "" && s.httpClient != nil
 }
 
 // Get returns a fresh in-memory snapshot when possible. If an expired snapshot
 // exists and Codex Radar is unavailable, the last successful data is returned
 // with stale=true instead of exposing upstream details to the client.
 func (s *ModelIQService) Get(ctx context.Context) (*ModelIQView, error) {
-	if s == nil || !s.enabled || s.baseURL == "" || s.apiToken == "" || s.httpClient == nil {
+	if !s.configured() {
 		return nil, ErrModelIQNotConfigured
 	}
 	if err := validateModelIQBaseURL(s.baseURL); err != nil {
@@ -162,7 +251,7 @@ func (s *ModelIQService) Get(ctx context.Context) (*ModelIQView, error) {
 		return cached, nil
 	}
 
-	fresh, err := s.fetch(ctx)
+	fresh, err := s.fetchAndCacheLocked(ctx)
 	if err != nil {
 		if cached := s.markRefreshFailed(); cached != nil {
 			return cached, nil
@@ -170,11 +259,52 @@ func (s *ModelIQService) Get(ctx context.Context) (*ModelIQView, error) {
 		return nil, ErrModelIQUpstreamUnavailable.WithCause(err)
 	}
 
+	return cloneModelIQView(fresh, false), nil
+}
+
+// Refresh bypasses the normal cache while coalescing manual refreshes that
+// arrive within a short window. Scheduled and concurrent successful fetches
+// also satisfy the cooldown, preventing duplicate upstream requests.
+func (s *ModelIQService) Refresh(ctx context.Context) (*ModelIQView, error) {
+	if !s.configured() {
+		return nil, ErrModelIQNotConfigured
+	}
+	if err := validateModelIQBaseURL(s.baseURL); err != nil {
+		return nil, ErrModelIQNotConfigured.WithCause(err)
+	}
+
+	s.fetchMu.Lock()
+	defer s.fetchMu.Unlock()
+
+	if cached := s.cachedWithin(modelIQManualCooldown); cached != nil {
+		return cached, nil
+	}
+	if cached, limited := s.cachedDuringRetryBackoff(); limited {
+		if cached != nil {
+			return cached, nil
+		}
+		return nil, ErrModelIQRefreshRateLimited
+	}
+
+	fresh, err := s.fetchAndCacheLocked(ctx)
+	if err != nil {
+		s.markRefreshFailed()
+		return nil, ErrModelIQUpstreamUnavailable.WithCause(err)
+	}
+	return cloneModelIQView(fresh, false), nil
+}
+
+// fetchAndCacheLocked requires fetchMu to be held by the caller.
+func (s *ModelIQService) fetchAndCacheLocked(ctx context.Context) (*ModelIQView, error) {
+	fresh, err := s.fetch(ctx)
+	if err != nil {
+		return nil, err
+	}
 	s.cacheMu.Lock()
 	s.cached = fresh
 	s.retryAfter = time.Time{}
 	s.cacheMu.Unlock()
-	return cloneModelIQView(fresh, false), nil
+	return fresh, nil
 }
 
 func (s *ModelIQService) fetch(ctx context.Context) (*ModelIQView, error) {
@@ -248,13 +378,31 @@ func (s *ModelIQService) cachedForRequest() *ModelIQView {
 	return nil
 }
 
+func (s *ModelIQService) cachedWithin(maxAge time.Duration) *ModelIQView {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	if s.cached == nil || s.now().Sub(s.cached.FetchedAt) >= maxAge {
+		return nil
+	}
+	return cloneModelIQView(s.cached, false)
+}
+
+func (s *ModelIQService) cachedDuringRetryBackoff() (*ModelIQView, bool) {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	if s.retryAfter.IsZero() || !s.now().Before(s.retryAfter) {
+		return nil, false
+	}
+	return cloneModelIQView(s.cached, true), true
+}
+
 func (s *ModelIQService) markRefreshFailed() *ModelIQView {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
+	s.retryAfter = s.now().Add(s.retryDelay)
 	if s.cached == nil {
 		return nil
 	}
-	s.retryAfter = s.now().Add(s.retryDelay)
 	return cloneModelIQView(s.cached, true)
 }
 

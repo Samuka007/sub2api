@@ -125,6 +125,94 @@ func TestModelIQServiceFetchesWhitelistedDataAndCaches(t *testing.T) {
 	require.NotContains(t, string(raw), "test-token")
 }
 
+func TestModelIQServiceManualRefreshBypassesCacheAndCoalescesRequests(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestNumber := requests.Add(1)
+		if requestNumber > 1 {
+			time.Sleep(30 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(modelIQSuccessFixture))
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	svc := newModelIQTestService(server, 5*time.Minute)
+	svc.now = func() time.Time { return now }
+
+	_, err := svc.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), requests.Load())
+
+	now = now.Add(modelIQManualCooldown + time.Second)
+	start := make(chan struct{})
+	results := make(chan error, 5)
+	for range 5 {
+		go func() {
+			<-start
+			_, refreshErr := svc.Refresh(context.Background())
+			results <- refreshErr
+		}()
+	}
+	close(start)
+	for range 5 {
+		require.NoError(t, <-results)
+	}
+	require.Equal(t, int32(2), requests.Load(), "concurrent manual refreshes should share one upstream request")
+
+	now = now.Add(modelIQManualCooldown + time.Second)
+	_, err = svc.Refresh(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int32(3), requests.Load(), "manual refresh should fetch again after the cooldown")
+}
+
+func TestModelIQServiceManualRefreshBacksOffAfterFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	svc := newModelIQTestService(server, 5*time.Minute)
+	_, err := svc.Refresh(context.Background())
+	require.Error(t, err)
+	require.Equal(t, "MODEL_IQ_UPSTREAM_UNAVAILABLE", infraerrors.Reason(err))
+
+	_, err = svc.Refresh(context.Background())
+	require.Error(t, err)
+	require.Equal(t, "MODEL_IQ_REFRESH_RATE_LIMITED", infraerrors.Reason(err))
+	require.Equal(t, int32(1), requests.Load(), "failed refreshes should enter retry backoff")
+}
+
+func TestModelIQServiceRefreshesOnStartAndInterval(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(modelIQSuccessFixture))
+	}))
+	defer server.Close()
+
+	svc := newModelIQTestService(server, 5*time.Minute)
+	svc.refreshInterval = 20 * time.Millisecond
+	svc.Start()
+	require.Eventually(t, func() bool {
+		return requests.Load() >= 2
+	}, time.Second, 10*time.Millisecond)
+
+	svc.Stop()
+	requestsAfterStop := requests.Load()
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, requestsAfterStop, requests.Load())
+
+	view, err := svc.Get(context.Background())
+	require.NoError(t, err)
+	require.Len(t, view.ModelIQ.Comparisons, 1)
+	require.Equal(t, requestsAfterStop, requests.Load(), "Get should use the scheduled refresh cache")
+}
+
 func TestModelIQServiceReturnsStaleSnapshotWhenRefreshFails(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

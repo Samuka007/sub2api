@@ -27,6 +27,10 @@
             <Icon name="clock" size="xs" />
             {{ t('modelIq.updatedAt', { time: formattedMonitoredAt }) }}
           </p>
+          <p class="mt-1 flex items-center gap-1.5 text-xs text-gray-500 dark:text-dark-400" data-testid="model-iq-refresh-note">
+            <Icon name="sync" size="xs" />
+            {{ t('modelIq.autoRefreshNote') }}
+          </p>
         </div>
 
         <button
@@ -285,10 +289,10 @@ import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { getCurrentModelIq } from '@/api/modelIq'
+import { getCurrentModelIq, refreshCurrentModelIq } from '@/api/modelIq'
 import type { ModelIqComparison, ModelIqCurrentResponse, ModelIqDayResult } from '@/api/modelIq'
 
-const AUTO_REFRESH_MS = 10 * 60 * 1000
+const AUTO_REFRESH_MS = 60 * 60 * 1000
 interface ModelIqTableRow extends ModelIqComparison {
   key: string
   rank: number
@@ -315,10 +319,23 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const isInitialLoading = computed(() => loading.value && response.value === null)
 
+const latestMeasurementTimestamp = computed(() => {
+  const comparisons = response.value?.model_iq?.comparisons ?? {}
+  const timestamps = Object.values(comparisons)
+    .map((comparison) => benchmarkTimestamp(comparison.latest.date))
+    .filter((value): value is number => value !== null)
+  return timestamps.length ? Math.max(...timestamps) : null
+})
+
 const formattedMonitoredAt = computed(() => {
   const value = response.value?.monitored_at ?? response.value?.fetched_at
   if (!value) return '--'
-  const date = new Date(value)
+  const monitoredTimestamp = benchmarkTimestamp(value)
+  const effectiveTimestamp = latestMeasurementTimestamp.value !== null
+    && (monitoredTimestamp === null || latestMeasurementTimestamp.value > monitoredTimestamp)
+    ? latestMeasurementTimestamp.value
+    : monitoredTimestamp
+  const date = effectiveTimestamp === null ? new Date(value) : new Date(effectiveTimestamp)
   if (Number.isNaN(date.getTime())) return value
   return new Intl.DateTimeFormat(locale.value, {
     year: 'numeric',
@@ -417,7 +434,7 @@ function isCancellation(error: unknown): boolean {
   return value.name === 'AbortError' || value.code === 'ERR_CANCELED'
 }
 
-async function load(): Promise<void> {
+async function load(forceRefresh = false): Promise<void> {
   abortController?.abort()
   const controller = new AbortController()
   abortController = controller
@@ -425,7 +442,9 @@ async function load(): Promise<void> {
   if (!response.value) errorMessage.value = ''
 
   try {
-    const data = await getCurrentModelIq({ signal: controller.signal })
+    const data = forceRefresh
+      ? await refreshCurrentModelIq({ signal: controller.signal })
+      : await getCurrentModelIq({ signal: controller.signal })
     if (controller.signal.aborted || abortController !== controller) return
     response.value = data
     errorMessage.value = ''
@@ -443,7 +462,7 @@ async function load(): Promise<void> {
 }
 
 function refresh(): void {
-  void load()
+  void load(true)
 }
 
 function formatNumber(value: number | null | undefined): string {
@@ -519,9 +538,19 @@ function effortLabel(effort: string): string {
 
 function formatTestDate(value: string): string {
   const match = /^(\d{4}-\d{2}-\d{2})(?:-(am|pm))?$/i.exec(value)
-  if (!match) return value || '--'
-  const period = match[2]?.toLowerCase()
-  return period ? `${match[1]} ${t(`modelIq.period.${period}`)}` : match[1]
+  if (match) {
+    const period = match[2]?.toLowerCase()
+    return period ? `${match[1]} ${t(`modelIq.period.${period}`)}` : match[1]
+  }
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return value || '--'
+  return new Intl.DateTimeFormat(locale.value, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp))
 }
 
 onMounted(() => {

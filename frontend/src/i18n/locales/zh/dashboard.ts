@@ -787,6 +787,7 @@ export default {
     title: 'GPT模型智商排行',
     description: '对比不同 GPT 模型配置的最新基准分数、稳定性、耗时与成本。',
     updatedAt: '数据生成于 {time}',
+    autoRefreshNote: '服务端每小时自动更新；手动刷新会请求上游，30 秒内重复点击复用最近结果。',
     refresh: '刷新',
     refreshing: '刷新中...',
     loading: '正在加载最新排行...',

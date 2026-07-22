@@ -23,6 +23,7 @@ func RegisterUserRoutes(
 	authenticated.Use(gin.HandlerFunc(auditLog))
 	{
 		authenticated.GET("/model-iq", h.ModelIQ.Get)
+		authenticated.POST("/model-iq/refresh", h.ModelIQ.Refresh)
 
 		// 用户接口
 		user := authenticated.Group("/user")

@@ -51,8 +51,18 @@ export async function getCurrentModelIq(options?: {
   return data
 }
 
+export async function refreshCurrentModelIq(options?: {
+  signal?: AbortSignal
+}): Promise<ModelIqCurrentResponse> {
+  const { data } = await apiClient.post<ModelIqCurrentResponse>('/model-iq/refresh', undefined, {
+    signal: options?.signal,
+  })
+  return data
+}
+
 export const modelIqAPI = {
   getCurrent: getCurrentModelIq,
+  refreshCurrent: refreshCurrentModelIq,
 }
 
 export default modelIqAPI

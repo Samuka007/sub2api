@@ -8,12 +8,14 @@ import type {
   ModelIqLatestResult,
 } from '@/api/modelIq'
 
-const { getCurrentModelIqMock } = vi.hoisted(() => ({
+const { getCurrentModelIqMock, refreshCurrentModelIqMock } = vi.hoisted(() => ({
   getCurrentModelIqMock: vi.fn(),
+  refreshCurrentModelIqMock: vi.fn(),
 }))
 
 vi.mock('@/api/modelIq', () => ({
   getCurrentModelIq: getCurrentModelIqMock,
+  refreshCurrentModelIq: refreshCurrentModelIqMock,
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -104,6 +106,7 @@ function mountView() {
 describe('ModelIqView', () => {
   beforeEach(() => {
     getCurrentModelIqMock.mockReset()
+    refreshCurrentModelIqMock.mockReset()
   })
 
   afterEach(() => {
@@ -128,6 +131,7 @@ describe('ModelIqView', () => {
     expect(wrapper.get('[data-testid="model-iq-mobile-list"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="model-iq-desktop-table"]').text()).toContain('<$0.0001')
     expect(wrapper.get('[data-testid="model-iq-label"]').attributes('title')).toBe('Delta')
+    expect(wrapper.get('[data-testid="model-iq-refresh-note"]').text()).toContain('modelIq.autoRefreshNote')
     expect(getCurrentModelIqMock).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
 
     wrapper.unmount()
@@ -145,12 +149,30 @@ describe('ModelIqView', () => {
     wrapper.unmount()
   })
 
+  it('uses the latest measurement time when the upstream monitored time is older', async () => {
+    const data = currentResponse({
+      sol: comparison('GPT-5.6 Sol high', {
+        date: '2026-07-19T14:51:18Z',
+        score: 105,
+        passed: 7,
+      }),
+    })
+    data.monitored_at = '2026-07-18T11:35:05Z'
+    getCurrentModelIqMock.mockResolvedValue(data)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="model-iq-updated-at"]').text()).toContain('07/19/2026')
+    expect(wrapper.get('[data-testid="model-iq-desktop-table"]').text()).not.toContain('2026-07-19T14:51:18Z')
+    wrapper.unmount()
+  })
+
   it('keeps the last successful ranking and marks it stale when refresh fails', async () => {
-    getCurrentModelIqMock
-      .mockResolvedValueOnce(currentResponse({
-        sol: comparison('GPT-5.6 Sol high', { score: 105, passed: 7 }),
-      }))
-      .mockRejectedValueOnce({ status: 503 })
+    getCurrentModelIqMock.mockResolvedValueOnce(currentResponse({
+      sol: comparison('GPT-5.6 Sol high', { score: 105, passed: 7 }),
+    }))
+    refreshCurrentModelIqMock.mockRejectedValueOnce({ status: 503 })
 
     const wrapper = mountView()
     await flushPromises()
@@ -162,11 +184,15 @@ describe('ModelIqView', () => {
     expect(wrapper.findAll('[data-testid="model-iq-row"]')).toHaveLength(1)
     expect(wrapper.get('[data-testid="model-iq-stale"]').text()).toContain('modelIq.staleRefreshFailed')
     expect(wrapper.find('[data-testid="model-iq-error"]').exists()).toBe(false)
+    expect(refreshCurrentModelIqMock).toHaveBeenCalledWith(expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
+    expect(getCurrentModelIqMock).toHaveBeenCalledTimes(1)
 
     wrapper.unmount()
   })
 
-  it('refreshes every ten minutes and clears the timer when unmounted', async () => {
+  it('refreshes every hour and clears the timer when unmounted', async () => {
     vi.useFakeTimers()
     getCurrentModelIqMock.mockResolvedValue(currentResponse({
       luna: comparison('GPT-5.6 Luna max', { score: 135, passed: 9 }),
@@ -176,12 +202,13 @@ describe('ModelIqView', () => {
     await flushPromises()
     expect(getCurrentModelIqMock).toHaveBeenCalledTimes(1)
 
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
     await flushPromises()
     expect(getCurrentModelIqMock).toHaveBeenCalledTimes(2)
+    expect(refreshCurrentModelIqMock).not.toHaveBeenCalled()
 
     wrapper.unmount()
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
     expect(getCurrentModelIqMock).toHaveBeenCalledTimes(2)
   })
 

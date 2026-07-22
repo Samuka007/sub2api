@@ -26,6 +26,10 @@ func (s *modelIQReaderStub) Get(context.Context) (*service.ModelIQView, error) {
 	return s.view, s.err
 }
 
+func (s *modelIQReaderStub) Refresh(context.Context) (*service.ModelIQView, error) {
+	return s.view, s.err
+}
+
 func TestModelIQHandlerGetSuccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := &ModelIQHandler{modelIQService: &modelIQReaderStub{
@@ -86,4 +90,25 @@ func TestModelIQHandlerGetUnavailableWithoutService(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.NotContains(t, w.Body.String(), "token")
+}
+
+func TestModelIQHandlerRefreshSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &ModelIQHandler{modelIQService: &modelIQReaderStub{
+		view: &service.ModelIQView{
+			ModelIQ: service.ModelIQData{
+				Comparisons: map[string]service.ModelIQComparison{
+					"gpt_test": {Label: "GPT Test", Model: "gpt-test"},
+				},
+			},
+		},
+	}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/model-iq/refresh", nil)
+
+	handler.Refresh(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "gpt_test")
 }
