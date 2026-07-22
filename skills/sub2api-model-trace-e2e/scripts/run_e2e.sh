@@ -5,7 +5,7 @@
 #   bash skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
 #
 # 前置：
-#   - Colima profile `swebench` 已启动（或 Docker daemon 可用）
+#   - Colima profile `swebench` 已启动
 #   - 当前位于 sub2api 仓库根目录
 #
 # 成功：exit 0，stdout 最后三行为 trace_id、observation_count、VERIFY_OK
@@ -45,6 +45,9 @@ clickhouse_query() {
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 need_cmd docker
+need_cmd docker-compose
+need_cmd colima
+need_cmd nc
 need_cmd curl
 need_cmd jq
 need_cmd openssl

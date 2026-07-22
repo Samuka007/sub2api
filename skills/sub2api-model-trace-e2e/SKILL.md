@@ -35,9 +35,9 @@ description: |
 | 类型 | 名称 | 用途 | 必须/可选 |
 |------|------|------|-----------|
 | 容器 | Colima profile `swebench` | 本地 Docker 引擎与端口转发 | 必须 |
-| CLI | `docker`、`docker compose` | 启动 Langfuse 与 sub2api 依赖 | 必须 |
+| CLI | `docker`、legacy `docker-compose` | 启动 Langfuse 与 sub2api 依赖；当前 runner 直接调用带横线命令 | 必须 |
 | CLI | `colima` | 跨 VM SSH 与端口转发 | 必须 |
-| CLI | `curl`、`jq`、`openssl` | API 调用、JSON 解析、生成随机 key | 必须 |
+| CLI | `curl`、`jq`、`openssl`、`nc` | API 调用、JSON 解析、生成随机 key、端口占用检查 | 必须 |
 | 镜像 | `golang:1.26.5` | 编译 sub2api linux/arm64 二进制（非 alpine，带 git） | 必须 |
 | 镜像 | `langfuse/langfuse:3`、`langfuse-worker:3`、`clickhouse-server`、`postgres:17`、`redis:7`、`minio/minio` | Langfuse 全栈与 sub2api 依赖 | 必须 |
 | 代码 | 仓库 `backend/` 目录 + `-tags embed` 前端 dist | 编译带嵌入前端的二进制 | 必须 |
@@ -77,7 +77,7 @@ description: |
 **成功信号**：退出码为 0，合并命令输出同时包含 `VERIFY_OK`、`batch trace passed at configured scale`、`sensitive-content gate passed` 和 `full-scale e2e passed`。其中 `VERIFY_OK` 写入 stdout，其余诊断日志写入 stderr；任一缺失均视为失败。
 
 **失败分支**：
-- Langfuse health 不通：检查 `docker compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`，常见是镜像拉取超时，提示重试或用镜像加速。
+- Langfuse health 不通：检查 `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`。本地偶发镜像拉取超时可重试；远端 Linux 出现 DNS、代理、Buildx 或 Corepack 错误时，按 `references/environment.md` 的“远端 Linux 构建与持久部署”逐层验证，不要直接换不可信镜像。
 - sub2api 启动失败：`docker logs sub2api-e2e` 看 `Failed to initialize application`，常见是 DB 连接（检查 15432 占用）或 `invalid model_tracing deployment config`（检查 endpoint 必须是符合 loopback 规则的 URL）。
 - trace 不落库：检查 sub2api 日志中的 `modeltrace` error 和 ClickHouse `system.errors`；脚本自身负责 bounded wait，不用手工 sleep 冒充稳定性。
 - ClickHouse 查询语法错：用 `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "DESCRIBE traces"` 核对列名；Langfuse v3 的 `metadata` 是 `Map`，`session_id` 是 `Nullable(String)`。
@@ -176,7 +176,7 @@ description: |
 | 查 Langfuse traces | `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "SELECT id, name, user_id, session_id FROM traces ORDER BY timestamp DESC LIMIT 5 FORMAT TabSeparated"` |
 | 查 observations | `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "SELECT name, type, provided_model_name, parent_observation_id FROM observations ORDER BY start_time DESC LIMIT 10 FORMAT TabSeparated"` |
 | 看 sub2api 日志 | `docker logs sub2api-e2e 2>&1 \| tail -50` |
-| 看 Langfuse 日志 | `docker compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web 2>&1 \| tail -50` |
+| 看 Langfuse 日志 | `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web 2>&1 \| tail -50` |
 | 跑 Go 单测（不启动 Langfuse） | 见场景五 |
 | 切回主分支 | `git checkout main`（**不**主动执行，除非用户要求） |
 
@@ -184,7 +184,7 @@ description: |
 
 | 场景 | 文件 |
 |------|------|
-| 端口、凭据、镜像版本、Endpoint 校验规则、ClickHouse 表结构、踩坑速查 | `references/environment.md` |
+| 端口、凭据、镜像版本、远端 Linux 构建/代理、Endpoint 校验、ClickHouse 表结构、踩坑速查 | `references/environment.md` |
 | OpenSpec 规格、failed trace 场景、503 产生原因、fail-open 设计依据 | `references/otel-spec-mapping.md` |
 
 只在对应场景命中时读取；主 SOP 以本文件的核心规则与成功信号为最高优先级。

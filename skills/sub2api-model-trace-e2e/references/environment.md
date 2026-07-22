@@ -40,7 +40,7 @@
 | 镜像 | 版本 | 备注 |
 |------|------|------|
 | `golang` | `1.26.5`（非 alpine） | 编译 sub2api，必须带 git 因为 `go mod` 需要 |
-| `langfuse/langfuse` | `3` 浮动标签；脚本必须从 `/api/public/health` 取得语义版本并断言 `>= 3.22.0` | 同时记录运行容器对应 image digest、OCI revision/version；2026-07-22 fresh smoke 为 `3.222.0` |
+| `langfuse/langfuse` | `3` 浮动标签；脚本必须从 `/api/public/health` 取得语义版本并断言 `>= 3.22.0` | 同时记录运行容器对应 image digest、OCI revision/version；2026-07-22 两次 fresh 观测先后为 `3.222.0`、`3.223.0`，证明同一标签会漂移 |
 | `langfuse/langfuse-worker` | `3` 浮动标签 | 与 web 使用同一 compose 启动；版本门禁以公开 health + web 镜像 OCI 标签为准 |
 | `clickhouse/clickhouse-server` | `latest` | Langfuse compose 默认 |
 | `postgres` | `17` | Langfuse 与 sub2api 都用 |
@@ -50,6 +50,75 @@
 docker hub 偶发拉取超时（`EOF` / `failed to fetch anonymous token`），重试即可；不要改用第三方镜像源以免版本漂移。
 
 `run_e2e.sh` 不靠 `:3` 标签猜版本：health JSON 的 `version` 是运行时公开证据，OCI `org.opencontainers.image.version` 必须与之相同；脚本还记录 `RepoDigest` 与 `org.opencontainers.image.revision`，任何一项缺失或版本低于 `3.22.0` 都失败。
+
+## 远端 Linux 构建与持久部署
+
+`run_e2e.sh` 当前是 Colima 专用测试 harness：它调用 `colima ssh`、使用 legacy `docker-compose`，并固定编译 `linux/arm64`。在原生 Linux/x86_64 服务器上，不要原样执行该脚本；应复用本 reference 的端口、loopback endpoint、版本门禁和 ClickHouse 断言作为部署契约。
+
+### Slash 分支与源码校验
+
+分支名包含 `/`，必须把完整 ref 传给 Git。GitHub 的 `/tree/otel/model-trace` 页面可能被解释为分支 `otel` 下的 `model-trace` 路径，不能作为 branch 解析依据：
+
+```bash
+git clone --branch 'otel/model-trace' --single-branch https://github.com/Vitus213/sub2api.git
+git rev-parse HEAD
+```
+
+部署记录必须保存实际 commit SHA；不得只记录网页 URL 或浮动 branch 名。
+
+### Git、Docker 与 BuildKit 代理
+
+先分别验证代理和目标站点，避免把 DNS 污染、出口阻断误判为镜像不存在：
+
+```bash
+PROXY_URL=http://proxy.example:7890
+curl -x "$PROXY_URL" -fsSI https://github.com
+REGISTRY_STATUS=$(curl -x "$PROXY_URL" -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/)
+test "$REGISTRY_STATUS" = 401
+curl -x "$PROXY_URL" -fsSI https://registry.npmjs.org/pnpm
+```
+
+Docker Registry 返回 `401 Unauthorized` 是匿名 Registry v2 的正常挑战，说明网络已通。Git 可直接设置 `http.proxy`/`https.proxy`；Docker daemon 必须通过 systemd drop-in 设置 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，随后执行 `systemctl daemon-reload && systemctl restart docker`，并以 `docker info` 的 Proxy 字段作为生效证据。不要只在当前 shell export：daemon 拉镜像不会继承客户端 shell 环境。
+
+Ubuntu 的 `docker.io` 包可能没有 Buildx。出现 legacy builder 的 `failed to parse platform`、`${BUILDPLATFORM}` 为空或 `invalid OS component` 时，安装 `docker-buildx`，确认 `docker buildx ls` 中 builder 为 `running`，再使用 `docker buildx build --load`。
+
+BuildKit 在正式构建前仍会解析 Dockerfile frontend 和各 `FROM` 的 registry metadata。代理不稳定时先显式拉取，之后重试构建：
+
+```bash
+docker pull docker.io/docker/dockerfile:1.7
+docker pull docker.io/library/node:24-alpine
+docker pull docker.io/library/golang:1.26.5-alpine
+docker pull docker.io/library/postgres:18-alpine
+docker pull docker.io/library/alpine:3.21
+```
+
+### Node 24/Corepack 代理
+
+`HTTP_PROXY`/`HTTPS_PROXY` build args 对基础镜像拉取生效，不代表 Node 24 的内置 `fetch` 会读取它们。若 `corepack prepare pnpm@9 --activate` 报 `Error when performing the request to https://registry.npmjs.org/pnpm`，在部署用 Dockerfile 的 `frontend-builder` stage 内启用 Node 环境代理：
+
+```dockerfile
+FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS frontend-builder
+ARG NPM_CONFIG_REGISTRY
+ENV NODE_USE_ENV_PROXY=1
+```
+
+`ENV` 必须位于第一个 `FROM` 之后；放在全局 `ARG` 区会报 `no build stage in current context`。`NPM_CONFIG_REGISTRY` 只控制后续 pnpm registry，不能替代 `NODE_USE_ENV_PROXY=1` 解决 Corepack 自身联网。远端构建时同时传递大小写 proxy build args，以兼容不同工具：
+
+```bash
+docker buildx build --load \
+  --build-arg HTTP_PROXY="$PROXY_URL" --build-arg HTTPS_PROXY="$PROXY_URL" \
+  --build-arg http_proxy="$PROXY_URL" --build-arg https_proxy="$PROXY_URL" \
+  --build-arg NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+  -t sub2api:model-trace .
+```
+
+### 持久部署的版本与网络契约
+
+E2E compose 故意使用 `langfuse:3` 做 fresh compatibility smoke；持久部署不能继续依赖该浮动标签。启动后必须同时核对 health version、OCI version/revision 和 RepoDigest，再把 Web/Worker digest 写入部署 compose。本次已验证的 `3.223.0` 仅是观测证据，不代表未来 `:3` 仍指向同一镜像。
+
+明文 OTLP endpoint 仍受 loopback 规则约束。原生 Linux 部署可让 Sub2API 使用 `network_mode: host`，Langfuse Web 仅映射宿主 `127.0.0.1:3000:3000`，然后配置 `MODEL_TRACING_ENDPOINT=http://127.0.0.1:3000`；外部 UI 必须经带认证的 HTTPS 反向代理访问，不得把明文 `3000` 暴露到所有接口。Sub2API 的 PostgreSQL/Redis 应映射到独立回环端口（参考 `15432`/`16379`），避免与 Langfuse 的 `5432`/`6379` 冲突。
+
+新初始化管理员的余额可能为 0。已识别请求若返回 `403 INSUFFICIENT_BALANCE`，说明请求尚未到达“无上游账号”的 503 路径，不能据此判断 tracing 失败。部署 smoke 可以临时提高测试用户余额，但必须在 trap 中恢复原值，并删除测试 API key/group；随后仍需以 503、唯一根 Span 和 ClickHouse 实际行作为通过条件。
 
 ## Endpoint 校验规则
 
@@ -120,6 +189,12 @@ sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_
 | ClickHouse `traces` 表 0 条 | BatchSpanProcessor 默认 5 秒批次 + 网络 | `sleep 6` 后再查 |
 | `docker compose` 报 `unknown command` | Colima 内 docker 是老版本 | 用 `docker-compose`（带横线） |
 | `docker-compose` 报 `pull access denied for registry.cn-hangzhou.aliyuncs.com/...` | 中间尝试过第三方镜像但没权限 | 回到 `docker.io/library/...` 标准镜像，重试拉取 |
+| `git clone` 报 `GnuTLS recv error (-110)` 或 GitHub 443 timeout | 远端 DNS/出口不可用，不是 slash 分支不存在 | 用 `curl -x "$PROXY_URL"` 分别验证 GitHub、Docker Registry、npm；配置 Git 与 Docker daemon 代理后重新 clone/pull |
+| legacy builder 报 `${BUILDPLATFORM}` 为空或 `invalid OS component` | Ubuntu `docker.io` 未安装 Buildx，Dockerfile 被旧 builder 解析 | 安装 `docker-buildx`，确认 `docker buildx ls` 为 running，再用 `docker buildx build --load` |
+| BuildKit 在 `docker/dockerfile:1.7` 或 `FROM` metadata 阶段 timeout | frontend/base image metadata 仍需访问 Docker Hub | 先显式 `docker pull` Dockerfile frontend 与全部基础镜像，再重试；不要删除已下载 cache |
+| Corepack 报 `Error when performing the request to registry.npmjs.org/pnpm` | Node 24 `fetch` 默认不读取 proxy env；`NPM_CONFIG_REGISTRY` 不控制 Corepack 自身 | 在 `frontend-builder` stage 设置 `ENV NODE_USE_ENV_PROXY=1`，并传递大小写 proxy build args |
+| Dockerfile 加了 `NODE_USE_ENV_PROXY` 后报 `no build stage in current context` | `ENV` 错放在第一个 `FROM` 之前 | 把 `ENV NODE_USE_ENV_PROXY=1` 移到 `frontend-builder` 的 `FROM`/`ARG` 之后 |
+| fresh admin 的已识别请求返回 `403 INSUFFICIENT_BALANCE` | 余额门禁先于上游选择和预期 503 | 临时补测试余额并在 trap 恢复；只有请求到达 503 且真实 Trace 落库才算链路通过 |
 | Colima 端口从宿主访问不通 | 某些端口只绑 `127.0.0.1`（VM 内） | sub2api 用 `--network host` 绕过；Langfuse web 暴露 `0.0.0.0:3000` |
 | `pricing_service` 报 TLS handshake timeout | GitHub raw 偶发不通 | 非致命，pricing 服务降级；等 retry 或离线跑 |
 | SSE 客户端有内容但没有 `[DONE]` | fixture 缺 `message_stop` 或协议转换未识别终态 | fixture 必须发送完整 `message_start → content_block_start/delta/stop → message_delta → message_stop`；脚本同时断言客户端终帧和 ClickHouse `modeltrace.stream.status=completed` |
