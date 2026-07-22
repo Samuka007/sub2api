@@ -423,10 +423,10 @@ func httpModelTraceURLMetadata(target *url.URL) (operation, provider, model stri
 		}
 	}
 	if provider == "" {
-		switch {
-		case pathCategory == "videos":
+		switch pathCategory {
+		case "videos":
 			provider = "grok"
-		case pathCategory == "images":
+		case "images":
 			provider = "openai"
 		default:
 			switch operation {

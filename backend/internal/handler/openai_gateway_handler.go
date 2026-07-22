@@ -113,15 +113,6 @@ func usageRecordContext(parent context.Context, base context.Context) context.Co
 	return recording.Propagate(parent, base)
 }
 
-func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) service.UsageRecordTask {
-	if task == nil {
-		return nil
-	}
-	return func(ctx context.Context) {
-		task(usageRecordContext(parent, ctx))
-	}
-}
-
 func wrapDetachedUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) (service.UsageRecordTask, func()) {
 	if task == nil {
 		return nil, func() {}
