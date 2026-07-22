@@ -75,6 +75,9 @@ func captureModelContentWithType(raw []byte, originalBytes, limit int, contentTy
 		summary := summarizeMultipartContent(nil, originalBytes, declaredType, "", policy)
 		return captureModelContent(summary, len(summary), limit, policy)
 	}
+	if strings.EqualFold(declaredType, "application/x-www-form-urlencoded") {
+		return sanitizeFormURLEncoded(raw, originalBytes, limit, policy)
+	}
 	if !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
 		return captureModelContent(raw, originalBytes, limit, policy)
 	}
@@ -281,7 +284,10 @@ func needsStructuredSanitization(raw []byte) bool {
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-		return false
+		// Valid JSON without secret/media keys may still carry credentials
+		// embedded in URL string values (e.g. {"url":"https://user:pass@host"}).
+		// Force structured sanitization so sanitizeJSONValue can scrub them.
+		return bytes.Contains(raw, []byte("://"))
 	}
 	return bytesContainsFold(raw, []byte("authorization:")) ||
 		bytesContainsFold(raw, []byte("proxy-authorization:")) ||
@@ -329,7 +335,7 @@ func sanitizeJSONValue(value any, key, parentType string, policy capturePolicy) 
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(typed)), "data:") {
 			return summarizeMedia(typed, key, parentType, policy)
 		}
-		return typed
+		return scrubURLsInString(typed)
 	default:
 		return value
 	}
@@ -556,6 +562,82 @@ func sanitizeCapturedURL(raw string) string {
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
 	return parsed.String()
+}
+
+// scrubURLsInString strips credentials, query parameters and fragments from
+// every absolute URL embedded in a free-form string value. This closes the
+// gap where a JSON field such as {"url":"https://user:pass@host?token=x"}
+// bypasses sanitization because "url" is neither a secret key nor a media
+// payload key.
+func scrubURLsInString(value string) string {
+	return absoluteURLPattern.ReplaceAllStringFunc(value, sanitizeCapturedURL)
+}
+
+// sanitizeTraceError scrubs an error message before it is written to an OTLP
+// span status or recorded as an exception event. Transport errors may embed
+// request URLs (including userinfo credentials), proxy-auth headers or
+// upstream response bodies; the OpenSpec tracing requirement mandates that
+// authentication material never enters any Trace field, including errors.
+func sanitizeTraceError(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	scrubbed := absoluteURLPattern.ReplaceAllStringFunc(msg, sanitizeCapturedURL)
+	scrubbed = authorizationLine.ReplaceAllStringFunc(scrubbed, redactLineValue)
+	scrubbed = cookieLine.ReplaceAllStringFunc(scrubbed, redactLineValue)
+	scrubbed = textSecretPattern.ReplaceAllStringFunc(scrubbed, func(match string) string {
+		separator := strings.IndexByte(match, ':')
+		if separator < 0 {
+			return redactedValue
+		}
+		return match[:separator+1] + redactedValue
+	})
+	const maxErrorBytes = 512
+	return string(validUTF8Prefix([]byte(scrubbed), maxErrorBytes))
+}
+
+// sanitizeFormURLEncosed parses an application/x-www-form-urlencoded body,
+// redacts values whose field name is a known secret key, and bounds the
+// result through the common capture path. Without this, a form body such as
+// "api_key=client-secret&model=gpt-4" bypasses redaction because it has no
+// JSON quoting or colon-delimited headers that the regex sanitizers match.
+func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capturePolicy) string {
+	values, err := url.ParseQuery(string(raw))
+	if err != nil {
+		// Fall back to conservative unstructured sanitization on parse failure
+		// so credentials are never exported raw.
+		sanitized := sanitizeUnstructuredText(string(validUTF8Prefix(raw, len(raw))), policy)
+		return boundCapture([]byte(sanitized), originalBytes, limit)
+	}
+	for field := range values {
+		if isSecretKey(field) {
+			values[field] = []string{redactedValue}
+		}
+	}
+	encoded := values.Encode()
+	return boundCapture([]byte(encoded), originalBytes, limit)
+}
+
+// boundCapture applies the common byte-limit and truncation-marker logic to
+// already-sanitized content.
+func boundCapture(source []byte, originalBytes, limit int) string {
+	if originalBytes < len(source) {
+		originalBytes = len(source)
+	}
+	if len(source) == 0 {
+		if originalBytes > 0 {
+			return truncationMarker(originalBytes, 0)
+		}
+		return ""
+	}
+	if len(source) > limit {
+		source = validUTF8Prefix(source, limit)
+		return string(source) + truncationMarker(originalBytes, len(source))
+	}
+	if originalBytes > len(source) {
+		return string(source) + truncationMarker(originalBytes, len(source))
+	}
+	return string(source)
 }
 
 func redactLineValue(match string) string {

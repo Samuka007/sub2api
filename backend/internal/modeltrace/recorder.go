@@ -506,7 +506,7 @@ func (a *traceAttempt) endCaptured(result recording.AttemptResult, originalOutpu
 
 		switch {
 		case result.Err != nil:
-			a.span.SetStatus(codes.Error, result.Err.Error())
+			a.span.SetStatus(codes.Error, sanitizeTraceError(result.Err.Error()))
 		case result.HTTPStatus >= http.StatusBadRequest:
 			a.span.SetStatus(codes.Error, httpStatusText(result.HTTPStatus))
 		default:

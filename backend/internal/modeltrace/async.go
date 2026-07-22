@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
@@ -31,7 +32,6 @@ type AsyncExecution struct {
 	span       trace.Span
 	recorder   *traceRecorder
 	metadata   AsyncExecutionMetadata
-	input      []byte
 	policy     capturePolicy
 	endOnce    sync.Once
 }
@@ -108,7 +108,6 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 		span:       span,
 		recorder:   recorder,
 		metadata:   metadata,
-		input:      append([]byte(nil), input...),
 		policy:     policy,
 	}
 }
@@ -132,8 +131,9 @@ func (e *AsyncExecution) End(status string, output []byte, err error) {
 			attribute.String("modeltrace.async.status", status),
 		)
 		if err != nil {
-			e.span.RecordError(err)
-			e.span.SetStatus(codes.Error, err.Error())
+			sanitized := sanitizeTraceError(err.Error())
+			e.span.RecordError(errors.New(sanitized))
+			e.span.SetStatus(codes.Error, sanitized)
 		} else if status == "cancelled" {
 			e.span.SetStatus(codes.Error, "async task cancelled")
 		} else {
