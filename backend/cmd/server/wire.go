@@ -111,6 +111,7 @@ func provideCleanup(
 	channelMonitorRunner *service.ChannelMonitorRunner,
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
+	quotaRecovery *service.QuotaRecoveryService,
 	modelIQ *service.ModelIQService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
@@ -329,6 +330,12 @@ func provideCleanup(
 			{"UpstreamBillingProbeService", func() error {
 				if upstreamBillingProbe != nil {
 					upstreamBillingProbe.Stop()
+				}
+				return nil
+			}},
+			{"QuotaRecoveryService", func() error {
+				if quotaRecovery != nil {
+					quotaRecovery.Stop()
 				}
 				return nil
 			}},
