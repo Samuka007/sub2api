@@ -31,7 +31,8 @@ setup_platform() {
   local group_payload group_id key_name api_key account_payload account_id
   group_payload=$(jq -nc --arg name "$PREFIX-$suffix" --arg platform "$platform" --argjson allow_image "$allow_image" '{
     name:$name,description:"model trace protocol matrix",platform:$platform,rate_multiplier:1,
-    is_exclusive:false,status:"active",allow_image_generation:$allow_image
+    is_exclusive:false,status:"active",allow_image_generation:$allow_image,
+    allow_messages_dispatch:($platform == "openai")
   }')
   group_id=$(admin_post /api/v1/admin/groups "$group_payload" | jq -er '.data.id')
   key_name="$PREFIX-$suffix-key"
@@ -102,8 +103,8 @@ post_json search "$OPENAI_KEY" /v1/alpha/search openai.search \
   "$(jq -nc --arg prompt "$CANARY-search" '{model:"gpt-e2e-matrix",query:$prompt}')"
 post_json anthropic-count "$ANTHROPIC_KEY" /v1/messages/count_tokens anthropic.count_tokens \
   "$(jq -nc --arg prompt "$CANARY-anthropic-count" '{model:"claude-e2e-matrix",messages:[{role:"user",content:$prompt}]}')"
-post_json openai-count "$OPENAI_KEY" /v1/responses/input_tokens openai.count_tokens \
-  "$(jq -nc --arg prompt "$CANARY-openai-count" '{model:"gpt-e2e-matrix",input:$prompt}')"
+post_json openai-backed-count "$OPENAI_KEY" /v1/messages/count_tokens anthropic.count_tokens \
+  "$(jq -nc --arg prompt "$CANARY-openai-backed-count" '{model:"gpt-e2e-matrix",messages:[{role:"user",content:$prompt}]}')"
 post_json openai-image-generation "$OPENAI_KEY" /v1/images/generations openai.images.generations \
   "$(jq -nc --arg prompt "$CANARY-openai-image-generation" '{model:"gpt-image-2",prompt:$prompt,size:"1024x1024"}')"
 
