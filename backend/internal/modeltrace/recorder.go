@@ -154,10 +154,14 @@ func (r *traceRecorder) RecordAsyncSubmission(taskID string, itemIDs []string) {
 	span := trace.SpanFromContext(r.ctx)
 	attrs := []attribute.KeyValue{attribute.Int("modeltrace.async.item_count", len(itemIDs))}
 	if taskID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", taskID))
+		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", scrubURLsInString(taskID)))
 	}
 	if len(itemIDs) > 0 {
-		attrs = append(attrs, attribute.StringSlice("langfuse.trace.metadata.item_ids", append([]string(nil), itemIDs...)))
+		scrubbedIDs := make([]string, len(itemIDs))
+		for i, id := range itemIDs {
+			scrubbedIDs[i] = scrubURLsInString(id)
+		}
+		attrs = append(attrs, attribute.StringSlice("langfuse.trace.metadata.item_ids", scrubbedIDs))
 	}
 	span.SetAttributes(attrs...)
 }
@@ -171,7 +175,7 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		AttemptIndex: index,
 		AccountID:    metadata.AccountID,
 		Provider:     metadata.Provider,
-		ClientModel:  metadata.ClientModel,
+		ClientModel:  scrubURLsInString(metadata.ClientModel),
 		Endpoint:     sanitizeAttemptEndpoint(metadata.Endpoint),
 		APIKeyID:     r.identity.APIKeyID,
 		UserID:       r.identity.UserID,
@@ -192,9 +196,10 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		attrs = append(attrs, attribute.String("gen_ai.provider.name", metadata.Provider))
 	}
 	if metadata.UpstreamModel != "" {
+		model := scrubURLsInString(metadata.UpstreamModel)
 		attrs = append(attrs,
-			attribute.String("gen_ai.request.model", metadata.UpstreamModel),
-			attribute.String("langfuse.observation.model.name", metadata.UpstreamModel),
+			attribute.String("gen_ai.request.model", model),
+			attribute.String("langfuse.observation.model.name", model),
 		)
 	}
 	if metadata.AccountID > 0 {
@@ -316,12 +321,13 @@ func (r *traceRecorder) usageAttributes(facts recording.UsageFacts) []attribute.
 		attribute.String("langfuse.observation.cost_details", string(costJSON)),
 	}
 	if facts.RequestID != "" {
-		attrs = append(attrs, attribute.String("gen_ai.response.id", facts.RequestID))
+		attrs = append(attrs, attribute.String("gen_ai.response.id", scrubURLsInString(facts.RequestID)))
 	}
 	if facts.Model != "" {
+		model := scrubURLsInString(facts.Model)
 		attrs = append(attrs,
-			attribute.String("gen_ai.response.model", facts.Model),
-			attribute.String("langfuse.observation.model.name", facts.Model),
+			attribute.String("gen_ai.response.model", model),
+			attribute.String("langfuse.observation.model.name", model),
 		)
 	}
 	if facts.AccountID > 0 {

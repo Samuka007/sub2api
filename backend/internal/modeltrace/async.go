@@ -75,12 +75,13 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 	traceCorrelation := map[string]string{}
 	observationCorrelation := map[string]string{}
 	if metadata.TaskID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", metadata.TaskID))
-		traceCorrelation["task_id"] = metadata.TaskID
-		observationCorrelation["task_id"] = metadata.TaskID
+		taskID := scrubURLsInString(metadata.TaskID)
+		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", taskID))
+		traceCorrelation["task_id"] = taskID
+		observationCorrelation["task_id"] = taskID
 	}
 	if metadata.ItemID != "" {
-		observationCorrelation["item_id"] = metadata.ItemID
+		observationCorrelation["item_id"] = scrubURLsInString(metadata.ItemID)
 	}
 	if !matches && validParent {
 		submissionTraceID := spanContext.TraceID().String()

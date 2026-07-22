@@ -356,13 +356,16 @@ func isSecretKey(key string) bool {
 	switch normalized {
 	case "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key",
 		"token", "access_token", "refresh_token", "id_token", "auth_token", "bearer_token",
-		"password", "passwd", "secret", "client_secret", "private_key", "cookie",
-		"set_cookie", "session_cookie", "credential", "credentials":
+		"authorization_token", "password", "passwd", "secret", "secret_key", "api_secret",
+		"client_secret", "private_key", "secret_access_key", "access_key_id", "access_key",
+		"cookie", "set_cookie", "session_cookie", "credential", "credentials":
 		return true
 	}
 	for _, suffix := range []string{
 		"_api_key", "_access_token", "_refresh_token", "_id_token", "_auth_token",
 		"_bearer_token", "_password", "_client_secret", "_private_key", "_credential",
+		"_secret_key", "_api_secret", "_secret_access_key", "_access_key_id", "_access_key",
+		"_authorization_token",
 	} {
 		if strings.HasSuffix(normalized, suffix) {
 			return true
@@ -544,14 +547,11 @@ func sanitizeUnstructuredText(value string, policy capturePolicy) string {
 	value = strings.ReplaceAll(value, `\u0040`, "@")
 	lines := strings.SplitAfter(value, "\n")
 	for i, line := range lines {
-		// Always scrub URLs, even inside SSE data: lines — a URL with
-		// credentials in an SSE JSON payload must not leak.
+		// Scrub URLs, auth headers, and cookies on ALL lines including SSE
+		// data: lines — credential material must never enter Trace.
 		line = absoluteURLPattern.ReplaceAllStringFunc(line, sanitizeCapturedURL)
-		if !strings.HasPrefix(strings.TrimSpace(line), "data:") {
-			// Auth/cookie header patterns only apply to non-SSE text.
-			line = authorizationLine.ReplaceAllStringFunc(line, redactLineValue)
-			line = cookieLine.ReplaceAllStringFunc(line, redactLineValue)
-		}
+		line = authorizationLine.ReplaceAllStringFunc(line, redactLineValue)
+		line = cookieLine.ReplaceAllStringFunc(line, redactLineValue)
 		line = textSecretPattern.ReplaceAllStringFunc(line, func(match string) string {
 			separator := strings.IndexByte(match, ':')
 			if separator < 0 {
