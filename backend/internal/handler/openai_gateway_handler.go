@@ -272,6 +272,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
+	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformOpenAI {
+		if cappedBody, changed := service.ApplyOpenAIReasoningEffortPolicy(body, apiKey.Group.MaxReasoningEffort, apiKey.Group.ReasoningEffortMappings); changed {
+			body = cappedBody
+		}
+	}
 
 	reqStream, ok := parseOpenAICompatibleStream(body)
 	if !ok {
@@ -1492,7 +1497,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "first websocket message must be response.create")
 		return
 	}
-
 	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
 	traceTurns.start(1, firstMessage, reqModel)
 	if reqModel == "" {
@@ -1754,9 +1758,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			zap.Int("candidate_count", scheduleDecision.CandidateCount),
 		)
 
+		maxReasoningEffort := ""
+		var reasoningEffortMappings []service.ReasoningEffortMapping
+		if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformOpenAI {
+			maxReasoningEffort = apiKey.Group.MaxReasoningEffort
+			reasoningEffortMappings = apiKey.Group.ReasoningEffortMappings
+		}
 		var requestPayloadHash string
 		hooks := &service.OpenAIWSIngressHooks{
-			InitialRequestModel: reqModel,
+			InitialRequestModel:     reqModel,
+			MaxReasoningEffort:      maxReasoningEffort,
+			ReasoningEffortMappings: reasoningEffortMappings,
 			BeforeRequest: func(turn int, payload []byte, originalModel string) error {
 				if turn == 1 {
 					return nil
