@@ -26,9 +26,10 @@ import (
 )
 
 type Application struct {
-	Server      *http.Server
-	PromptAudit *securityaudit.PromptService
-	Cleanup     func()
+	Server           *http.Server
+	PromptAudit      *securityaudit.PromptService
+	ModelTraceConfig *modeltrace.ConfigManager
+	Cleanup          func()
 }
 
 func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.Manager) (*Application, error) {
@@ -53,11 +54,15 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 		// BuildInfo provider
 		provideServiceBuildInfo,
 
+		// Model tracing runtime configuration provider
+		provideModelTraceConfigManager,
+		provideBatchImageTraceRecorder,
+
 		// Cleanup function provider
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -71,6 +76,21 @@ func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideModelTraceConfigManager(
+	cfg *config.Config,
+	settings service.SettingRepository,
+	encryptor service.SecretEncryptor,
+	runtime *modeltrace.Manager,
+) *modeltrace.ConfigManager {
+	return modeltrace.NewConfigManager(
+		cfg.ModelTracing,
+		settings,
+		encryptor,
+		cfg.Totp.EncryptionKeyConfigured,
+		runtime,
+	)
 }
 
 func provideCleanup(

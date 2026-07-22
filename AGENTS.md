@@ -21,6 +21,12 @@
 - 端到端测试流程沉淀在 `skills/sub2api-model-trace-e2e/`，每次涉及模型追踪代码的改动都应跑一次该 skill 的 smoke。
 - 本地环境默认用 Colima profile `swebench` 运行 Docker；Langfuse 部署在 `http://localhost:3000`，预置凭据 `pk-lf-local`/`sk-lf-local`（仅本地）。
 
+## 模型追踪实施记录
+
+- `add-model-request-otel-tracing` 每个 OpenSpec task 的踩坑、根因、修复、持久化产物、验证证据和剩余边界，统一追加到 `docs/MODEL_TRACING_IMPLEMENTATION_LOG.md`。
+- 进入下一 task 前必须先更新该记录；运行时配置、端口、容器、生成命令、provider 取值位置等会影响后续 agent 的持久化事实也必须记录。
+- 禁止在记录中写入任何真实或本地测试凭据；只允许记录 provider 名称、配置键名和安全取值位置。
+
 ## 禁止
 
 - 主动 `git commit` / `git push` / `gh pr create`：除非用户明确要求。

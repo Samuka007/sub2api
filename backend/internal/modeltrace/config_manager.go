@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -17,15 +17,20 @@ const (
 	// SettingKeyModelTraceConfig stores the complete runtime override as one JSON value.
 	SettingKeyModelTraceConfig = "model_trace_config"
 
-	ConfigSourceDisabled   = "disabled"
-	ConfigSourceDeployment = "deployment"
-	ConfigSourceRuntime    = "runtime"
+	ConfigSourceDisabled         = "disabled"
+	ConfigSourceDeployment       = "deployment"
+	ConfigSourceRuntime          = "runtime"
+	defaultConfigRefreshInterval = 5 * time.Second
 )
 
 // SettingsStore is the narrow settings-table boundary used by model tracing.
 type SettingsStore interface {
 	GetValue(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string) error
+}
+
+type compareAndSetSettingsStore interface {
+	CompareAndSet(ctx context.Context, key, oldValue, newValue string) (bool, error)
 }
 
 // SecretEncryptor matches service.SecretEncryptor without coupling callers to a concrete implementation.
@@ -36,11 +41,12 @@ type SecretEncryptor interface {
 
 // ConfigSnapshot is the immutable effective model tracing configuration.
 type ConfigSnapshot struct {
-	Config        config.ModelTracingConfig
-	Source        string
-	ConfigVersion int64
-	UpdatedAt     time.Time
-	UpdatedBy     int64
+	Config               config.ModelTracingConfig
+	Source               string
+	ConfigVersion        int64
+	UpdatedAt            time.Time
+	UpdatedBy            int64
+	allowSourceDowngrade bool
 }
 
 // RuntimeConfig is the single settings JSON document. SecretKeyEncrypted never leaves storage APIs.
@@ -92,58 +98,164 @@ type UpdateConfigRequest struct {
 
 // ConfigManager resolves runtime settings over deployment defaults and serializes updates.
 type ConfigManager struct {
-	deployment             config.ModelTracingConfig
-	settings               SettingsStore
-	encryptor              SecretEncryptor
+	deployment              config.ModelTracingConfig
+	settings                SettingsStore
+	encryptor               SecretEncryptor
 	encryptionKeyConfigured bool
-	mu                     sync.Mutex
-	now                    func() time.Time
+	runtime                 *Manager
+	mu                      sync.Mutex
+	now                     func() time.Time
+	refreshInterval         time.Duration
+	lifecycleMu             sync.Mutex
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
 }
 
-func NewConfigManager(deployment config.ModelTracingConfig, settings SettingsStore, encryptor SecretEncryptor, encryptionKeyConfigured bool) *ConfigManager {
-	return &ConfigManager{
+func NewConfigManager(deployment config.ModelTracingConfig, settings SettingsStore, encryptor SecretEncryptor, encryptionKeyConfigured bool, runtime ...*Manager) *ConfigManager {
+	manager := &ConfigManager{
 		deployment:              deployment,
 		settings:                settings,
 		encryptor:               encryptor,
 		encryptionKeyConfigured: encryptionKeyConfigured,
 		now:                     time.Now,
+		refreshInterval:         defaultConfigRefreshInterval,
+	}
+	if len(runtime) > 0 {
+		manager.runtime = runtime[0]
+	}
+	return manager
+}
+
+// Start applies the persisted effective config before serving requests and
+// periodically converges this instance after another instance updates settings.
+func (m *ConfigManager) Start(ctx context.Context) error {
+	if m == nil || m.runtime == nil {
+		return nil
+	}
+	if err := m.refresh(ctx); err != nil {
+		return err
+	}
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.cancel != nil {
+		return nil
+	}
+	refreshCtx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	interval := m.refreshInterval
+	if interval <= 0 {
+		interval = defaultConfigRefreshInterval
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-refreshCtx.Done():
+				return
+			case <-ticker.C:
+				_ = m.refresh(refreshCtx)
+			}
+		}
+	}()
+	return nil
+}
+
+func (m *ConfigManager) Shutdown(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.lifecycleMu.Lock()
+	cancel := m.cancel
+	m.cancel = nil
+	m.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
 // Resolve selects a valid runtime snapshot first, then the deployment default.
 func (m *ConfigManager) Resolve(ctx context.Context) ConfigSnapshot {
-	if m == nil {
-		return ConfigSnapshot{Source: ConfigSourceDisabled}
+	snapshot, err := m.resolve(ctx)
+	if err != nil {
+		return m.fallbackSnapshot()
 	}
-	if runtime, ok := m.loadRuntime(ctx); ok {
-		return runtime
-	}
-	if deployment, ok := normalizeConfig(m.deployment); ok {
-		return ConfigSnapshot{Config: deployment, Source: ConfigSourceDeployment}
-	}
-	return ConfigSnapshot{Source: ConfigSourceDisabled}
+	return snapshot
 }
 
-func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool) {
+func (m *ConfigManager) refresh(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, err := m.resolve(ctx)
+	if err != nil {
+		return err
+	}
+	return m.runtime.ApplySnapshot(ctx, snapshot)
+}
+
+func (m *ConfigManager) resolve(ctx context.Context) (ConfigSnapshot, error) {
+	if m == nil {
+		return ConfigSnapshot{Source: ConfigSourceDisabled}, nil
+	}
+	runtime, ok, err := m.loadRuntime(ctx)
+	if err != nil {
+		return ConfigSnapshot{}, err
+	}
+	if ok {
+		return runtime, nil
+	}
+	return m.fallbackSnapshot(), nil
+}
+
+func (m *ConfigManager) fallbackSnapshot() ConfigSnapshot {
+	if m == nil {
+		return ConfigSnapshot{Source: ConfigSourceDisabled, allowSourceDowngrade: true}
+	}
+	if deployment, ok := normalizeConfig(m.deployment); ok {
+		return ConfigSnapshot{Config: deployment, Source: ConfigSourceDeployment, allowSourceDowngrade: true}
+	}
+	return ConfigSnapshot{Source: ConfigSourceDisabled, allowSourceDowngrade: true}
+}
+
+func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool, error) {
 	if m.settings == nil {
-		return ConfigSnapshot{}, false
+		return ConfigSnapshot{}, false, nil
 	}
 	raw, err := m.settings.GetValue(ctx, SettingKeyModelTraceConfig)
-	if err != nil || raw == "" {
-		return ConfigSnapshot{}, false
+	if err != nil {
+		if errors.Is(err, service.ErrSettingNotFound) {
+			return ConfigSnapshot{}, false, nil
+		}
+		return ConfigSnapshot{}, false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return ConfigSnapshot{}, false, nil
 	}
 	var stored RuntimeConfig
 	if json.Unmarshal([]byte(raw), &stored) != nil || !stored.Configured {
-		return ConfigSnapshot{}, false
+		return ConfigSnapshot{}, false, nil
 	}
 	secret := ""
 	if stored.SecretKeyEncrypted != "" {
 		if m.encryptor == nil {
-			return ConfigSnapshot{}, false
+			return ConfigSnapshot{}, false, nil
 		}
 		secret, err = m.encryptor.Decrypt(stored.SecretKeyEncrypted)
 		if err != nil {
-			return ConfigSnapshot{}, false
+			return ConfigSnapshot{}, false, nil
 		}
 	}
 	value, ok := normalizeConfig(config.ModelTracingConfig{
@@ -152,12 +264,12 @@ func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool) 
 		MediaMaxBytes: stored.MediaMaxBytes, CaptureMediaContent: stored.CaptureMediaContent,
 	})
 	if !ok {
-		return ConfigSnapshot{}, false
+		return ConfigSnapshot{}, false, nil
 	}
 	return ConfigSnapshot{
 		Config: value, Source: ConfigSourceRuntime, ConfigVersion: stored.ConfigVersion,
 		UpdatedAt: stored.UpdatedAt, UpdatedBy: stored.UpdatedBy,
-	}, true
+	}, true, nil
 }
 
 // GetConfig returns the effective public configuration without secret material.
@@ -173,7 +285,7 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	current, err := m.readStoredRuntime(ctx)
+	current, currentRaw, err := m.readStoredRuntime(ctx)
 	if err != nil {
 		return PublicConfig{}, err
 	}
@@ -181,7 +293,7 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 		return PublicConfig{}, infraerrors.Conflict("MODEL_TRACE_CONFIG_CONFLICT", "model tracing config was updated by another administrator")
 	}
 
-	secretCiphertext, secretPlaintext, err := m.resolveSecretForUpdate(current, request.SecretKey)
+	secretCiphertext, secretPlaintext, err := m.resolveSecretForUpdate(current, request.SecretKey, request.Enabled)
 	if err != nil {
 		return PublicConfig{}, err
 	}
@@ -201,36 +313,73 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 		CaptureMediaContent: value.CaptureMediaContent, ConfigVersion: current.ConfigVersion + 1,
 		UpdatedAt: m.now().UTC(), UpdatedBy: actorID,
 	}
+	var prepared *generation
+	if m.runtime != nil {
+		prepared, err = buildGeneration(ctx, value, ConfigSourceRuntime, next.ConfigVersion)
+		if err != nil {
+			return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "model tracing exporter could not be initialized").WithCause(err)
+		}
+	}
 	raw, err := json.Marshal(next)
 	if err != nil {
+		m.discardPrepared(prepared)
 		return PublicConfig{}, err
 	}
-	if err := m.settings.Set(ctx, SettingKeyModelTraceConfig, string(raw)); err != nil {
+	if err := m.storeSnapshot(ctx, currentRaw, string(raw)); err != nil {
+		m.discardPrepared(prepared)
 		return PublicConfig{}, err
+	}
+	if prepared != nil {
+		if err := m.runtime.installGeneration(prepared); err != nil {
+			return PublicConfig{}, err
+		}
 	}
 	return publicFromRuntime(next), nil
 }
 
-func (m *ConfigManager) readStoredRuntime(ctx context.Context) (RuntimeConfig, error) {
+func (m *ConfigManager) discardPrepared(prepared *generation) {
+	if prepared == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = prepared.close(ctx)
+}
+
+func (m *ConfigManager) storeSnapshot(ctx context.Context, oldRaw, newRaw string) error {
+	if store, ok := m.settings.(compareAndSetSettingsStore); ok {
+		updated, err := store.CompareAndSet(ctx, SettingKeyModelTraceConfig, oldRaw, newRaw)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return infraerrors.Conflict("MODEL_TRACE_CONFIG_CONFLICT", "model tracing config was updated by another administrator")
+		}
+		return nil
+	}
+	return m.settings.Set(ctx, SettingKeyModelTraceConfig, newRaw)
+}
+
+func (m *ConfigManager) readStoredRuntime(ctx context.Context) (RuntimeConfig, string, error) {
 	raw, err := m.settings.GetValue(ctx, SettingKeyModelTraceConfig)
 	if err != nil {
 		if errors.Is(err, service.ErrSettingNotFound) {
-			return RuntimeConfig{}, nil
+			return RuntimeConfig{}, "", nil
 		}
-		return RuntimeConfig{}, err
+		return RuntimeConfig{}, "", err
 	}
 	if strings.TrimSpace(raw) == "" {
-		return RuntimeConfig{}, nil
+		return RuntimeConfig{}, raw, nil
 	}
 	var stored RuntimeConfig
 	if json.Unmarshal([]byte(raw), &stored) != nil {
 		// A corrupt snapshot has no trustworthy version. expected=0 lets an admin repair it.
-		return RuntimeConfig{}, nil
+		return RuntimeConfig{}, raw, nil
 	}
-	return stored, nil
+	return stored, raw, nil
 }
 
-func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested *string) (ciphertext, plaintext string, err error) {
+func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested *string, enabled bool) (ciphertext, plaintext string, err error) {
 	if requested != nil {
 		plaintext = *requested
 		if plaintext == "" {
@@ -239,6 +388,9 @@ func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested 
 		return m.encryptNewSecret(plaintext)
 	}
 	if current.SecretKeyEncrypted != "" {
+		if !enabled {
+			return current.SecretKeyEncrypted, "", nil
+		}
 		if m.encryptor == nil {
 			return "", "", infraerrors.ServiceUnavailable("MODEL_TRACE_SECRET_ENCRYPTOR_UNAVAILABLE", "model tracing secret encryptor is unavailable")
 		}
@@ -248,7 +400,7 @@ func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested 
 		}
 		return current.SecretKeyEncrypted, plaintext, nil
 	}
-	if m.deployment.SecretKey == "" {
+	if !enabled || m.deployment.SecretKey == "" {
 		return "", "", nil
 	}
 	return m.encryptNewSecret(m.deployment.SecretKey)

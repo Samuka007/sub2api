@@ -126,6 +126,8 @@ tests
 CLAUDE.md
 .claude
 scripts
+!skills/sub2api-model-trace-e2e/scripts/
+!skills/sub2api-model-trace-e2e/scripts/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 .code-review-state

@@ -4,70 +4,73 @@
 
 完整规格在仓库 `openspec/changes/add-model-request-otel-tracing/`：
 - `proposal.md` — 变更动机与范围
-- `design.md` — 14 个设计决策，含 `internal/modeltrace` 模块结构、根 Trace + Generation 子 span、fail-open、endpoint 校验、Langfuse 属性映射
+- `design.md` — 14 个设计决策，含 `internal/modeltrace`、根 Trace + Generation、fail-open、endpoint 校验和 Langfuse 属性映射
 - `specs/model-request-tracing/spec.md` — 模型请求追踪能力需求
 - `specs/langfuse-otel-export/spec.md` — Langfuse OTLP 导出能力需求
-- `tasks.md` — 11 个垂直切片任务，当前实现覆盖 1.1 / 2.1 / 2.2 / 7.2
+- `tasks.md` — 真源中只有 1.1 / 2.1 / 2.2 已勾选；3.1 及以后仍未勾选。本 reference 只记录 e2e harness 已覆盖的行为，不代替或推断 OpenSpec task 完成状态。
 
 ## 本 e2e 验证的 spec 映射
 
 | Spec Requirement | Scenario | e2e 验证点 |
 |---|---|---|
-| 所有模型推理与生成请求必须具有唯一 Trace | 成功的同步模型请求 | ClickHouse `traces` 表对 1 个 session_id 返回 1 条 |
-| 一个 Trace 必须保留完整尝试层级 | 请求未到达上游 | `observations` 表 2 行：根 SPAN + 子 GENERATION，parent_observation_id 链接正确 |
-| Trace 必须区分客户端与上游内容视角 | 请求和响应发生协议转换 | 根 span `input`/`output` = 客户端请求/响应 JSON |
-| 认证凭据永远不得进入 Trace | 请求和上游调用都携带秘密凭据 | 确认 trace 的 input/output 不含 `sk-lf-local`/`admin123456`（只含客户端 body 的 `sk-e2e-...` 用户 key 是用户主动写入） |
-| 流式与取消请求必须保留已产生的现场 | 流式请求正常完成 | 本 e2e **未覆盖**（非流式请求），后续 task 6.1 |
-| Trace 必须支持身份、会话和请求关联 | 两个请求携带相同显式会话标识 | `traces.session_id` = 请求 body `session_id`；`metadata.api_key_id`/`metadata.group_id` 非空 |
-| Trace 必须记录可得的用量、成本和阶段耗时 | 请求失败且没有 Usage | 503 时不写伪造 0 值 usage（当前 modeltrace 中间件未写 usage 属性，符合"未知不写"） |
-| Trace 必须发送到唯一的自部署 Langfuse 项目 | 有效的自部署目标可用 | 只发到 `http://127.0.0.1:3000/api/public/otel/v1/traces` 一个目标 |
-| 部署与运行时配置必须遵守确定优先级 | 只有部署配置 | 本 e2e 用部署配置（环境变量），运行时配置（admin API）未接 wire，属于已知缺口 |
-| OTLP 传输必须保护内容与项目凭据 | 管理员配置非回环 HTTP 目标 | endpoint 强制 loopback，e2e 用 `127.0.0.1` 通过 |
-| 观测故障必须 fail-open 且 MVP 不保证补送 | Langfuse 在非流式请求期间不可用 | 503 业务响应正常返回，trace 仍尝试发送；停 Langfuse 后业务不受影响（本 e2e 未跑此场景，属于 task 10.1） |
+| 所有模型推理与生成请求必须具有唯一 Trace | 已识别请求在真实发送前失败 | HTTP 503；按唯一 session/request ID 只有 1 条 Trace、1 个根 SPAN、0 GENERATION |
+| 身份建立前不得创建 Trace | 匿名请求、未知 API Key | HTTP 401，按唯一 request ID 查询均为 0 Trace |
+| 已识别身份的鉴权失败必须追踪 | disabled API Key | HTTP 401；1 个 ERROR 根 SPAN、0 GENERATION，且 user/API Key/group 数值身份正确 |
+| 控制面不得创建模型 Trace | 已鉴权 `GET /v1/models` | HTTP 200，按唯一 request ID 查询为 0 Trace |
+| 一个 Trace 必须保留完整尝试层级 | 本地 fixture 固定 429 后切换账号 200 | 一个根 Trace；`upstream.attempt.1/2` 两个真实 GENERATION 均为根的直接子项，账号和 ERROR/成功状态可区分 |
+| Trace 必须区分客户端与上游内容视角 | OpenAI Chat Completions → Anthropic Messages | 根保存客户端 input/output，attempt 保存转换后 input 与 Anthropic SSE output；上游响应 credential 字段只出现 `[REDACTED]` |
+| 有界内容、多模态和秘密隔离 | 2 KiB Prompt 上限 + Base64 图片 + 分离 canary | 有确定性截断标记和媒体 fingerprint/approx_bytes；请求字段 secret、媒体正文、用户/上游 API Key、上游响应 secret 在真实 Langfuse 中命中数为 0 |
+| 默认内容上限可部署并真实接收 | 启动不覆盖默认值；运行时恢复 1 MiB 后发送 1,040,000 字节正文 | admin GET 的 prompt/response/media 均为 1048576；Langfuse root input 保留 head/tail canary、长度接近上限且无截断标记 |
+| 流式请求正常完成 | 单成功账号返回完整 Anthropic SSE | 客户端 HTTP 200、`text/event-stream`、content/finish/[DONE] 帧；Langfuse 只有一个根 Trace，真实 attempt GENERATION 是根的直接子项，根状态为 `completed` |
+| 异步/批量模型执行必须续接提交 Trace | Gemini Batch API 两 item（一个成功、一个 provider 失败） | API 200、worker `completed`；同一逻辑 Trace 下 1 个提交根 SPAN、2 个直系 `model.async.execution` GENERATION，fingerprint 均匹配，终态各为 `completed` / `failed`；媒体 canary 零泄露 |
+| 认证凭据永远不得进入 Trace | 配置 API、客户端 Header、上游请求/响应 | 配置响应不回显 secret；ClickHouse 对本次所有 observation/trace 执行完整 canary 零命中查询 |
+| Trace 必须发送到唯一的自部署 Langfuse 项目 | 本地目标可用 | 只配置 `http://127.0.0.1:3000`；公开 health 版本必须 `>=3.22.0`，并记录 OCI version/revision/digest |
+| 部署与运行时配置必须遵守确定优先级 | 部署默认、运行时小上限、恢复默认、secret 保留与 CAS | 先验证 deployment version 0，再运行时 version 1/2/3；远端明文 HTTP 被拒且不改旧配置，空 secret 保留，过期 version 返回 409 |
+| 观测故障必须 fail-open 且 MVP 不保证补送 | Langfuse 不可用或变慢 | **本脚本未执行**停 Langfuse/慢 exporter 场景；不得把当前 smoke 写成该项已验收 |
 
-## 503 产生原因
+## 503、failover、SSE 与异步 batch 的本地执行链
 
-sub2api 是 LLM 网关，收到 `/v1/chat/completions` 后要找可用的上游 LLM 账号（OpenAI/Anthropic/Grok）来转发。e2e 环境**故意不配上游账号**，因此：
-1. 请求通过 API Key 鉴权 → 建立 user/api_key/group 身份
-2. `modeltrace.Middleware` 在 `apiKeyAuth` 之后挂载，已创建根 Trace + Generation span
-3. Handler 进入账号调度，无可用账号 → 返回 503 `Service temporarily unavailable`
-4. Middleware 的 `defer span.End()` 捕获 503 状态码，写入 `http.response.status_code=503`
-5. Generation span 的 `output` 是 `{"error":{"message":"Service temporarily unavailable","type":"api_error"}}`
-6. BatchSpanProcessor 5 秒后 flush 到 Langfuse
+1. Candidate middleware 在模型执行路由安装延迟身份 Hook；匿名/未知 Key 阶段不创建 Span。
+2. API Key 仓储解析出真实身份后创建唯一根 Trace。
+3. 原始 `e2e-key` group 在身份、截断和 1 MiB 场景尚无账号，因此 Handler 确定性返回 503；这些 Trace 只有根 SPAN，不得虚构 attempt。
+4. 独立 failover group 挂两个本地 Anthropic 账号：priority 1 指向 `/fail` 固定 429，priority 2 指向 `/ok` 固定 200 完整 SSE；一次非流式客户端请求产生两个真实 attempt GENERATION。
+5. 完成 503 场景后，原始 group 只挂一个 `/ok` 账号；`stream=true` 请求经协议转换把本地 Anthropic SSE 作为 OpenAI SSE 返回，客户端必须收到内容帧、成功终态和 `[DONE]`。
+6. 独立 Gemini batch group 通过本地一次性 CA 把 `generativelanguage.googleapis.com:443` 定向到 TLS fixture；提交 API 保存最小 trace continuation，真实 queue worker 完成 upload/create/poll/download 后，为两个 item 在原提交根下分别结束成功/失败 Generation。
+7. 根 finalizer 捕获最终客户端状态与安全 input/output；BatchSpanProcessor flush 后脚本在 Langfuse ClickHouse 断言 cardinality、父子关系、续接 fingerprint、状态和 canary。
 
-**这正是 spec 的 fail-open 设计**：业务失败（503）也被完整追踪，而追踪链路本身不影响业务响应。
+这四类路径分别证明“未发送不造 attempt”“真实 429→200 保留全部 attempt”“正常 SSE 保留帧与 completed 终态”“真实 queue/worker 续接同一 Trace 且不泄露媒体”，不能互相替代。
 
-## 为什么不配真实上游账号
+## 为什么不调用真实外部 LLM
 
-1. **成本**：真实 OpenAI/Anthropic 调用产生费用，e2e 每次跑都花钱不合理。
-2. **确定性**：真实上游响应不稳定（限流、网络、模型变更），e2e 结果不可复现；503 是确定性响应。
-3. **覆盖足够**：503 场景已覆盖 Trace 生成、span 层级、身份映射、fail-open、内容捕获；真实成功响应只是 `http.response.status_code=200` + 非错误 output，逻辑路径相同。
-4. **隔离**：不配上游 = 不依赖外部 LLM 凭据，e2e 完全本地。
+1. **成本与凭据**：不使用生产/个人 LLM Key，不产生外部费用。
+2. **确定性**：本地 Go fixture 固定提供 Anthropic 健康 200、失败 429、完整 SSE，以及 Gemini File/Batch API 的 upload/create/poll/download；不受限流、网络和模型版本漂移影响。
+3. **覆盖边界**：无账号 503、故障转移 429→200、非流式协议转换、真实 SSE 正常完成和真实 queue/worker 异步续接都在同一隔离环境可复现。
+4. **不等价声明**：本地 fixture 证明网关、异步 worker 与 Langfuse 链路，不证明任一外部厂商服务当前可用，也不证明生产网络、证书或配额。
 
-## 已实现的 OpenSpec tasks
+## 当前 e2e harness 对 OpenSpec tasks 的覆盖
 
-| Task | 描述 | 实现文件 | 状态 |
-|---|---|---|---|
-| 1.1 | 首个端到端 OTLP Trace | `backend/internal/modeltrace/{exporter,middleware,manager_test}.go` | ✅ |
-| 2.1 | 部署与运行时配置闭环 | `backend/internal/modeltrace/{config_manager,admin_handler,config_manager_test}.go` | ✅（wire 未接 ConfigManager，admin API 返回 503） |
-| 2.2 | 传输安全校验 | `backend/internal/modeltrace/exporter_test.go` | ✅ |
-| 7.2 | 独立 Session extractor | `backend/internal/modeltrace/{session,session_test}.go` | ✅ |
+下表是脚本行为覆盖，不修改 `tasks.md` checkbox，也不等于完整 task 已完成。
 
-## 未实现的 OpenSpec tasks（建议列 GitHub Issue）
-
-| Task | 描述 | 备注 |
+| Task | 当前真实 smoke 覆盖 | 仍未由本脚本覆盖 |
 |---|---|---|
-| 2.1 前端 | 管理员前端配置区 | 需改 `frontend/src/views/admin/` |
-| 3.1 | 路由矩阵 + 身份门禁 | 当前只接 `/v1/chat/completions`，其他协议入口未接 |
-| 4.1 | 协议转换 + 重试 + 故障转移 attempt 层级 | 当前一个 Generation span，不区分多次上游尝试 |
-| 5.1 | 有界内容 + 多模态 + 秘密隔离 | 当前有界捕获已实现，多模态默认元数据未实现 |
-| 6.1 | SSE/流式/取消部分 response | 未实现 |
-| 6.2 | WebSocket 多回合 | 未实现 |
-| 7.1 | Usage/cost 精确映射 | 当前未写 usage 属性 |
-| 8.1 | 全协议入口矩阵 | 未实现 |
-| 9.1 | 异步/批量任务 SpanContext 续接 | 未实现 |
-| 10.1 | 热切换不可变 generation + 引用计数 | 未实现，配置重启生效 |
-| 11.1 | 全量门禁验收 | 未实现 |
+| 3.1 | 匿名/未知/控制面 0 Trace；已识别无账号 503 和 disabled 401 各单根 Trace | 全部受限 Key、协议校验和控制面矩阵 |
+| 4.1 | Chat Completions→Anthropic；确定性 429→200；两个 attempt 的账号、状态、父子和安全 output | 所有尝试均失败及更多协议转换组合 |
+| 5.1 | 小上限截断、默认媒体 descriptor、系统 secret/media canary 零命中；部署默认 1 MiB 可观察且接近上限 Prompt 真正落 Langfuse | 原始媒体 opt-in 及更多媒体类型 |
+| 6.1 | 正常 SSE 的客户端帧、真实 Generation 层级和 `completed` 终态 | 客户端断连、上游中途错误、慢 exporter；因此不得标为完整 6.1 验收 |
+| 9.1 | 真实 Gemini Batch API 提交、queue/worker、两 item 成败终态；持久化 continuation fingerprint 匹配并在同一 Trace 根下生成两个直系 GENERATION；默认媒体 canary 零泄露 | 异步图片入口、fingerprint 错配/目标切换/关闭、item 重试和任务取消；因此不得标为完整 9.1 验收 |
+
+## 尚未由本 e2e 完整验收的 OpenSpec tasks / 场景
+
+| Task | 缺口 |
+|---|---|
+| 6.1 | 仅正常 SSE 有真实 smoke；断连、上游部分失败、慢 exporter 仍缺 |
+| 6.2 | Responses WebSocket 多回合、断连和回合间配置切换未在本脚本执行 |
+| 7.1 | 本脚本未逐字段比对最终 Usage Log、token/cost；未知 Usage 不伪造仅由现有聚焦测试保护 |
+| 7.2 | 当前 smoke 只验证显式 `session_id`；完整 allowlist、伪会话排除和跨协议矩阵未执行 |
+| 8.1 | 全同步协议/入口矩阵未执行 |
+| 9.1 | 已覆盖同 fingerprint 的 batch 多 item 正常 worker 续接；异步图片、fingerprint 错配与 OTel Link、目标切换/关闭、进程重启、item 重试和取消仍缺 |
+| 10.1 | 进行中请求热切换、关闭、Langfuse 不可用/阻塞和 panic 隔离未执行 |
+| 11.1 | 本脚本只覆盖本地成功/失败/重试/正常 SSE/截断 smoke，不替代全项目 test/race/build 与性能对比门禁 |
 
 ## 与 sub2api 仓库规约的关系
 

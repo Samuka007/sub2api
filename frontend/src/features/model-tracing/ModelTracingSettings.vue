@@ -116,6 +116,7 @@
               v-model.number="draft[field.key]"
               type="number"
               min="1"
+			  :max="MAX_CAPTURE_BYTES"
               step="1"
               class="input mt-1 w-full"
             />
@@ -166,6 +167,8 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 
 import { getConfig, updateConfig } from './api'
 import type { ModelTracingConfig, UpdateModelTracingConfig } from './types'
+
+const MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 
 type ByteLimitKey = 'promptMaxBytes' | 'responseMaxBytes' | 'mediaMaxBytes'
 
@@ -236,7 +239,7 @@ function hasUsableSecret(value: ConfigDraft): boolean {
 }
 
 function positiveInteger(value: number): number {
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1
+  return Number.isFinite(value) && value > 0 ? Math.min(MAX_CAPTURE_BYTES, Math.floor(value)) : 1
 }
 
 async function saveConfig() {

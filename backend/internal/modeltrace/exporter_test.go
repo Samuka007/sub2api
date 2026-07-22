@@ -134,3 +134,69 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 		}
 	})
 }
+
+func TestManagerConcurrentShutdownWaitsForEveryPublishedGeneration(t *testing.T) {
+	initialClosed := make(chan struct{})
+	nextClosed := make(chan struct{})
+	initial := &generation{
+		source: ConfigSourceDeployment, fingerprint: "initial",
+		shutdown: func(context.Context) error {
+			close(initialClosed)
+			return nil
+		},
+	}
+	manager := &Manager{active: initial}
+	initialHeld := manager.Acquire()
+	next := &generation{
+		source: ConfigSourceRuntime, version: 1, fingerprint: "next",
+		shutdown: func(context.Context) error {
+			close(nextClosed)
+			return nil
+		},
+	}
+	if err := manager.installGeneration(next); err != nil {
+		t.Fatalf("install generation: %v", err)
+	}
+	nextHeld := manager.Acquire()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() { results <- manager.Shutdown(shutdownCtx) }()
+	go func() { results <- manager.Shutdown(shutdownCtx) }()
+
+	select {
+	case err := <-results:
+		t.Fatalf("Shutdown returned while both generations were retained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	nextHeld.Release()
+	select {
+	case <-nextClosed:
+	case <-time.After(time.Second):
+		t.Fatal("active generation was not shut down after release")
+	}
+	select {
+	case err := <-results:
+		t.Fatalf("Shutdown returned before the retired generation was released: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	initialHeld.Release()
+	select {
+	case <-initialClosed:
+	case <-time.After(time.Second):
+		t.Fatal("retired generation was not shut down after release")
+	}
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("Shutdown returned an error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent Shutdown did not wait for all generations")
+		}
+	}
+}

@@ -1,7 +1,7 @@
 ---
 name: sub2api-model-trace-e2e
 description: |
-  运行 sub2api 模型请求 OTEL→Langfuse 端到端 smoke：启动本地 Langfuse v3 全栈、sub2api 依赖 postgres+redis、编译 sub2api 二进制、用 AUTO_SETUP 引导管理员账号、发一次 OpenAI Chat Completions 请求、查 Langfuse ClickHouse 验证 trace + 根/Generation span 层级和身份元数据落库。
+  运行 sub2api 模型请求 OTEL→Langfuse 端到端 smoke：启动本地 Langfuse v3 全栈、sub2api 依赖 postgres+redis、编译并启动 sub2api，验证运行时配置闭环、候选路由身份门禁、匿名/控制面零 Trace，以及已识别失败请求的单根 Span、身份和会话元数据落库。
 
   触发条件（满足任一）：
   1. 用户要跑模型追踪端到端测试（如"跑一下 otel e2e""验证 langfuse 收到 trace""端到端 smoke"）。
@@ -20,12 +20,13 @@ description: |
 
 ## 核心规则（最高优先级）
 
-1. **真实可观察证据高于"命令跑完"**。最终成功必须同时满足：sub2api `/health` 返回 200、Langfuse ClickHouse `traces` 表存在与请求 session_id 匹配的 1 条 trace、`observations` 表存在 2 条（根 SPAN + 子 GENERATION）、根 span `name=model.request`、Generation `provided_model_name=gpt-4`、`parent_observation_id` 指向根、`metadata.api_key_id` 与 `metadata.group_id` 非空。任一缺失即失败，不得以"容器在跑""命令 exit 0"代替。
-2. **本地隔离优先**。Langfuse 端点、sub2api DB、API Key 全部用本地测试值（`pk-lf-local`/`sk-lf-local`/`admin123456`），禁止写进提交、PR 或日志。查看产物时凭据字段必须遮蔽。
+1. **真实可观察证据高于"命令跑完"**。最终成功必须同时满足：sub2api `/health` 返回 200；匿名请求、未知 API Key 和已鉴权控制面请求各为 0 Trace；有效但无上游账号的 Key 与已识别但 disabled 的 Key 各产生且只产生 1 条 Trace/1 个根 SPAN，不得虚构 GENERATION；根 span `name=model.request`，有效 Key 的 `user_id`、`session_id`、`metadata.api_key_id/group_id/request_id` 正确，disabled Key 的身份元数据正确。任一缺失即失败，不得以"容器在跑""命令 exit 0"代替。
+2. **本地隔离优先**。Langfuse 端点、sub2api DB、API Key 全部用脚本内本地测试值（如 `pk-lf-local`/`sk-lf-local`）；禁止写进提交、PR 或日志。查看产物时凭据字段必须遮蔽。
 3. **远端用 GitHub**。本仓库 `origin` = `git@github.com:Vitus213/sub2api.git`，跨 fork PR 用 `gh pr create --repo Wei-Shaw/sub2api`。**禁止**触发 `antcode-skill`，本仓库与 AntCode 无关。
 4. **不主动提交**。脚本只启动容器、编译、发请求、查 ClickHouse；不 `git commit`、不 `git push`、不 `gh pr create`，除非用户明确要求。
 5. **503 是预期 HTTP 状态**。e2e 环境不配真实上游 LLM 账号，因此 `/v1/chat/completions` 返回 503 属正常；trace 仍要落 Langfuse，这是 fail-open 旁路的验证点，不要尝试修复 503。
 6. **不可写只读路径**。`scripts/run_e2e.sh` 编译 sub2api 时只挂载 `backend/` 只读到容器，不允许修改仓库代码；只允许写 `.e2e-bin/`、`.e2e-tmp/` 和 docker volume。
+7. **配置闭环必须先于 Trace 验证**。完整 smoke 必须先验证部署来源公开响应不含 secret、远端明文 HTTP 更新被拒绝、有效运行时整体更新成功、非秘密更新保留 secret、过期 config version 返回 409 且旧配置不变；任一断言失败不得继续用最终 Trace 掩盖。
 
 优先级：可观察证据 > 本地隔离与凭据保护 > GitHub 远端规约 > 不主动写入。低优先级不得绕过高优先级。
 
@@ -63,16 +64,16 @@ description: |
    ```bash
    bash skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
    ```
-4. 脚本内部顺序为：起 Langfuse → 等 health 200 → 起 sub2api deps → 编译二进制 → `AUTO_SETUP=true` 启动 sub2api → 登录 + compliance ack + 建 group + 建 API Key（DB 更新绕过 redact）→ 发 chat/completions（预期 503）→ sleep 6 等 BatchSpanProcessor flush → 查 ClickHouse。
-5. 成功 stdout 最后三行为 `trace_id`、`2`、`VERIFY_OK`。失败时 stderr 含 `[e2e][ERROR]` 行，按行内容定位失败阶段，不自动重试全流程。
+4. 脚本内部顺序为：起 Langfuse → 等 health 200 → 起 sub2api deps → 编译二进制 → `AUTO_SETUP=true` 启动 sub2api → 登录 + compliance ack → 验证部署/运行时配置、secret 三态、CAS 与远端明文拒绝 → 建 group + active/disabled API Key → 发匿名、未知 Key、控制面、有效 Key 503、disabled Key 401 五类请求 → sleep 6 等 BatchSpanProcessor flush → 查 ClickHouse。
+5. 成功 stdout 最后三行为 `trace_id`、`1`、`VERIFY_OK`。失败时 stderr 含 `[e2e][ERROR]` 行，按行内容定位失败阶段，不自动重试全流程。
 6. 验证通过后向用户报告：
-   - trace_id
-   - 根 span name、user_id、session_id
-   - Generation model、parent_observation_id（非空）
-   - 明确标注 HTTP 503 是预期
+   - 配置来源、版本、secret 不回显/保留、CAS 冲突与远端 HTTP 拒绝结果
+   - trace_id、根 span name、user_id、session_id、请求/身份元数据
+   - 匿名、未知 Key、控制面均为 0 Trace；disabled Key 为 1 个 ERROR 根 Span
+   - 明确标注 HTTP 503/401 均为预期，且身份建立前不导出 Prompt/Response
 7. 用户确认后再决定是否 `scripts/teardown.sh`；不自动清理。
 
-**成功信号**：stdout 精确以 `VERIFY_OK` 结尾，倒数第三行为 trace_id，倒数第二行为整数 `2`。任何其他输出、非零退出码、缺少 `VERIFY_OK` 均视为失败。
+**成功信号**：stdout 精确以 `VERIFY_OK` 结尾，倒数第三行为 trace_id，倒数第二行为整数 `1`。任何其他输出、非零退出码、缺少 `VERIFY_OK` 均视为失败。
 
 **失败分支**：
 - Langfuse health 不通：检查 `docker compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`，常见是镜像拉取超时，提示重试或用镜像加速。
@@ -105,7 +106,7 @@ description: |
    docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse \
      -q "SELECT id, name, user_id FROM traces WHERE session_id='$SESSION_ID' FORMAT TabSeparated"
    ```
-4. 只要 `traces` 表返回 1 行且 `observations` 有 2 行即通过。
+4. 只要 `traces` 表返回 1 行且 `observations` 恰有 1 个根 SPAN、没有 GENERATION 即通过；此快速路径不替代完整脚本的匿名/未知 Key/控制面/disabled Key 边界断言。
 
 ### 场景三：清理环境
 

@@ -92,7 +92,7 @@ func (f *fakeOTLPServer) snapshot() ([]*collectortracepb.ExportTraceServiceReque
 	return append([]*collectortracepb.ExportTraceServiceRequest(nil), f.requests...), append([]string(nil), f.errors...)
 }
 
-func TestModelTraceOTLPChatCompletions(t *testing.T) {
+func TestModelTraceCandidateRecognizedRequestExportsOneRootWithoutAttempt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
 	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
@@ -116,12 +116,17 @@ func TestModelTraceOTLPChatCompletions(t *testing.T) {
 
 	router := gin.New()
 	router.POST("/v1/chat/completions",
+		manager.CandidateMiddleware(),
 		func(c *gin.Context) {
-			c.Set(string(servermiddleware.ContextKeyAPIKey), &service.APIKey{ID: apiKeyID, GroupID: int64Pointer(groupID)})
+			apiKey := &service.APIKey{
+				ID: apiKeyID, UserID: userID, User: &service.User{ID: userID},
+				GroupID: int64Pointer(groupID), Group: &service.Group{ID: groupID},
+			}
+			servermiddleware.SetOpsFallbackAPIKey(c, apiKey)
+			c.Set(string(servermiddleware.ContextKeyAPIKey), apiKey)
 			c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: userID})
 			c.Next()
 		},
-		manager.Middleware(),
 		func(c *gin.Context) {
 			got, readErr := io.ReadAll(c.Request.Body)
 			require.NoError(t, readErr)
@@ -144,17 +149,14 @@ func TestModelTraceOTLPChatCompletions(t *testing.T) {
 
 	requests, serverErrors := fake.snapshot()
 	require.Empty(t, serverErrors)
-	require.Len(t, requests, 1, "one OTLP export should contain the request Trace")
+	require.Len(t, requests, 1)
 	spans := exportedSpans(requests)
-	require.Len(t, spans, 2)
+	require.Len(t, spans, 1, "request without a recorded upstream attempt must only export the root")
 
 	root := spanNamed(t, spans, rootSpanName)
-	generation := spanNamed(t, spans, generationSpanName)
 	require.Len(t, root.TraceId, 16)
 	require.NotEqual(t, make([]byte, 16), root.TraceId)
-	require.Equal(t, root.TraceId, generation.TraceId)
 	require.Empty(t, root.ParentSpanId)
-	require.Equal(t, root.SpanId, generation.ParentSpanId)
 
 	rootAttrs := attributesByKey(root.Attributes)
 	require.Equal(t, rootSpanName, stringAttribute(t, rootAttrs, "langfuse.trace.name"))
@@ -164,12 +166,217 @@ func TestModelTraceOTLPChatCompletions(t *testing.T) {
 	require.Equal(t, groupID, intAttribute(t, rootAttrs, "langfuse.trace.metadata.group_id"))
 	require.JSONEq(t, string(requestBody), stringAttribute(t, rootAttrs, "langfuse.observation.input"))
 	require.JSONEq(t, string(responseBody), stringAttribute(t, rootAttrs, "langfuse.observation.output"))
+}
 
-	generationAttrs := attributesByKey(generation.Attributes)
-	require.Equal(t, "generation", stringAttribute(t, generationAttrs, "langfuse.observation.type"))
-	require.Equal(t, "gpt-test", stringAttribute(t, generationAttrs, "langfuse.observation.model.name"))
-	require.JSONEq(t, string(requestBody), stringAttribute(t, generationAttrs, "langfuse.observation.input"))
-	require.JSONEq(t, string(responseBody), stringAttribute(t, generationAttrs, "langfuse.observation.output"))
+func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		activate bool
+		wantRoot int
+	}{
+		{name: "local count tokens", activate: false, wantRoot: 0},
+		{name: "upstream count tokens", activate: true, wantRoot: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			fake := newFakeOTLPServer(t)
+			manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+				Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
+				PublicKey: testPublicKey, SecretKey: testSecretKey,
+				PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+			})
+			require.NoError(t, err)
+
+			router := gin.New()
+			router.POST("/v1/messages/count_tokens",
+				manager.DeferredCandidateMiddleware(),
+				func(c *gin.Context) {
+					apiKey := &service.APIKey{ID: 73, UserID: 42, User: &service.User{ID: 42}}
+					servermiddleware.SetOpsFallbackAPIKey(c, apiKey)
+					c.Next()
+				},
+				func(c *gin.Context) {
+					_, readErr := io.ReadAll(c.Request.Body)
+					require.NoError(t, readErr)
+					if tc.activate {
+						ActivateDeferredCandidate(c)
+					}
+					c.JSON(http.StatusOK, gin.H{"input_tokens": 3})
+				},
+			)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewBufferString(`{"model":"claude-test"}`)))
+			require.Equal(t, http.StatusOK, w.Code)
+
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			require.NoError(t, manager.Shutdown(shutdownCtx))
+			cancel()
+			requests, serverErrors := fake.snapshot()
+			require.Empty(t, serverErrors)
+			spans := exportedSpans(requests)
+			if tc.wantRoot == 0 {
+				require.Empty(t, spans)
+				return
+			}
+			require.Len(t, spans, 1)
+			root := spanNamed(t, spans, rootSpanName)
+			require.JSONEq(t, `{"model":"claude-test"}`, stringAttribute(t, attributesByKey(root.Attributes), "langfuse.observation.input"))
+		})
+	}
+}
+
+func TestModelTraceCandidateAnonymousFailureDoesNotExport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fake := newFakeOTLPServer(t)
+	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
+		PublicKey: testPublicKey, SecretKey: testSecretKey,
+	})
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.POST("/v1/chat/completions", manager.CandidateMiddleware(), func(c *gin.Context) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing api key"})
+	})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test"}`)))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.JSONEq(t, `{"error":"missing api key"}`, w.Body.String())
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Shutdown(shutdownCtx))
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	require.Empty(t, requests, "anonymous failure must not allocate or export model tracing work")
+}
+
+func TestModelTraceCandidateRecognizedFailureExportsRootWithoutGeneration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fake := newFakeOTLPServer(t)
+	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
+		PublicKey: testPublicKey, SecretKey: testSecretKey,
+		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+	})
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.POST("/v1/chat/completions", manager.CandidateMiddleware(), func(c *gin.Context) {
+		servermiddleware.SetOpsFallbackAPIKey(c, &service.APIKey{ID: 81, UserID: 91, User: &service.User{ID: 91}})
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "api key disabled"})
+	})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test"}`)))
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.JSONEq(t, `{"error":"api key disabled"}`, w.Body.String())
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Shutdown(shutdownCtx))
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	require.Len(t, requests, 1)
+	spans := exportedSpans(requests)
+	require.Len(t, spans, 1)
+	root := spanNamed(t, spans, rootSpanName)
+	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
+	attrs := attributesByKey(root.Attributes)
+	require.Equal(t, int64(403), intAttribute(t, attrs, "http.response.status_code"))
+	require.Equal(t, int64(81), intAttribute(t, attrs, "langfuse.trace.metadata.api_key_id"))
+	require.Equal(t, "91", stringAttribute(t, attrs, "langfuse.user.id"))
+	require.JSONEq(t, `{"error":"api key disabled"}`, stringAttribute(t, attrs, "langfuse.observation.output"))
+}
+
+func TestModelTraceCandidatePreservesBodyLimitError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fake := newFakeOTLPServer(t)
+	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
+		PublicKey: testPublicKey, SecretKey: testSecretKey,
+		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+	})
+	require.NoError(t, err)
+
+	var readErr error
+	router := gin.New()
+	router.POST("/v1/chat/completions",
+		manager.CandidateMiddleware(),
+		servermiddleware.RequestBodyLimit(8),
+		func(c *gin.Context) {
+			servermiddleware.SetOpsFallbackAPIKey(c, &service.APIKey{ID: 82, User: &service.User{ID: 92}})
+			c.Next()
+		},
+		func(c *gin.Context) {
+			_, readErr = io.ReadAll(c.Request.Body)
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request too large"})
+		},
+	)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test"}`)))
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	var maxBytesErr *http.MaxBytesError
+	require.ErrorAs(t, readErr, &maxBytesErr, "candidate capture must preserve MaxBytesReader errors")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Shutdown(shutdownCtx))
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	require.Len(t, requests, 1)
+	spans := exportedSpans(requests)
+	require.Len(t, spans, 1)
+	root := spanNamed(t, spans, rootSpanName)
+	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
+	attrs := attributesByKey(root.Attributes)
+	require.Equal(t, int64(http.StatusRequestEntityTooLarge), intAttribute(t, attrs, "http.response.status_code"))
+}
+
+func TestModelTraceCandidatePanicMatchesRecoveryAndExports500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	run := func(t *testing.T, enabled bool) (int, string, []*tracepb.Span) {
+		t.Helper()
+		fake := newFakeOTLPServer(t)
+		manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+			Enabled: enabled, Endpoint: fake.server.URL + "/api/public/otel",
+			PublicKey: testPublicKey, SecretKey: testSecretKey,
+			PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+		})
+		require.NoError(t, err)
+
+		router := gin.New()
+		router.Use(servermiddleware.Recovery())
+		router.POST("/v1/chat/completions",
+			manager.CandidateMiddleware(),
+			func(c *gin.Context) {
+				servermiddleware.SetOpsFallbackAPIKey(c, &service.APIKey{ID: 83, User: &service.User{ID: 93}})
+				c.Next()
+			},
+			func(*gin.Context) { panic("recognized request failure") },
+		)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-test"}`)))
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, manager.Shutdown(shutdownCtx))
+		requests, serverErrors := fake.snapshot()
+		require.Empty(t, serverErrors)
+		return w.Code, w.Body.String(), exportedSpans(requests)
+	}
+
+	disabledCode, disabledBody, disabledSpans := run(t, false)
+	activeCode, activeBody, activeSpans := run(t, true)
+	require.Equal(t, disabledCode, activeCode)
+	require.Equal(t, disabledBody, activeBody, "tracing must not change Recovery response bytes")
+	require.Equal(t, http.StatusInternalServerError, activeCode)
+	require.Empty(t, disabledSpans)
+	require.Len(t, activeSpans, 1)
+	root := spanNamed(t, activeSpans, rootSpanName)
+	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
+	attrs := attributesByKey(root.Attributes)
+	require.Equal(t, int64(http.StatusInternalServerError), intAttribute(t, attrs, "http.response.status_code"))
 }
 
 func TestModelTraceDisabledWithoutTarget(t *testing.T) {
@@ -204,7 +411,7 @@ func TestModelTraceDisabledWithoutTarget(t *testing.T) {
 			require.False(t, manager.Enabled())
 
 			router := gin.New()
-			router.POST("/v1/chat/completions", manager.Middleware(), func(c *gin.Context) {
+			router.POST("/v1/chat/completions", manager.CandidateMiddleware(), func(c *gin.Context) {
 				c.JSON(http.StatusOK, gin.H{"ok": true})
 			})
 			w := httptest.NewRecorder()
