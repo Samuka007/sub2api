@@ -2054,6 +2054,7 @@ func setDefaults() {
 	// Codex Radar model IQ proxy
 	viper.SetDefault("codex_radar.enabled", false)
 	viper.SetDefault("codex_radar.base_url", "https://codexradar.com/api/v1/current")
+	viper.SetDefault("codex_radar.api_token", "")
 	viper.SetDefault("codex_radar.timeout", 15*time.Second)
 	viper.SetDefault("codex_radar.cache_ttl", 5*time.Minute)
 
