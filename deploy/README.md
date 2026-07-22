@@ -243,6 +243,7 @@ docker compose down -v
 | `CODEX_RADAR_API_TOKEN` | When enabled | *(empty)* | Runtime-only Codex Radar token. Never commit it. |
 | `CODEX_RADAR_TIMEOUT` | No | `15s` | Upstream request timeout. |
 | `CODEX_RADAR_CACHE_TTL` | No | `5m` | In-process Model IQ snapshot cache duration. |
+| `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_CLIENT_SECRET` | No | *(builtin)* | Google OAuth client secret (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_SCOPES` | No | *(default)* | OAuth scopes (Gemini OAuth) |
