@@ -263,6 +263,15 @@ func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
 }
 
 func needsStructuredSanitization(raw []byte) bool {
+	// Root JSON objects/arrays may carry credentials in URL string values
+	// under non-secret keys. Always run the structured sanitizer so the
+	// JSON decoder normalizes escape sequences (\u002f, \/) into literal
+	// characters the URL pattern can match. This check runs first so a
+	// truncated JSON body missing its closing quote still gets sanitized.
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		return true
+	}
 	for i := 0; i < len(raw); i++ {
 		quote := raw[i]
 		if quote != '"' && quote != '\'' {
@@ -284,16 +293,6 @@ func needsStructuredSanitization(raw []byte) bool {
 			}
 		}
 		i += end + 1
-	}
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-		// Any root JSON object/array may carry credentials in URL string
-		// values under non-secret keys. Always run the structured sanitizer
-		// so sanitizeJSONValue scrubs them — the JSON decoder normalizes
-		// escape sequences (\u002f, \/) into literal characters that the
-		// URL pattern can match. This is security-first: the modest parse
-		// cost is acceptable given tracing is already opt-in and bounded.
-		return true
 	}
 	return bytesContainsFold(raw, []byte("authorization:")) ||
 		bytesContainsFold(raw, []byte("proxy-authorization:")) ||
@@ -530,6 +529,13 @@ func approximateBase64Bytes(value string) int {
 }
 
 func sanitizeUnstructuredText(value string, policy capturePolicy) string {
+	// Normalize JSON escape sequences (\u002f → /, \/ → /) so that URL and
+	// secret scrubbers in the fallback path can match credentials that were
+	// escaped. This is only reached when the JSON decoder fails (truncated
+	// or malformed input), but the raw bytes may still contain escaped URLs.
+	value = strings.ReplaceAll(value, `\u002f`, "/")
+	value = strings.ReplaceAll(value, `\u002F`, "/")
+	value = strings.ReplaceAll(value, `\/`, "/")
 	lines := strings.SplitAfter(value, "\n")
 	for i, line := range lines {
 		if !strings.HasPrefix(strings.TrimSpace(line), "data:") {
@@ -559,9 +565,21 @@ func sanitizeUnstructuredText(value string, policy capturePolicy) string {
 }
 
 func sanitizeCapturedURL(raw string) string {
-	parsed, err := url.Parse(raw)
+	// The regex may include a leading boundary character (space, quote, etc.)
+	// before a network-path reference. Separate it so url.Parse sees a clean
+	// URL, then reattach it after sanitization.
+	prefix := ""
+	urlPart := raw
+	for len(urlPart) > 0 && !isURLStart(urlPart[0]) {
+		prefix += string(urlPart[0])
+		urlPart = urlPart[1:]
+	}
+	if urlPart == "" {
+		return raw
+	}
+	parsed, err := url.Parse(urlPart)
 	if err != nil {
-		return "[URL OMITTED]"
+		return prefix + "[URL OMITTED]"
 	}
 	hasAuthMaterial := parsed.User != nil ||
 		parsed.RawQuery != "" || parsed.ForceQuery ||
@@ -577,12 +595,20 @@ func sanitizeCapturedURL(raw string) string {
 	parsed.RawQuery = ""
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
-	// Host may be empty for hostless URIs like file:///path — reconstruct
-	// without the stripped auth material.
-	if parsed.Host == "" {
-		return parsed.Scheme + "://" + parsed.Path
+	// Reconstruct the cleaned URL. For hostless URIs (file:///path) where
+	// auth material existed (rare but possible: file://user@host/path),
+	// rebuild from scheme. For network-path refs (//host) with no scheme,
+	// url.String() produces //host/path correctly.
+	cleaned := parsed.String()
+	if strings.HasPrefix(cleaned, "://") {
+		// Scheme was empty (network-path ref). Rebuild as //host/path.
+		cleaned = "//" + parsed.Host + parsed.Path
 	}
-	return parsed.String()
+	return prefix + cleaned
+}
+
+func isURLStart(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '/'
 }
 
 // scrubURLsInString strips credentials, query parameters and fragments from

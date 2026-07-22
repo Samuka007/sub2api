@@ -209,6 +209,37 @@ func TestModelTraceNonURLTextWithDoubleSlashPreserved(t *testing.T) {
 	require.Contains(t, captured, "a//b?revision=1")
 }
 
+// TestModelTraceBoundaryPrefixedNetworkPathRedacts covers the NEW-P1 finding:
+// a protocol-relative URL preceded by a non-alphanumeric boundary character
+// (space, quote, etc.) must still have userinfo/query/fragment scrubbed. The
+// boundary char is included in the regex match, so sanitizeCapturedURL must
+// separate it before parsing.
+func TestModelTraceBoundaryPrefixedNetworkPathRedacts(t *testing.T) {
+	body := `{"url":" //user:boundary-pass@host.example/path?token=boundary-q#f"}`
+	captured := captureModelContent([]byte(body), len(body), 4096, capturePolicy{})
+	require.NotContains(t, captured, "boundary-pass")
+	require.NotContains(t, captured, "boundary-q")
+	require.Contains(t, captured, "host.example")
+}
+
+// TestModelTraceTruncatedJSONWithEscapedURLRedacts covers the F1-r3 finding:
+// when a JSON body is truncated (missing closing quote/brace) and the URL
+// inside uses \u002f or \/ escape sequences, the decoder fails and the
+// fallback path must still unescape and scrub credentials.
+func TestModelTraceTruncatedJSONWithEscapedURLRedacts(t *testing.T) {
+	cases := []string{
+		`{"url":"https:\u002f\u002fuser:trunc-pass@host.example/path?token=trunc-q`,
+		`{"url":"https:\/\/user:trunc2-pass@host2.example/path?token=trunc2-q`,
+	}
+	for _, body := range cases {
+		captured := captureModelContent([]byte(body), len(body)+100, 4096, capturePolicy{})
+		require.NotContains(t, captured, "trunc-pass", body)
+		require.NotContains(t, captured, "trunc2-pass", body)
+		require.NotContains(t, captured, "trunc-q", body)
+		require.NotContains(t, captured, "trunc2-q", body)
+	}
+}
+
 // TestModelTraceSanitizeErrorScrubsCredentials verifies the error sanitizer
 // used for both synchronous attempt status and async execution status/events.
 // Transport errors may embed URLs with userinfo, query tokens, or
