@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -25,9 +26,9 @@ const successSSE = "event: message_start\n" +
 	"data: {\"type\":\"message_stop\"}\n\n"
 
 type counters struct {
-	fail, ok, hold, image, otlpOK, otlpError, otlpSlow                 atomic.Int64
-	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet    atomic.Int64
-	batchMetadata, batchDownload                                     atomic.Int64
+	fail, ok, hold, image, otlpOK, otlpError, otlpSlow             atomic.Int64
+	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet atomic.Int64
+	batchMetadata, batchDownload                                   atomic.Int64
 }
 
 var stats counters
@@ -46,6 +47,78 @@ type batchFixture struct {
 }
 
 var batch batchFixture
+
+type protocolFixture struct {
+	sync.Mutex
+	calls map[string]int64
+}
+
+var protocols = protocolFixture{calls: make(map[string]int64)}
+
+func (p *protocolFixture) record(name string) {
+	p.Lock()
+	defer p.Unlock()
+	p.calls[name]++
+}
+
+func (p *protocolFixture) snapshot() map[string]int64 {
+	p.Lock()
+	defer p.Unlock()
+	out := make(map[string]int64, len(p.calls))
+	for key, value := range p.calls {
+		out[key] = value
+	}
+	return out
+}
+func readJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "cannot read request", http.StatusBadRequest)
+		return nil, false
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") && !json.Valid(body) {
+		http.Error(w, "invalid JSON request", http.StatusBadRequest)
+		return nil, false
+	}
+	return body, true
+}
+
+func writeJSON(w http.ResponseWriter, requestID, payload string) {
+	w.Header().Set("Content-Type", "application/json")
+	if requestID != "" {
+		w.Header().Set("X-Request-Id", requestID)
+	}
+	_, _ = fmt.Fprint(w, payload)
+}
+
+func writeOpenAIResponsesSSE(w http.ResponseWriter, requestID string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Request-Id", requestID)
+	_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_e2e_matrix\",\"delta\":\"matrix response\"}\n\n")
+	_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_e2e_matrix\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-e2e-upstream\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"matrix response\"}]}],\"usage\":{\"input_tokens\":13,\"output_tokens\":5,\"total_tokens\":18}}}\n\n")
+}
+
+func writeGeminiSSE(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Request-Id", "req_e2e_gemini_stream")
+	_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"matrix gemini stream\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":17,\"candidatesTokenCount\":4,\"totalTokenCount\":21},\"modelVersion\":\"gemini-e2e-upstream\"}\n\n")
+}
+
+func requireBearer(w http.ResponseWriter, r *http.Request) bool {
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return true
+	}
+	http.Error(w, "missing bearer token", http.StatusUnauthorized)
+	return false
+}
+
+func requireAnthropicKey(w http.ResponseWriter, r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("x-api-key")) != "" {
+		return true
+	}
+	http.Error(w, "missing anthropic key", http.StatusUnauthorized)
+	return false
+}
 
 func (g *holdGate) reset() {
 	g.Lock()
@@ -101,7 +174,7 @@ func (b *batchFixture) writeOutput(w http.ResponseWriter, mediaCanary string) {
 			continue
 		}
 		_ = enc.Encode(map[string]any{
-			"key": key,
+			"key":   key,
 			"error": map[string]any{"code": "SAFETY", "message": "blocked by e2e policy"},
 		})
 	}
@@ -149,7 +222,7 @@ func main() {
 	})
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]int64{
+		payload := map[string]any{
 			"fail": stats.fail.Load(), "ok": stats.ok.Load(), "hold": stats.hold.Load(),
 			"image": stats.image.Load(), "otlp_ok": stats.otlpOK.Load(),
 			"otlp_error": stats.otlpError.Load(), "otlp_slow": stats.otlpSlow.Load(),
@@ -157,7 +230,9 @@ func main() {
 			"batch_upload": stats.batchUpload.Load(), "batch_create": stats.batchCreate.Load(),
 			"batch_get": stats.batchGet.Load(), "batch_metadata": stats.batchMetadata.Load(),
 			"batch_download": stats.batchDownload.Load(), "batch_input_items": int64(batch.keyCount()),
-		})
+			"protocol": protocols.snapshot(),
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	mux.HandleFunc("/control/hold/reset", func(w http.ResponseWriter, _ *http.Request) {
 		gate.reset()
@@ -196,6 +271,121 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"created":1784690000,"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=","revised_prompt":"e2e async image"}]}`)
 	})
+	mux.HandleFunc("/matrix/anthropic/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAnthropicKey(w, r) {
+			return
+		}
+		if _, ok := readJSONBody(w, r); !ok {
+			return
+		}
+		protocols.record("anthropic.count_tokens")
+		writeJSON(w, "req_e2e_anthropic_count", `{"input_tokens":11}`)
+	})
+	mux.HandleFunc("/matrix/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAnthropicKey(w, r) {
+			return
+		}
+		body, ok := readJSONBody(w, r)
+		if !ok {
+			return
+		}
+		protocols.record("anthropic.messages")
+		if strings.Contains(string(body), `"stream":true`) {
+			writeSSE(w, "req_e2e_anthropic_stream")
+			return
+		}
+		writeJSON(w, "req_e2e_anthropic", `{"id":"msg_e2e_matrix","type":"message","role":"assistant","model":"claude-e2e-upstream","content":[{"type":"text","text":"matrix anthropic"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":3}}`)
+	})
+	mux.HandleFunc("/matrix/openai/", func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r) {
+			return
+		}
+		body, ok := readJSONBody(w, r)
+		if !ok {
+			return
+		}
+		switch r.URL.Path {
+		case "/matrix/openai/v1/chat/completions":
+			protocols.record("openai.chat_completions")
+			writeJSON(w, "req_e2e_openai_chat", `{"id":"chatcmpl_e2e_matrix","object":"chat.completion","model":"gpt-e2e-upstream","choices":[{"index":0,"message":{"role":"assistant","content":"matrix chat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}`)
+		case "/matrix/openai/v1/responses":
+			protocols.record("openai.responses")
+			if strings.Contains(string(body), `"stream":true`) {
+				writeOpenAIResponsesSSE(w, "req_e2e_openai_responses_stream")
+				return
+			}
+			writeJSON(w, "req_e2e_openai_responses", `{"id":"resp_e2e_matrix","object":"response","status":"completed","model":"gpt-e2e-upstream","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"matrix response"}]}],"usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18}}`)
+		case "/matrix/openai/v1/embeddings":
+			protocols.record("openai.embeddings")
+			writeJSON(w, "req_e2e_openai_embeddings", `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.125,-0.25,0.5]}],"model":"embed-e2e-upstream","usage":{"prompt_tokens":3,"total_tokens":3}}`)
+		case "/matrix/openai/v1/alpha/search":
+			protocols.record("openai.search")
+			writeJSON(w, "req_e2e_openai_search", `{"results":[{"title":"matrix result","url":"https://example.test/e2e","snippet":"deterministic search"}]}`)
+		case "/matrix/openai/v1/responses/input_tokens":
+			protocols.record("openai.count_tokens")
+			writeJSON(w, "req_e2e_openai_count", `{"object":"response.input_tokens","input_tokens":11}`)
+		case "/matrix/openai/v1/images/generations":
+			protocols.record("openai.images.generations")
+			writeJSON(w, "req_e2e_openai_image_generation", `{"created":1784690000,"data":[{"url":"https://example.test/matrix-generation.png","revised_prompt":"matrix image generation"}]}`)
+		case "/matrix/openai/v1/images/edits":
+			protocols.record("openai.images.edits")
+			writeJSON(w, "req_e2e_openai_image_edit", `{"created":1784690001,"data":[{"url":"https://example.test/matrix-edit.png","revised_prompt":"matrix image edit"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("/matrix/grok/", func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r) {
+			return
+		}
+		if _, ok := readJSONBody(w, r); !ok {
+			return
+		}
+		switch r.URL.Path {
+		case "/matrix/grok/v1/images/generations":
+			protocols.record("openai.images.generations")
+			writeJSON(w, "req_e2e_grok_image_generation", `{"created":1784690002,"data":[{"url":"https://example.test/grok-generation.png"}]}`)
+		case "/matrix/grok/v1/images/edits":
+			protocols.record("openai.images.edits")
+			writeJSON(w, "req_e2e_grok_image_edit", `{"created":1784690003,"data":[{"url":"https://example.test/grok-edit.png"}]}`)
+		case "/matrix/grok/v1/videos/generations":
+			protocols.record("openai.videos.generations")
+			writeJSON(w, "req_e2e_grok_video_generation", `{"request_id":"video_e2e_generation","status":"pending"}`)
+		case "/matrix/grok/v1/videos/edits":
+			protocols.record("openai.videos.edits")
+			writeJSON(w, "req_e2e_grok_video_edit", `{"request_id":"video_e2e_edit","status":"pending"}`)
+		case "/matrix/grok/v1/videos/extensions":
+			protocols.record("openai.videos.extensions")
+			writeJSON(w, "req_e2e_grok_video_extension", `{"request_id":"video_e2e_extension","status":"pending"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	geminiHandler := func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get("x-goog-api-key")) == "" {
+			http.Error(w, "missing gemini key", http.StatusUnauthorized)
+			return
+		}
+		if _, ok := readJSONBody(w, r); !ok {
+			return
+		}
+		platform := "gemini"
+		if strings.Contains(r.URL.Path, "/antigravity/") {
+			platform = "antigravity"
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			protocols.record(platform + ".generateContent")
+			writeJSON(w, "req_e2e_"+platform+"_generate", `{"candidates":[{"content":{"role":"model","parts":[{"text":"matrix gemini"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":17,"candidatesTokenCount":4,"totalTokenCount":21},"modelVersion":"gemini-e2e-upstream"}`)
+		case strings.HasSuffix(r.URL.Path, ":streamGenerateContent"):
+			protocols.record(platform + ".streamGenerateContent")
+			writeGeminiSSE(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	mux.HandleFunc("/matrix/gemini/v1beta/models/", geminiHandler)
+	mux.HandleFunc("/matrix/gemini/antigravity/v1beta/models/", geminiHandler)
 	mux.HandleFunc("/otlp-ok/v1/traces", func(w http.ResponseWriter, _ *http.Request) {
 		stats.otlpOK.Add(1)
 		w.Header().Set("Content-Type", "application/x-protobuf")
@@ -276,7 +466,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"downloadUri": "https://generativelanguage.googleapis.com/v1beta/files/e2e-output:download",
-			"mimeType": "application/jsonl",
+			"mimeType":    "application/jsonl",
 		})
 	})
 	mux.HandleFunc("/v1beta/files/e2e-output:download", func(w http.ResponseWriter, r *http.Request) {
