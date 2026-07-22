@@ -62,7 +62,7 @@ IFS='|' read -r OPENAI_GROUP OPENAI_KEY OPENAI_ACCOUNT < <(setup_platform openai
   "$(jq -nc --arg secret "$OPENAI_SECRET" '{api_key:$secret,base_url:"http://127.0.0.1:18081/matrix/openai",openai_capabilities:["chat_completions","embeddings","alpha_search"],model_mapping:{"gpt-e2e-matrix":"gpt-e2e-upstream","embed-e2e-matrix":"embed-e2e-upstream","gpt-image-2":"gpt-image-e2e-upstream"}}')" \
   '{"openai_responses_supported":true,"openai_responses_mode":"force_responses"}' true)
 IFS='|' read -r GROK_GROUP GROK_KEY GROK_ACCOUNT < <(setup_platform grok grok \
-  "$(jq -nc --arg secret "$GROK_SECRET" '{api_key:$secret,base_url:"http://127.0.0.1:18081/matrix/grok",model_mapping:{"grok-imagine":"grok-imagine","grok-imagine-edit":"grok-imagine-edit","grok-imagine-video":"grok-imagine-video"}}')" \
+  "$(jq -nc --arg secret "$GROK_SECRET" '{api_key:$secret,base_url:"http://127.0.0.1:18081/matrix/grok",model_mapping:{"grok-imagine":"grok-imagine","grok-imagine-image-quality":"grok-imagine-image-quality","grok-imagine-edit":"grok-imagine-edit","grok-imagine-video":"grok-imagine-video"}}')" \
   '{"grok_media_eligible":true}' true)
 IFS='|' read -r GEMINI_GROUP GEMINI_KEY GEMINI_ACCOUNT < <(setup_platform gemini gemini \
   "$(jq -nc --arg secret "$GEMINI_SECRET" '{api_key:$secret,base_url:"http://127.0.0.1:18081/matrix/gemini",model_mapping:{"gemini-e2e-matrix":"gemini-e2e-upstream"}}')" '{}' false)
