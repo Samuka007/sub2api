@@ -240,25 +240,28 @@ func marshalMultipartSummary(summary map[string]any) []byte {
 }
 
 func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
-	if !needsStructuredSanitization(raw) {
-		return raw
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err == nil {
-		var trailing any
-		if err := decoder.Decode(&trailing); errors.Is(err, io.EOF) {
-			original := value
-			sanitized := sanitizeJSONValue(value, "", "", policy)
-			if reflect.DeepEqual(original, sanitized) {
-				return raw
-			}
-			if encoded, marshalErr := json.Marshal(sanitized); marshalErr == nil {
-				return encoded
+	if needsStructuredSanitization(raw) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err == nil {
+			var trailing any
+			if err := decoder.Decode(&trailing); errors.Is(err, io.EOF) {
+				original := value
+				sanitized := sanitizeJSONValue(value, "", "", policy)
+				if reflect.DeepEqual(original, sanitized) {
+					return raw
+				}
+				if encoded, marshalErr := json.Marshal(sanitized); marshalErr == nil {
+					return encoded
+				}
 			}
 		}
 	}
+	// Always run the unstructured sanitizer as fallback. This ensures
+	// plain-text and non-JSON content (text/plain responses, SSE, etc.)
+	// still gets URL/credential scrubbing, not just content that matched
+	// structured sanitization triggers.
 	return []byte(sanitizeUnstructuredText(string(validUTF8Prefix(raw, len(raw))), policy))
 }
 
@@ -530,12 +533,15 @@ func approximateBase64Bytes(value string) int {
 
 func sanitizeUnstructuredText(value string, policy capturePolicy) string {
 	// Normalize JSON escape sequences (\u002f → /, \/ → /) so that URL and
-	// secret scrubbers in the fallback path can match credentials that were
-	// escaped. This is only reached when the JSON decoder fails (truncated
-	// or malformed input), but the raw bytes may still contain escaped URLs.
 	value = strings.ReplaceAll(value, `\u002f`, "/")
 	value = strings.ReplaceAll(value, `\u002F`, "/")
 	value = strings.ReplaceAll(value, `\/`, "/")
+	value = strings.ReplaceAll(value, `\u003a`, ":")
+	value = strings.ReplaceAll(value, `\u003A`, ":")
+	value = strings.ReplaceAll(value, `\u003f`, "?")
+	value = strings.ReplaceAll(value, `\u003F`, "?")
+	value = strings.ReplaceAll(value, `\u0023`, "#")
+	value = strings.ReplaceAll(value, `\u0040`, "@")
 	lines := strings.SplitAfter(value, "\n")
 	for i, line := range lines {
 		if !strings.HasPrefix(strings.TrimSpace(line), "data:") {
@@ -659,6 +665,15 @@ func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capture
 	for field := range values {
 		if isSecretKey(field) {
 			values[field] = []string{redactedValue}
+		} else {
+			// Non-secret field values may still contain URLs with
+			// embedded credentials (e.g. url=https://user:pass@host).
+			// ParseQuery already URL-decoded the values, so scrub them.
+			scrubbed := make([]string, len(values[field]))
+			for i, v := range values[field] {
+				scrubbed[i] = scrubURLsInString(v)
+			}
+			values[field] = scrubbed
 		}
 	}
 	encoded := values.Encode()
@@ -687,6 +702,15 @@ func redactFormKV(body string) string {
 		}
 		if isSecretKey(decodedKey) {
 			pairs[i] = rawKey + "=" + redactedValue
+		} else {
+			// Non-secret values may contain URLs with credentials.
+			// Unescape the value to match, then re-encode loosely.
+			rawValue := pair[eq+1:]
+			decodedValue, decVErr := url.QueryUnescape(rawValue)
+			if decVErr != nil {
+				decodedValue = rawValue
+			}
+			pairs[i] = rawKey + "=" + scrubURLsInString(decodedValue)
 		}
 	}
 	return strings.Join(pairs, "&")

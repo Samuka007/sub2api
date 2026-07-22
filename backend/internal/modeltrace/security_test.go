@@ -240,6 +240,49 @@ func TestModelTraceTruncatedJSONWithEscapedURLRedacts(t *testing.T) {
 	}
 }
 
+// TestModelTracePlainTextURLRedactsCredentials covers the finding that
+// non-JSON content (text/plain, SSE, etc.) with a bare URL containing
+// credentials bypassed sanitization because sanitizeStructuredContent
+// returned raw when needsStructuredSanitization was false.
+func TestModelTracePlainTextURLRedactsCredentials(t *testing.T) {
+	// Plain text URL (not JSON)
+	plain := []byte("Download from https://user:plain-pass@cdn.example/file?token=plain-q#frag")
+	captured := captureModelContent(plain, len(plain), 4096, capturePolicy{})
+	require.NotContains(t, captured, "plain-pass")
+	require.NotContains(t, captured, "plain-q")
+	require.NotContains(t, captured, "frag")
+	require.Contains(t, captured, "cdn.example")
+
+	// JSON root string (scalar, not object/array)
+	rootStr := []byte(`"https://user:root-pass@host.example/path?token=root-q"`)
+	captured2 := captureModelContent(rootStr, len(rootStr), 4096, capturePolicy{})
+	require.NotContains(t, captured2, "root-pass")
+	require.NotContains(t, captured2, "root-q")
+	require.Contains(t, captured2, "host.example")
+}
+
+// TestModelTraceTruncatedJSONWithEscapedSeparatorsRedacts covers the finding
+// that truncated JSON using \u003a (colon) to escape the scheme separator
+// bypassed URL scrubbing after decoder failure.
+func TestModelTraceTruncatedJSONWithEscapedSeparatorsRedacts(t *testing.T) {
+	body := `{"url":"https\u003a\u002f\u002fuser:esc-colon-pass@host.example/path?token=esc-q`
+	captured := captureModelContent([]byte(body), len(body)+100, 4096, capturePolicy{})
+	require.NotContains(t, captured, "esc-colon-pass")
+	require.NotContains(t, captured, "esc-q")
+	require.Contains(t, captured, "host.example")
+}
+
+// TestModelTraceFormURLValueRedactsCredentials covers the finding that a
+// form field named "url" (not a secret key) carrying a URL with credentials
+// was not scrubbed, leaking userinfo and query tokens to Langfuse.
+func TestModelTraceFormURLValueRedactsCredentials(t *testing.T) {
+	raw := []byte("model=gpt-4&url=https%3A%2F%2Fuser%3Aform-pass%40host.example%2Fpath%3Ftoken%3Dform-q&prompt=hi")
+	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	require.NotContains(t, captured, "form-pass")
+	require.NotContains(t, captured, "form-q")
+	require.Contains(t, captured, "host.example", "host should remain observable")
+}
+
 // TestModelTraceSanitizeErrorScrubsCredentials verifies the error sanitizer
 // used for both synchronous attempt status and async execution status/events.
 // Transport errors may embed URLs with userinfo, query tokens, or
