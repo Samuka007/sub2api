@@ -1,10 +1,11 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,40 +44,40 @@ func TestModelTraceNoCredentialLeak(t *testing.T) {
 	}
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
-	captured := captureModelContent(raw, len(raw), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{})
 	for _, secret := range secrets {
 		require.NotContains(t, captured, secret)
 	}
 	require.Contains(t, captured, "api_key=business-example")
 	require.Contains(t, captured, "Authorization: Bearer business-example")
-	require.GreaterOrEqual(t, strings.Count(captured, redactedValue), len(secrets))
+	require.GreaterOrEqual(t, strings.Count(captured, modeltrace.TestingRedactedValue), len(secrets))
 
 	truncatedJSON := `{"openai_api_key":"truncated-secret","auth-token":"another-secret"`
-	unstructured := captureModelContent([]byte(truncatedJSON), len(truncatedJSON)+1024, 4096, capturePolicy{})
+	unstructured := modeltrace.TestingCaptureModelContent([]byte(truncatedJSON), len(truncatedJSON)+1024, 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, unstructured, "truncated-secret")
 	require.NotContains(t, unstructured, "another-secret")
 }
 
 func TestModelTraceLargePayloadMemoryBound(t *testing.T) {
-	prompt, response, media := boundedSizes(config.ModelTracingConfig{
+	prompt, response, media := modeltrace.TestingBoundedSizes(config.ModelTracingConfig{
 		PromptMaxBytes:   int(^uint(0) >> 1),
 		ResponseMaxBytes: int(^uint(0) >> 1),
 		MediaMaxBytes:    int(^uint(0) >> 1),
 	})
-	require.Equal(t, maxCaptureBytes, prompt)
-	require.Equal(t, maxCaptureBytes, response)
-	require.Equal(t, maxCaptureBytes, media)
+	require.Equal(t, modeltrace.TestingMaxCaptureBytes, prompt)
+	require.Equal(t, modeltrace.TestingMaxCaptureBytes, response)
+	require.Equal(t, modeltrace.TestingMaxCaptureBytes, media)
 
-	raw := []byte(strings.Repeat("x", maxCaptureBytes+1024))
-	captured := captureModelContent(raw, len(raw), prompt, capturePolicy{})
-	require.LessOrEqual(t, len(captured), maxCaptureBytes+128)
+	raw := []byte(strings.Repeat("x", modeltrace.TestingMaxCaptureBytes+1024))
+	captured := modeltrace.TestingCaptureModelContent(raw, len(raw), prompt, modeltrace.TestingCapturePolicy{})
+	require.LessOrEqual(t, len(captured), modeltrace.TestingMaxCaptureBytes+128)
 	require.Contains(t, captured[len(captured)-128:], "[truncated:original_bytes=")
 }
 
 func TestModelTraceMediaURLRemovesCredentialsAndBoundsMetadata(t *testing.T) {
 	secretQuery := strings.Repeat("signed-query-secret", 2048)
 	raw := []byte(`{"content":[{"type":"image_url","image_url":{"url":"https://user:password@cdn.example.test/path/image.png?signature=` + secretQuery + `#fragment-secret"}}]}`)
-	captured := captureModelContent(raw, len(raw), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "password")
 	require.NotContains(t, captured, "signed-query-secret")
 	require.NotContains(t, captured, "fragment-secret")
@@ -101,7 +102,7 @@ func TestModelTraceURLNotMediaFieldRedactsCredentials(t *testing.T) {
 		{`{"links":{"self":"https://admin:secret@api.example/v1?api_key=key-canary"}}`, "api.example"},
 	}
 	for _, c := range cases {
-		captured := captureModelContent([]byte(c.body), len(c.body), 4096, capturePolicy{})
+		captured := modeltrace.TestingCaptureModelContent([]byte(c.body), len(c.body), 4096, modeltrace.TestingCapturePolicy{})
 		require.NotContains(t, captured, "bearer-canary", c.body)
 		require.NotContains(t, captured, "pass", c.body)
 		require.NotContains(t, captured, "secret", c.body)
@@ -118,7 +119,7 @@ func TestModelTraceURLNotMediaFieldRedactsCredentials(t *testing.T) {
 // redaction because it has no JSON quoting or colon-delimited headers.
 func TestModelTraceFormURLEncodedRedactsSecretFields(t *testing.T) {
 	raw := []byte("model=gpt-4&api_key=client-canary&access_token=token-canary&prompt=hello")
-	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "client-canary")
 	require.NotContains(t, captured, "token-canary")
 	require.Contains(t, captured, "REDACTED", "redacted value may be URL-encoded")
@@ -140,7 +141,7 @@ func TestModelTraceURLNetworkPathAndSchemeBypass(t *testing.T) {
 		{`{"url":"ftp://user:ftp-canary@ftp.example/file?secret=ftp-q-canary"}`, "ftp.example"},
 	}
 	for _, c := range cases {
-		captured := captureModelContent([]byte(c.body), len(c.body), 4096, capturePolicy{})
+		captured := modeltrace.TestingCaptureModelContent([]byte(c.body), len(c.body), 4096, modeltrace.TestingCapturePolicy{})
 		require.NotContains(t, captured, "netpath-canary", c.body)
 		require.NotContains(t, captured, "np-canary", c.body)
 		require.NotContains(t, captured, "esc-canary", c.body)
@@ -157,7 +158,7 @@ func TestModelTraceFormURLEncodedMalformedFallback(t *testing.T) {
 	// Raw `;` makes ParseQuery return an error in Go; redactFormKV must
 	// still scrub api_key and access_token.
 	raw := []byte("model=gpt-4;api_key=semi-canary;access_token=semi-token-canary;prompt=hi")
-	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "semi-canary")
 	require.NotContains(t, captured, "semi-token-canary")
 	require.Contains(t, captured, "REDACTED")
@@ -170,7 +171,7 @@ func TestModelTraceFormURLEncodedMalformedFallback(t *testing.T) {
 // path runs at all.
 func TestModelTraceURLUnicodeEscapeBypass(t *testing.T) {
 	body := `{"url":"https:\u002f\u002fuser:uni-canary@host.example/path?token=uni-q-canary#f"}`
-	captured := captureModelContent([]byte(body), len(body), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent([]byte(body), len(body), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "uni-canary")
 	require.NotContains(t, captured, "uni-q-canary")
 	require.Contains(t, captured, "host.example")
@@ -183,7 +184,7 @@ func TestModelTraceFormPercentEncodedKeyBypass(t *testing.T) {
 	// %5F = underscore; api%5Fkey decodes to api_key which isSecretKey matches.
 	// `;` makes ParseQuery fail so the redactFormKV fallback is exercised.
 	raw := []byte("model=gpt-4;api%5Fkey=pct-canary;prompt=hi")
-	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "pct-canary")
 	require.Contains(t, captured, "REDACTED")
 	require.Contains(t, captured, "gpt-4")
@@ -195,7 +196,7 @@ func TestModelTraceFormPercentEncodedKeyBypass(t *testing.T) {
 // [URL OMITTED].
 func TestModelTraceHostlessURLWithoutCredsPreserved(t *testing.T) {
 	fileURL := `{"url":"file:///tmp/data.json"}`
-	captured := captureModelContent([]byte(fileURL), len(fileURL), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent([]byte(fileURL), len(fileURL), 4096, modeltrace.TestingCapturePolicy{})
 	require.Contains(t, captured, "file:///tmp/data.json")
 	require.NotContains(t, captured, "[URL OMITTED]")
 }
@@ -205,7 +206,7 @@ func TestModelTraceHostlessURLWithoutCredsPreserved(t *testing.T) {
 // have its query-like suffix stripped by the network-path scrubber.
 func TestModelTraceNonURLTextWithDoubleSlashPreserved(t *testing.T) {
 	pathText := `{"path":"a//b?revision=1"}`
-	captured := captureModelContent([]byte(pathText), len(pathText), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent([]byte(pathText), len(pathText), 4096, modeltrace.TestingCapturePolicy{})
 	require.Contains(t, captured, "a//b?revision=1")
 }
 
@@ -216,7 +217,7 @@ func TestModelTraceNonURLTextWithDoubleSlashPreserved(t *testing.T) {
 // separate it before parsing.
 func TestModelTraceBoundaryPrefixedNetworkPathRedacts(t *testing.T) {
 	body := `{"url":" //user:boundary-pass@host.example/path?token=boundary-q#f"}`
-	captured := captureModelContent([]byte(body), len(body), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent([]byte(body), len(body), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "boundary-pass")
 	require.NotContains(t, captured, "boundary-q")
 	require.Contains(t, captured, "host.example")
@@ -232,7 +233,7 @@ func TestModelTraceTruncatedJSONWithEscapedURLRedacts(t *testing.T) {
 		`{"url":"https:\/\/user:trunc2-pass@host2.example/path?token=trunc2-q`,
 	}
 	for _, body := range cases {
-		captured := captureModelContent([]byte(body), len(body)+100, 4096, capturePolicy{})
+		captured := modeltrace.TestingCaptureModelContent([]byte(body), len(body)+100, 4096, modeltrace.TestingCapturePolicy{})
 		require.NotContains(t, captured, "trunc-pass", body)
 		require.NotContains(t, captured, "trunc2-pass", body)
 		require.NotContains(t, captured, "trunc-q", body)
@@ -247,7 +248,7 @@ func TestModelTraceTruncatedJSONWithEscapedURLRedacts(t *testing.T) {
 func TestModelTracePlainTextURLRedactsCredentials(t *testing.T) {
 	// Plain text URL (not JSON)
 	plain := []byte("Download from https://user:plain-pass@cdn.example/file?token=plain-q#frag")
-	captured := captureModelContent(plain, len(plain), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent(plain, len(plain), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "plain-pass")
 	require.NotContains(t, captured, "plain-q")
 	require.NotContains(t, captured, "frag")
@@ -255,7 +256,7 @@ func TestModelTracePlainTextURLRedactsCredentials(t *testing.T) {
 
 	// JSON root string (scalar, not object/array)
 	rootStr := []byte(`"https://user:root-pass@host.example/path?token=root-q"`)
-	captured2 := captureModelContent(rootStr, len(rootStr), 4096, capturePolicy{})
+	captured2 := modeltrace.TestingCaptureModelContent(rootStr, len(rootStr), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured2, "root-pass")
 	require.NotContains(t, captured2, "root-q")
 	require.Contains(t, captured2, "host.example")
@@ -266,7 +267,7 @@ func TestModelTracePlainTextURLRedactsCredentials(t *testing.T) {
 // bypassed URL scrubbing after decoder failure.
 func TestModelTraceTruncatedJSONWithEscapedSeparatorsRedacts(t *testing.T) {
 	body := `{"url":"https\u003a\u002f\u002fuser:esc-colon-pass@host.example/path?token=esc-q`
-	captured := captureModelContent([]byte(body), len(body)+100, 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent([]byte(body), len(body)+100, 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "esc-colon-pass")
 	require.NotContains(t, captured, "esc-q")
 	require.Contains(t, captured, "host.example")
@@ -277,7 +278,7 @@ func TestModelTraceTruncatedJSONWithEscapedSeparatorsRedacts(t *testing.T) {
 // was not scrubbed, leaking userinfo and query tokens to Langfuse.
 func TestModelTraceFormURLValueRedactsCredentials(t *testing.T) {
 	raw := []byte("model=gpt-4&url=https%3A%2F%2Fuser%3Aform-pass%40host.example%2Fpath%3Ftoken%3Dform-q&prompt=hi")
-	captured := captureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContentWithType(raw, len(raw), 4096, "application/x-www-form-urlencoded", modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "form-pass")
 	require.NotContains(t, captured, "form-q")
 	require.Contains(t, captured, "host.example", "host should remain observable")
@@ -288,7 +289,7 @@ func TestModelTraceFormURLValueRedactsCredentials(t *testing.T) {
 // URL pattern was skipped for data: lines.
 func TestModelTraceSSEDataLineURLRedacts(t *testing.T) {
 	sse := []byte("data: {\"url\":\"https://user:sse-pass@host.example/path?token=sse-q\"}\n\n")
-	captured := captureModelContent(sse, len(sse), 4096, capturePolicy{})
+	captured := modeltrace.TestingCaptureModelContent(sse, len(sse), 4096, modeltrace.TestingCapturePolicy{})
 	require.NotContains(t, captured, "sse-pass")
 	require.NotContains(t, captured, "sse-q")
 	require.Contains(t, captured, "host.example")
@@ -299,7 +300,7 @@ func TestModelTraceSSEDataLineURLRedacts(t *testing.T) {
 // slash) bypassed the URL scrubber in sanitizeTraceError.
 func TestModelTraceSanitizeErrorEscapedURLRedacts(t *testing.T) {
 	errMsg := "Get https\\u003a\\u002f\\u002fuser:err-pass@host.example/path?token=err-q: failed"
-	scrubbed := sanitizeTraceError(errMsg)
+	scrubbed := modeltrace.TestingSanitizeTraceError(errMsg)
 	require.NotContains(t, scrubbed, "err-pass")
 	require.NotContains(t, scrubbed, "err-q")
 	require.Contains(t, scrubbed, "host.example")
@@ -312,7 +313,7 @@ func TestModelTraceSanitizeErrorEscapedURLRedacts(t *testing.T) {
 func TestModelTraceSanitizeErrorScrubsCredentials(t *testing.T) {
 	Vector := "Get https://user:bearer-canary@host.example/path?api_key=query-canary: " +
 		"Authorization: Bearer header-canary, Set-Cookie: session=cookie-canary: failed"
-	scrubbed := sanitizeTraceError(Vector)
+	scrubbed := modeltrace.TestingSanitizeTraceError(Vector)
 	require.NotContains(t, scrubbed, "bearer-canary")
 	require.NotContains(t, scrubbed, "query-canary")
 	require.NotContains(t, scrubbed, "header-canary")
@@ -352,7 +353,7 @@ func TestModelTraceAttemptErrorDoesNotLeakIntoSpanStatus(t *testing.T) {
 func TestModelTraceAsyncEndErrorDoesNotLeakIntoSpanStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -362,7 +363,7 @@ func TestModelTraceAsyncEndErrorDoesNotLeakIntoSpanStatus(t *testing.T) {
 	sensitiveErr := errors.New("panic: Authorization: Bearer async-canary, url=https://user:secret@upstream/?token=t-canary")
 
 	continuation := recording.TraceContinuation{TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"}
-	execution := manager.StartAsyncExecution(context.Background(), continuation, AsyncExecutionMetadata{
+	execution := manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{
 		Identity: servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73},
 		TaskID:   "imgtask-err", Model: "gpt-image-err",
 	}, []byte(`{"prompt":"cat"}`))
@@ -389,4 +390,3 @@ func TestModelTraceAsyncEndErrorDoesNotLeakIntoSpanStatus(t *testing.T) {
 		}
 	}
 }
-

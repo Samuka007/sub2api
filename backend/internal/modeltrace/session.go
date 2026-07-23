@@ -17,12 +17,21 @@ func ExtractLangfuseSessionID(body []byte, headers http.Header, grokRoute bool) 
 			"conversation_id",
 			"metadata.session_id",
 			"metadata.user_id.session_id",
+			"client_metadata.session_id",
+			"client_metadata.thread_id",
 		} {
 			value := gjson.GetBytes(body, path)
 			if !value.Exists() || value.Type != gjson.String {
 				continue
 			}
 			if sessionID := strings.TrimSpace(value.String()); sessionID != "" {
+				return sessionID
+			}
+		}
+	}
+	if headers != nil {
+		for _, key := range []string{"session_id", "session-id", "thread_id", "thread-id"} {
+			if sessionID := strings.TrimSpace(headers.Get(key)); sessionID != "" {
 				return sessionID
 			}
 		}

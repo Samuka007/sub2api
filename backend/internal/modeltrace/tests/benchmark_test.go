@@ -1,8 +1,9 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,7 @@ func BenchmarkModelTraceEnabled(b *testing.B) { benchmarkModelTraceMode(b, true)
 
 func benchmarkModelTraceMode(b *testing.B, enabled bool) {
 	gin.SetMode(gin.TestMode)
-	longPromptSize := defaultPromptBytes - 128
+	longPromptSize := modeltrace.TestingDefaultPromptBytes - 128
 	longBody := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":"` + strings.Repeat("x", longPromptSize) + `"}]}`)
 	cases := []struct {
 		name        string
@@ -86,32 +87,30 @@ func (benchmarkDiscardExporter) ExportSpans(context.Context, []sdktrace.ReadOnly
 }
 func (benchmarkDiscardExporter) Shutdown(context.Context) error { return nil }
 
-func newBenchmarkManager(b *testing.B, enabled bool) *Manager {
+func newBenchmarkManager(b *testing.B, enabled bool) *modeltrace.Manager {
 	b.Helper()
 	cfg := config.ModelTracingConfig{
 		Enabled:          enabled,
-		PromptMaxBytes:   defaultPromptBytes,
-		ResponseMaxBytes: defaultResponseBytes,
-		MediaMaxBytes:    defaultMediaBytes,
+		PromptMaxBytes:   modeltrace.TestingDefaultPromptBytes,
+		ResponseMaxBytes: modeltrace.TestingDefaultResponseBytes,
+		MediaMaxBytes:    modeltrace.TestingDefaultMediaBytes,
 	}
-	generation := &generation{
-		cfg:         cfg,
-		source:      ConfigSourceDeployment,
-		fingerprint: generationFingerprint(cfg, ConfigSourceDeployment, 0),
-	}
+	generation := modeltrace.TestingNewGeneration(modeltrace.TestingGenerationConfig{
+		Cfg:         cfg,
+		Source:      modeltrace.ConfigSourceDeployment,
+		Fingerprint: modeltrace.TestingGenerationFingerprint(cfg, modeltrace.ConfigSourceDeployment, 0),
+	})
 	if enabled {
 		provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(
 			benchmarkDiscardExporter{},
-			sdktrace.WithMaxQueueSize(defaultMaxQueueSize),
-			sdktrace.WithMaxExportBatchSize(defaultMaxExportBatch),
-			sdktrace.WithBatchTimeout(defaultBatchTimeout),
-			sdktrace.WithExportTimeout(defaultExportTimeout),
+			sdktrace.WithMaxQueueSize(modeltrace.TestingDefaultMaxQueueSize),
+			sdktrace.WithMaxExportBatchSize(modeltrace.TestingDefaultMaxExportBatch),
+			sdktrace.WithBatchTimeout(modeltrace.TestingDefaultBatchTimeout),
+			sdktrace.WithExportTimeout(modeltrace.TestingDefaultExportTimeout),
 		))
-		generation.provider = provider
-		generation.tracer = provider.Tracer(tracerName)
-		generation.shutdown = provider.Shutdown
+		generation.BindTracerProvider(provider)
 	}
-	manager := &Manager{active: generation}
+	manager := modeltrace.TestingNewManagerWithActive(generation)
 	b.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -122,7 +121,7 @@ func newBenchmarkManager(b *testing.B, enabled bool) *Manager {
 	return manager
 }
 
-func benchmarkRouter(manager *Manager, contentType string, response []byte) *gin.Engine {
+func benchmarkRouter(manager *modeltrace.Manager, contentType string, response []byte) *gin.Engine {
 	router := gin.New()
 	router.POST("/v1/chat/completions",
 		manager.CandidateMiddleware(),

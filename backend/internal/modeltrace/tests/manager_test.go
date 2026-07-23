@@ -1,10 +1,11 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,14 @@ func newFakeOTLPServer(t *testing.T) *fakeOTLPServer {
 	t.Helper()
 	fake := &fakeOTLPServer{}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Conversation-track read-back uses Langfuse Public API on the same host.
+		if r.Method == http.MethodGet && (r.URL.Path == "/api/public/traces" || r.URL.Path == "/api/public/observations") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[],"meta":{"totalPages":1}}`))
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			fake.recordError(fmt.Sprintf("read body: %v", err))
@@ -95,7 +104,7 @@ func (f *fakeOTLPServer) snapshot() ([]*collectortracepb.ExportTraceServiceReque
 func TestModelTraceCandidateRecognizedRequestExportsOneRootWithoutAttempt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled:          true,
 		Endpoint:         fake.server.URL + "/api/public/otel",
 		PublicKey:        testPublicKey,
@@ -153,13 +162,13 @@ func TestModelTraceCandidateRecognizedRequestExportsOneRootWithoutAttempt(t *tes
 	spans := exportedSpans(requests)
 	require.Len(t, spans, 1, "request without a recorded upstream attempt must only export the root")
 
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	require.Len(t, root.TraceId, 16)
 	require.NotEqual(t, make([]byte, 16), root.TraceId)
 	require.Empty(t, root.ParentSpanId)
 
 	rootAttrs := attributesByKey(root.Attributes)
-	require.Equal(t, rootSpanName, stringAttribute(t, rootAttrs, "langfuse.trace.name"))
+	require.Equal(t, modeltrace.TestingRootSpanName, stringAttribute(t, rootAttrs, "langfuse.trace.name"))
 	require.Equal(t, requestID, stringAttribute(t, rootAttrs, "langfuse.trace.metadata.request_id"))
 	require.Equal(t, fmt.Sprint(userID), stringAttribute(t, rootAttrs, "langfuse.user.id"))
 	require.Equal(t, apiKeyID, intAttribute(t, rootAttrs, "langfuse.trace.metadata.api_key_id"))
@@ -180,7 +189,7 @@ func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			fake := newFakeOTLPServer(t)
-			manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+			manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 				Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 				PublicKey: testPublicKey, SecretKey: testSecretKey,
 				PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -199,7 +208,7 @@ func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
 					_, readErr := io.ReadAll(c.Request.Body)
 					require.NoError(t, readErr)
 					if tc.activate {
-						ActivateDeferredCandidate(c)
+						modeltrace.ActivateDeferredCandidate(c)
 					}
 					c.JSON(http.StatusOK, gin.H{"input_tokens": 3})
 				},
@@ -219,7 +228,7 @@ func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
 				return
 			}
 			require.Len(t, spans, 1)
-			root := spanNamed(t, spans, rootSpanName)
+			root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 			require.JSONEq(t, `{"model":"claude-test"}`, stringAttribute(t, attributesByKey(root.Attributes), "langfuse.observation.input"))
 		})
 	}
@@ -228,7 +237,7 @@ func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
 func TestModelTraceCandidateAnonymousFailureDoesNotExport(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 	})
@@ -254,7 +263,7 @@ func TestModelTraceCandidateAnonymousFailureDoesNotExport(t *testing.T) {
 func TestModelTraceCandidateRecognizedFailureExportsRootWithoutGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -279,7 +288,7 @@ func TestModelTraceCandidateRecognizedFailureExportsRootWithoutGeneration(t *tes
 	require.Len(t, requests, 1)
 	spans := exportedSpans(requests)
 	require.Len(t, spans, 1)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 	attrs := attributesByKey(root.Attributes)
 	require.Equal(t, int64(403), intAttribute(t, attrs, "http.response.status_code"))
@@ -291,7 +300,7 @@ func TestModelTraceCandidateRecognizedFailureExportsRootWithoutGeneration(t *tes
 func TestModelTraceCandidatePreservesBodyLimitError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -326,7 +335,7 @@ func TestModelTraceCandidatePreservesBodyLimitError(t *testing.T) {
 	require.Len(t, requests, 1)
 	spans := exportedSpans(requests)
 	require.Len(t, spans, 1)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 	attrs := attributesByKey(root.Attributes)
 	require.Equal(t, int64(http.StatusRequestEntityTooLarge), intAttribute(t, attrs, "http.response.status_code"))
@@ -338,7 +347,7 @@ func TestModelTraceCandidatePanicMatchesRecoveryAndExports500(t *testing.T) {
 	run := func(t *testing.T, enabled bool) (int, string, []*tracepb.Span) {
 		t.Helper()
 		fake := newFakeOTLPServer(t)
-		manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 			Enabled: enabled, Endpoint: fake.server.URL + "/api/public/otel",
 			PublicKey: testPublicKey, SecretKey: testSecretKey,
 			PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -373,7 +382,7 @@ func TestModelTraceCandidatePanicMatchesRecoveryAndExports500(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, activeCode)
 	require.Empty(t, disabledSpans)
 	require.Len(t, activeSpans, 1)
-	root := spanNamed(t, activeSpans, rootSpanName)
+	root := spanNamed(t, activeSpans, modeltrace.TestingRootSpanName)
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 	attrs := attributesByKey(root.Attributes)
 	require.Equal(t, int64(http.StatusInternalServerError), intAttribute(t, attrs, "http.response.status_code"))
@@ -406,7 +415,7 @@ func TestModelTraceDisabledWithoutTarget(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			manager, err := NewManager(context.Background(), tc.cfg)
+			manager, err := modeltrace.NewManager(context.Background(), tc.cfg)
 			require.NoError(t, err)
 			require.False(t, manager.Enabled())
 

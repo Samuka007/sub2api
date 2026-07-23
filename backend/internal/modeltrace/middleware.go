@@ -231,7 +231,9 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 	if s.identity.GroupID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", s.identity.GroupID))
 	}
-	if session := scrubURLsInString(extractSession(clientInput, c)); session != "" {
+	session := ""
+	if extracted := scrubURLsInString(extractSession(clientInput, c)); extracted != "" {
+		session = extracted
 		attrs = append(attrs, attribute.String("langfuse.session.id", session))
 	}
 	s.span.SetAttributes(attrs...)
@@ -243,6 +245,14 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		s.span.SetStatus(codes.Error, description)
 	} else {
 		s.span.SetStatus(codes.Ok, "")
+	}
+	if session != "" {
+		var header http.Header
+		if c.Request != nil {
+			header = c.Request.Header
+		}
+		spanCtx := trace.ContextWithSpan(context.Background(), s.span)
+		recordConversationTrack(spanCtx, s.generation.Tracer(), cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, session, clientInput, clientOutput, header)
 	}
 	s.recorder.FinishRequest()
 	s.span.End()

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -23,6 +24,8 @@ type openAIWSTraceTurns struct {
 	identity    servermiddleware.ResolvedIdentity
 	connection  string
 	path        string
+	headers     http.Header
+	grokRoute   bool
 	mu          sync.Mutex
 	activeTurns map[int]*modeltrace.ResponsesWSTurn
 }
@@ -31,15 +34,19 @@ func newOpenAIWSTraceTurns(h *OpenAIGatewayHandler, c *gin.Context, apiKey *serv
 	parent := context.Background()
 	path := ""
 	connection := ""
+	var headers http.Header
+	grokRoute := false
 	if c != nil && c.Request != nil {
 		parent = c.Request.Context()
 		path = c.Request.URL.Path
 		connection, _ = parent.Value(ctxkey.ClientRequestID).(string)
+		headers = c.Request.Header.Clone()
 	}
 	groupID := int64(0)
 	if apiKey != nil {
 		if apiKey.Group != nil {
 			groupID = apiKey.Group.ID
+			grokRoute = strings.EqualFold(strings.TrimSpace(apiKey.Group.Platform), "grok")
 		} else if apiKey.GroupID != nil {
 			groupID = *apiKey.GroupID
 		}
@@ -50,6 +57,7 @@ func newOpenAIWSTraceTurns(h *OpenAIGatewayHandler, c *gin.Context, apiKey *serv
 	}
 	return &openAIWSTraceTurns{
 		handler: h, parent: parent, connection: strings.TrimSpace(connection), path: path,
+		headers: headers, grokRoute: grokRoute,
 		identity:    servermiddleware.ResolvedIdentity{APIKeyID: apiKeyID, UserID: subject.UserID, GroupID: groupID},
 		activeTurns: make(map[int]*modeltrace.ResponsesWSTurn),
 	}
@@ -77,7 +85,7 @@ func (t *openAIWSTraceTurns) start(turn int, payload []byte, model string) {
 		TurnIndex:           turn,
 		Path:                t.path,
 		Model:               strings.TrimSpace(model),
-		SessionID:           modeltrace.ExtractLangfuseSessionID(payload, nil, false),
+		SessionID:           modeltrace.ExtractLangfuseSessionID(payload, t.headers, t.grokRoute),
 	}, payload)
 	if turnTrace == nil {
 		return

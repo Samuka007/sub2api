@@ -1,10 +1,11 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"net/http"
 	"strings"
@@ -23,22 +24,22 @@ func TestModelTraceResponsesWebSocketTurns(t *testing.T) {
 	manager, fake := newWSTurnTestManager(t)
 	identity := servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19}
 
-	first := manager.StartResponsesWSTurn(context.Background(), ResponsesWSTurnMetadata{
+	first := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity: identity, ConnectionRequestID: "connection-1", TurnRequestID: "turn-request-1",
 		TurnIndex: 1, Path: "/v1/responses", Model: "gpt-test",
 	}, []byte(`{"type":"response.create","model":"gpt-test","input":"first"}`))
 	require.NotNil(t, first)
 	first.ObserveClientWrite([]byte(`{"type":"response.output_text.delta","delta":"one"}`), nil)
 	first.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_1"}}`), nil)
-	first.End(streamStatusCompleted, "", nil)
+	first.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
-	second := manager.StartResponsesWSTurn(context.Background(), ResponsesWSTurnMetadata{
+	second := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity: identity, ConnectionRequestID: "connection-1", TurnRequestID: "turn-request-2",
 		TurnIndex: 2, Path: "/v1/responses", Model: "gpt-test",
 	}, []byte(`{"type":"response.create","model":"gpt-test","previous_response_id":"resp_1","input":"second"}`))
 	require.NotNil(t, second)
 	second.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_2"}}`), nil)
-	second.End(streamStatusCompleted, "", nil)
+	second.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	shutdownWSTurnManager(t, manager)
 	requests, serverErrors := fake.snapshot()
@@ -51,7 +52,7 @@ func TestModelTraceResponsesWebSocketTurns(t *testing.T) {
 		attrs := attributesByKey(span.Attributes)
 		require.Equal(t, "connection-1", stringAttribute(t, attrs, "langfuse.trace.metadata.connection_request_id"))
 		require.NotContains(t, attrs, "langfuse.session.id", "connection correlation must not become a Langfuse Session")
-		require.Equal(t, streamStatusCompleted, stringAttribute(t, attrs, streamStatusAttribute))
+		require.Equal(t, modeltrace.TestingStreamStatusCompleted, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
 	}
 	require.NotEqual(t, spans[0].TraceId, spans[1].TraceId)
 	require.NotEqual(t,
@@ -65,7 +66,7 @@ func TestModelTraceResponsesWebSocketTurns(t *testing.T) {
 func TestModelTraceResponsesWebSocketConfigSwitch(t *testing.T) {
 	firstManager, firstFake := newWSTurnTestManager(t)
 	secondManager, secondFake := newWSTurnTestManager(t)
-	metadata := ResponsesWSTurnMetadata{
+	metadata := modeltrace.ResponsesWSTurnMetadata{
 		Identity:            servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
 		ConnectionRequestID: "connection-switch", Path: "/v1/responses", Model: "gpt-test",
 	}
@@ -73,12 +74,12 @@ func TestModelTraceResponsesWebSocketConfigSwitch(t *testing.T) {
 	metadata.TurnIndex, metadata.TurnRequestID = 1, "switch-turn-1"
 	first := firstManager.StartResponsesWSTurn(context.Background(), metadata, []byte(`{"type":"response.create","model":"gpt-test","input":"old target"}`))
 	first.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_old"}}`), nil)
-	first.End(streamStatusCompleted, "", nil)
+	first.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	metadata.TurnIndex, metadata.TurnRequestID = 2, "switch-turn-2"
 	second := secondManager.StartResponsesWSTurn(context.Background(), metadata, []byte(`{"type":"response.create","model":"gpt-test","input":"new target"}`))
 	second.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_new"}}`), nil)
-	second.End(streamStatusCompleted, "", nil)
+	second.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	shutdownWSTurnManager(t, firstManager)
 	shutdownWSTurnManager(t, secondManager)
@@ -94,14 +95,14 @@ func TestModelTraceResponsesWebSocketConfigSwitch(t *testing.T) {
 
 func TestModelTraceResponsesWebSocketDisconnect(t *testing.T) {
 	manager, fake := newWSTurnTestManager(t)
-	turn := manager.StartResponsesWSTurn(context.Background(), ResponsesWSTurnMetadata{
+	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity:            servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
 		ConnectionRequestID: "connection-disconnect", TurnRequestID: "disconnect-turn-1",
 		TurnIndex: 1, Path: "/v1/responses", Model: "gpt-test",
 	}, []byte(`{"type":"response.create","model":"gpt-test","input":"disconnect"}`))
 	turn.ObserveClientWrite([]byte(`{"type":"response.output_text.delta","delta":"partial"}`), nil)
 	turn.ObserveClientWrite([]byte(`{"type":"response.output_text.delta","delta":"lost"}`), errors.New("client websocket closed"))
-	turn.End(streamStatusCompleted, "", nil)
+	turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	shutdownWSTurnManager(t, manager)
 	requests, serverErrors := fake.snapshot()
@@ -110,8 +111,8 @@ func TestModelTraceResponsesWebSocketDisconnect(t *testing.T) {
 	require.Len(t, spans, 1)
 	root := spans[0]
 	attrs := attributesByKey(root.Attributes)
-	require.Equal(t, streamStatusClientDisconnected, stringAttribute(t, attrs, streamStatusAttribute))
-	require.Equal(t, "downstream_write", stringAttribute(t, attrs, streamErrorStageAttribute))
+	require.Equal(t, modeltrace.TestingStreamStatusClientDisconnected, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
+	require.Equal(t, "downstream_write", stringAttribute(t, attrs, modeltrace.TestingStreamErrorStageAttribute))
 	require.Contains(t, stringAttribute(t, attrs, "langfuse.observation.output"), "partial")
 	require.NotContains(t, stringAttribute(t, attrs, "langfuse.observation.output"), "lost")
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
@@ -119,7 +120,7 @@ func TestModelTraceResponsesWebSocketDisconnect(t *testing.T) {
 
 func TestModelTraceResponsesWebSocketHTTPAttempt(t *testing.T) {
 	manager, fake := newWSTurnTestManager(t)
-	turn := manager.StartResponsesWSTurn(context.Background(), ResponsesWSTurnMetadata{
+	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity:            servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
 		ConnectionRequestID: "connection-http", TurnRequestID: "http-turn-1",
 		TurnIndex: 1, Path: "/v1/responses", Model: "gpt-test",
@@ -133,14 +134,14 @@ func TestModelTraceResponsesWebSocketHTTPAttempt(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, body.Close())
 	turn.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_http"}}`), nil)
-	turn.End(streamStatusCompleted, "", nil)
+	turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	shutdownWSTurnManager(t, manager)
 	requests, serverErrors := fake.snapshot()
 	require.Empty(t, serverErrors)
 	spans := exportedSpans(requests)
 	require.Len(t, spans, 2)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	upstream := spanNamed(t, spans, "upstream.attempt.1")
 	require.Equal(t, root.TraceId, upstream.TraceId)
 	require.Equal(t, root.SpanId, upstream.ParentSpanId)
@@ -149,13 +150,13 @@ func TestModelTraceResponsesWebSocketHTTPAttempt(t *testing.T) {
 func TestModelTraceResponsesWebSocketInputCaptureIsBounded(t *testing.T) {
 	manager, fake := newWSTurnTestManager(t)
 	payload := []byte(`{"type":"response.create","model":"gpt-test","input":"` + strings.Repeat("x", 8192) + `"}`)
-	turn := manager.StartResponsesWSTurn(context.Background(), ResponsesWSTurnMetadata{
+	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity: servermiddleware.ResolvedIdentity{APIKeyID: 71}, TurnRequestID: "bounded-turn-1",
 		TurnIndex: 1, Path: "/v1/responses", Model: "gpt-test",
 	}, payload)
 	require.NotNil(t, turn)
-	require.LessOrEqual(t, len(turn.input), 4096, "turn must retain only the configured prompt prefix")
-	turn.End(streamStatusCompleted, "", nil)
+	require.LessOrEqual(t, modeltrace.TestingResponsesWSTurnInputLen(turn), 4096, "turn must retain only the configured prompt prefix")
+	turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
 	shutdownWSTurnManager(t, manager)
 	requests, serverErrors := fake.snapshot()
@@ -166,10 +167,10 @@ func TestModelTraceResponsesWebSocketInputCaptureIsBounded(t *testing.T) {
 	require.Contains(t, input, fmt.Sprintf("[truncated:original_bytes=%d", len(payload)))
 }
 
-func newWSTurnTestManager(t *testing.T) (*Manager, *fakeOTLPServer) {
+func newWSTurnTestManager(t *testing.T) (*modeltrace.Manager, *fakeOTLPServer) {
 	t.Helper()
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel", PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
 	})
@@ -177,7 +178,7 @@ func newWSTurnTestManager(t *testing.T) (*Manager, *fakeOTLPServer) {
 	return manager, fake
 }
 
-func shutdownWSTurnManager(t *testing.T, manager *Manager) {
+func shutdownWSTurnManager(t *testing.T, manager *modeltrace.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

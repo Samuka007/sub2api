@@ -1,4 +1,4 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -46,7 +47,7 @@ func TestModelTraceProtocolConversion(t *testing.T) {
 	})
 
 	require.Len(t, spans, 2)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	attempt := spanNamed(t, spans, "upstream.attempt.1")
 	require.Equal(t, root.SpanId, attempt.ParentSpanId)
 	require.JSONEq(t, string(clientInput), stringAttribute(t, attributesByKey(root.Attributes), "langfuse.observation.input"))
@@ -80,7 +81,7 @@ func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 	})
 
 	require.Len(t, spans, 2)
-	rootAttrs := attributesByKey(spanNamed(t, spans, rootSpanName).Attributes)
+	rootAttrs := attributesByKey(spanNamed(t, spans, modeltrace.TestingRootSpanName).Attributes)
 	attemptAttrs := attributesByKey(spanNamed(t, spans, "upstream.attempt.1").Attributes)
 	captured := strings.Join([]string{
 		stringAttribute(t, rootAttrs, "langfuse.observation.input"),
@@ -92,7 +93,7 @@ func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 	for _, secret := range []string{"client-secret", "private-image-bytes", media, "password", "url-secret", "upstream-secret", "response-secret", "client-response-secret"} {
 		require.NotContains(t, captured, secret)
 	}
-	require.Contains(t, captured, redactedValue)
+	require.Contains(t, captured, modeltrace.TestingRedactedValue)
 	require.Contains(t, captured, `"fingerprint":"sha256:`)
 	require.Contains(t, captured, "https://anthropic.example/v1/messages")
 }
@@ -110,7 +111,7 @@ func TestModelTraceRootMultipartDefaultOmitsFileContent(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
@@ -130,7 +131,7 @@ func TestModelTraceRootMultipartDefaultOmitsFileContent(t *testing.T) {
 
 	requests, serverErrors := fake.snapshot()
 	require.Empty(t, serverErrors)
-	root := spanNamed(t, exportedSpans(requests), rootSpanName)
+	root := spanNamed(t, exportedSpans(requests), modeltrace.TestingRootSpanName)
 	captured := stringAttribute(t, attributesByKey(root.Attributes), "langfuse.observation.input")
 	require.NotContains(t, captured, canary)
 	require.Contains(t, captured, `"media_count":1`)
@@ -188,7 +189,7 @@ func TestModelTraceFailoverAttempts(t *testing.T) {
 	})
 
 	require.Len(t, spans, 3)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	first := spanNamed(t, spans, "upstream.attempt.1")
 	second := spanNamed(t, spans, "upstream.attempt.2")
 	require.Equal(t, root.SpanId, first.ParentSpanId)
@@ -221,7 +222,7 @@ func TestModelTraceAttemptHTTPErrorSetsErrorStatus(t *testing.T) {
 	attempt := spanNamed(t, spans, "upstream.attempt.1")
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, attempt.Status.Code)
 	require.Equal(t, "client_error", attempt.Status.Message)
-	require.Equal(t, tracepb.Status_STATUS_CODE_OK, spanNamed(t, spans, rootSpanName).Status.Code)
+	require.Equal(t, tracepb.Status_STATUS_CODE_OK, spanNamed(t, spans, modeltrace.TestingRootSpanName).Status.Code)
 }
 
 func TestModelTraceAllAttemptsFailed(t *testing.T) {
@@ -242,7 +243,7 @@ func TestModelTraceAllAttemptsFailed(t *testing.T) {
 	})
 
 	require.Len(t, spans, 3)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 	for _, name := range []string{"upstream.attempt.1", "upstream.attempt.2"} {
 		attempt := spanNamed(t, spans, name)
@@ -274,7 +275,7 @@ func TestModelTraceAttemptClosedBeforeEOFIsError(t *testing.T) {
 	require.Len(t, spans, 2)
 	attempt := spanNamed(t, spans, "upstream.attempt.1")
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, attempt.Status.Code)
-	require.Equal(t, errUpstreamResponseIncomplete.Error(), attempt.Status.Message)
+	require.Equal(t, modeltrace.TestingErrUpstreamResponseIncomplete.Error(), attempt.Status.Message)
 	require.Equal(t, "partial", stringAttribute(t, attributesByKey(attempt.Attributes), "langfuse.observation.output"))
 }
 
@@ -282,7 +283,7 @@ func runAttemptTrace(t *testing.T, clientInput []byte, handler gin.HandlerFunc) 
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
 		PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,

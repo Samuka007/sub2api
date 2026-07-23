@@ -1,8 +1,9 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,7 +89,7 @@ func TestModelTraceUsageAndCost(t *testing.T) {
 	require.NotContains(t, attrs, "langfuse.trace.metadata.request_id")
 	require.Equal(t, int64(29), intAttribute(t, attrs, "modeltrace.account.id"))
 	require.Equal(t, int64(321), intAttribute(t, attrs, "modeltrace.duration_ms"))
-	require.Equal(t, int64(45), intAttribute(t, attrs, firstOutputMsAttribute))
+	require.Equal(t, int64(45), intAttribute(t, attrs, modeltrace.TestingFirstOutputMsAttribute))
 	require.Equal(t, "73", stringAttribute(t, attrs, "langfuse.user.id"))
 }
 
@@ -242,10 +243,10 @@ func installUsageTestIdentity() gin.HandlerFunc {
 	}
 }
 
-func newUsageTestManager(t *testing.T) (*Manager, *fakeOTLPServer) {
+func newUsageTestManager(t *testing.T) (*modeltrace.Manager, *fakeOTLPServer) {
 	t.Helper()
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel", PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
 	})
@@ -253,7 +254,7 @@ func newUsageTestManager(t *testing.T) (*Manager, *fakeOTLPServer) {
 	return manager, fake
 }
 
-func shutdownUsageTestManager(t *testing.T, manager *Manager) {
+func shutdownUsageTestManager(t *testing.T, manager *modeltrace.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

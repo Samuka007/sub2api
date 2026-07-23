@@ -1,7 +1,8 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -34,12 +35,12 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				err := ValidateEndpoint(tt.endpoint)
+				err := modeltrace.ValidateEndpoint(tt.endpoint)
 				if tt.wantError && err == nil {
-					t.Fatalf("ValidateEndpoint(%q) succeeded, want rejection", tt.endpoint)
+					t.Fatalf("modeltrace.ValidateEndpoint(%q) succeeded, want rejection", tt.endpoint)
 				}
 				if !tt.wantError && err != nil {
-					t.Fatalf("ValidateEndpoint(%q) rejected a safe transport: %v", tt.endpoint, err)
+					t.Fatalf("modeltrace.ValidateEndpoint(%q) rejected a safe transport: %v", tt.endpoint, err)
 				}
 			})
 		}
@@ -58,7 +59,7 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 		t.Setenv("NO_PROXY", "")
 		t.Setenv("no_proxy", "")
 
-		manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 			Enabled:   true,
 			Endpoint:  "http://192.0.2.10:4318",
 			PublicKey: "public",
@@ -70,7 +71,7 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_ = manager.Shutdown(shutdownCtx)
-			t.Error("NewManager accepted a remote plaintext endpoint")
+			t.Error("modeltrace.NewManager accepted a remote plaintext endpoint")
 		}
 		if got := requests.Load(); got != 0 {
 			t.Fatalf("remote HTTP rejection emitted %d OTLP requests, want 0", got)
@@ -94,14 +95,14 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 		}))
 		defer server.Close()
 
-		manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 			Enabled:   true,
 			Endpoint:  server.URL,
 			PublicKey: "public",
 			SecretKey: "secret",
 		})
 		if err != nil {
-			t.Fatalf("NewManager rejected syntactically valid HTTPS endpoint: %v", err)
+			t.Fatalf("modeltrace.NewManager rejected syntactically valid HTTPS endpoint: %v", err)
 		}
 		_, span := manager.Tracer().Start(context.Background(), "certificate-check")
 		span.End()
@@ -138,23 +139,23 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 func TestManagerConcurrentShutdownWaitsForEveryPublishedGeneration(t *testing.T) {
 	initialClosed := make(chan struct{})
 	nextClosed := make(chan struct{})
-	initial := &generation{
-		source: ConfigSourceDeployment, fingerprint: "initial",
-		shutdown: func(context.Context) error {
+	initial := modeltrace.TestingNewGeneration(modeltrace.TestingGenerationConfig{
+		Source: modeltrace.ConfigSourceDeployment, Fingerprint: "initial",
+		Shutdown: func(context.Context) error {
 			close(initialClosed)
 			return nil
 		},
-	}
-	manager := &Manager{active: initial}
+	})
+	manager := modeltrace.TestingNewManagerWithActive(initial)
 	initialHeld := manager.Acquire()
-	next := &generation{
-		source: ConfigSourceRuntime, version: 1, fingerprint: "next",
-		shutdown: func(context.Context) error {
+	next := modeltrace.TestingNewGeneration(modeltrace.TestingGenerationConfig{
+		Source: modeltrace.ConfigSourceRuntime, Version: 1, Fingerprint: "next",
+		Shutdown: func(context.Context) error {
 			close(nextClosed)
 			return nil
 		},
-	}
-	if err := manager.installGeneration(next); err != nil {
+	})
+	if err := manager.TestingInstallGeneration(next); err != nil {
 		t.Fatalf("install generation: %v", err)
 	}
 	nextHeld := manager.Acquire()

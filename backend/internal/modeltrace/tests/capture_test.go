@@ -1,9 +1,10 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"mime/multipart"
 	"strings"
 	"testing"
@@ -14,12 +15,12 @@ import (
 
 func TestCaptureModelContentRedactsSecretsAndBounds(t *testing.T) {
 	raw := []byte(fmt.Sprintf(`{"authorization":"Bearer auth-secret","api_key":"sk-secret","password":"pw-secret","prompt":%q}`, strings.Repeat("世界", 40)))
-	got := captureModelContent(raw, len(raw), 96, capturePolicy{})
+	got := modeltrace.TestingCaptureModelContent(raw, len(raw), 96, modeltrace.TestingCapturePolicy{})
 
 	require.NotContains(t, got, "auth-secret")
 	require.NotContains(t, got, "sk-secret")
 	require.NotContains(t, got, "pw-secret")
-	require.Contains(t, got, redactedValue)
+	require.Contains(t, got, modeltrace.TestingRedactedValue)
 	require.Contains(t, got, fmt.Sprintf("[truncated:original_bytes=%d,captured_bytes=", len(raw)))
 	require.True(t, utf8.ValidString(got))
 
@@ -36,7 +37,7 @@ func TestCaptureModelContentOmitsMediaByDefault(t *testing.T) {
 			{"type":"image","source":{"type":"base64","media_type":"image/png","data":%q}}
 		]}]}`, encoded))
 
-	got := captureModelContent(raw, len(raw), 4096, capturePolicy{mediaMaxBytes: 4})
+	got := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{MediaMaxBytes: 4})
 
 	require.NotContains(t, got, "TOP_SECRET_BINARY")
 	require.NotContains(t, got, encoded)
@@ -56,8 +57,8 @@ func TestCaptureModelContentBoundsEachMediaIndependently(t *testing.T) {
 		{"type":"input_audio","input_audio":{"format":"wav","data":%q}}
 	]}`, first, second))
 
-	got := captureModelContent(raw, len(raw), 4096, capturePolicy{
-		mediaMaxBytes: 3, captureMediaContent: true,
+	got := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{
+		MediaMaxBytes: 3, CaptureMediaContent: true,
 	})
 
 	require.NotContains(t, got, first)
@@ -80,8 +81,8 @@ func TestCaptureModelContentBoundsMultipartMediaOptIn(t *testing.T) {
 	}
 	require.NoError(t, writer.Close())
 
-	got := captureModelContentWithType(body.Bytes(), body.Len(), 4096, writer.FormDataContentType(), capturePolicy{
-		mediaMaxBytes: 4, captureMediaContent: true,
+	got := modeltrace.TestingCaptureModelContentWithType(body.Bytes(), body.Len(), 4096, writer.FormDataContentType(), modeltrace.TestingCapturePolicy{
+		MediaMaxBytes: 4, CaptureMediaContent: true,
 	})
 
 	require.NotContains(t, got, "secret-image-one")
@@ -96,7 +97,7 @@ func TestCaptureModelContentMalformedMultipartContentTypeFailsClosed(t *testing.
 	const canary = "malformed-multipart-canary-must-not-export"
 	raw := []byte("--boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"canary.png\"\r\n\r\n" + canary)
 
-	got := captureModelContentWithType(raw, len(raw), 4096, `multipart/form-data; boundary="unterminated`, capturePolicy{})
+	got := modeltrace.TestingCaptureModelContentWithType(raw, len(raw), 4096, `multipart/form-data; boundary="unterminated`, modeltrace.TestingCapturePolicy{})
 
 	require.NotContains(t, got, canary)
 	require.Contains(t, got, "[MULTIPART OMITTED]")
@@ -106,12 +107,12 @@ func TestCaptureModelContentSanitizesTruncatedUnstructuredPrefix(t *testing.T) {
 	media := base64.StdEncoding.EncodeToString([]byte("binary-secret"))
 	prefix := []byte("Authorization: Bearer top-secret\n{\"api_key\":\"sk-secret\",\"image_url\":\"data:image/png;base64," + media + "\"")
 
-	got := captureModelContent(prefix, len(prefix)+100, 4096, capturePolicy{})
+	got := modeltrace.TestingCaptureModelContent(prefix, len(prefix)+100, 4096, modeltrace.TestingCapturePolicy{})
 
 	require.NotContains(t, got, "top-secret")
 	require.NotContains(t, got, "sk-secret")
 	require.NotContains(t, got, media)
-	require.Contains(t, got, redactedValue)
+	require.Contains(t, got, modeltrace.TestingRedactedValue)
 	require.Contains(t, got, fmt.Sprintf("[truncated:original_bytes=%d,captured_bytes=", len(prefix)+100))
 }
 
@@ -119,19 +120,19 @@ func TestCaptureModelContentRedactsSecretsInsideSSEData(t *testing.T) {
 	raw := []byte("data: {\"api_key\":\"sse-api-secret\",\"authorization\":\"Basic auth-secret\"}\n\n" +
 		"data: {\"cookie\":\"session=sse-cookie-secret\",\"content\":\"ok\"}\n\n")
 
-	got := captureModelContent(raw, len(raw), 4096, capturePolicy{})
+	got := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{})
 
 	for _, secret := range []string{"sse-api-secret", "auth-secret", "sse-cookie-secret"} {
 		require.NotContains(t, got, secret)
 	}
-	require.Equal(t, 3, strings.Count(got, redactedValue))
+	require.Equal(t, 3, strings.Count(got, modeltrace.TestingRedactedValue))
 }
 
 func TestCaptureModelContentPreservesCredentialLikePromptText(t *testing.T) {
 	raw := []byte(`{"messages":[{"role":"user","content":"Explain Authorization: Bearer business-example and api_key=business-example verbatim"}]}`)
 
-	got := captureModelContent(raw, len(raw), 4096, capturePolicy{})
+	got := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{})
 
 	require.Equal(t, string(raw), got)
-	require.NotContains(t, got, redactedValue)
+	require.NotContains(t, got, modeltrace.TestingRedactedValue)
 }

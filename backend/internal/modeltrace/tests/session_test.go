@@ -1,6 +1,7 @@
-package modeltrace
+package modeltrace_test
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"net/http"
 	"testing"
 
@@ -20,6 +21,14 @@ func TestLangfuseSessionExtractor(t *testing.T) {
 		{name: "conversation_id", body: `{"conversation_id":"conversation-1"}`, want: "conversation-1"},
 		{name: "metadata session", body: `{"metadata":{"session_id":"metadata-1"}}`, want: "metadata-1"},
 		{name: "structured user id session", body: `{"metadata":{"user_id":{"session_id":"nested-1"}}}`, want: "nested-1"},
+		{name: "client_metadata session", body: `{"client_metadata":{"session_id":"cm-session-1"}}`, want: "cm-session-1"},
+		{name: "client_metadata thread fallback", body: `{"client_metadata":{"thread_id":"cm-thread-1"}}`, want: "cm-thread-1"},
+		{name: "client_metadata session wins over thread", body: `{"client_metadata":{"session_id":"cm-session-2","thread_id":"cm-thread-2"}}`, want: "cm-session-2"},
+		{name: "header session_id", header: http.Header{"Session_id": []string{"hdr-session-1"}}, want: "hdr-session-1"},
+		{name: "header session-id", header: http.Header{"Session-Id": []string{"hdr-session-dash"}}, want: "hdr-session-dash"},
+		{name: "header thread_id fallback", header: http.Header{"Thread_id": []string{"hdr-thread-1"}}, want: "hdr-thread-1"},
+		{name: "body session wins over header", body: `{"session_id":"body-1"}`, header: http.Header{"Session_id": []string{"hdr-1"}}, want: "body-1"},
+		{name: "client_metadata wins over header", body: `{"client_metadata":{"session_id":"cm-1"}}`, header: http.Header{"Session_id": []string{"hdr-1"}}, want: "cm-1"},
 		{name: "grok header on grok route", header: http.Header{"X-Grok-Conv-Id": []string{"grok-1"}}, grok: true, want: "grok-1"},
 		{name: "grok header rejected on non grok route", header: http.Header{"X-Grok-Conv-Id": []string{"grok-1"}}},
 		{name: "prompt cache key excluded", body: `{"prompt_cache_key":"cache-1"}`},
@@ -33,7 +42,7 @@ func TestLangfuseSessionExtractor(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, ExtractLangfuseSessionID([]byte(tt.body), tt.header, tt.grok))
+			require.Equal(t, tt.want, modeltrace.ExtractLangfuseSessionID([]byte(tt.body), tt.header, tt.grok))
 		})
 	}
 }

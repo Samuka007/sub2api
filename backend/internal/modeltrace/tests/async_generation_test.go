@@ -1,10 +1,11 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +31,7 @@ func TestAsyncImageTracePropagation(t *testing.T) {
 
 	snapshot := manager.Acquire()
 	ctx, submission := snapshot.Tracer().Start(context.Background(), "async.image.submission")
-	recorder := newTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 11, APIKeyID: 22}, 4096, 4096, capturePolicy{}, snapshot)
+	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 11, APIKeyID: 22}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
 	ctx = recording.WithRecorder(ctx, recorder)
 	continuation, ok := recording.ContinuationFromContext(ctx)
 	require.True(t, ok)
@@ -76,7 +77,7 @@ func TestAsyncExecutionMultipartInputOmitsFileContent(t *testing.T) {
 
 	fake := newFakeOTLPServer(t)
 	manager := newAsyncTestManager(t, fake.server.URL)
-	execution := manager.StartAsyncExecution(context.Background(), recording.TraceContinuation{}, AsyncExecutionMetadata{
+	execution := manager.StartAsyncExecution(context.Background(), recording.TraceContinuation{}, modeltrace.AsyncExecutionMetadata{
 		TaskID: "imgtask-multipart", Model: "gpt-image-test", Operation: "image.edit",
 		ContentType: writer.FormDataContentType(),
 	}, body.Bytes())
@@ -98,31 +99,31 @@ func TestAsyncTraceGenerationMismatch(t *testing.T) {
 
 	snapshot := manager.Acquire()
 	ctx, submission := snapshot.Tracer().Start(context.Background(), "async.submission")
-	recorder := newTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 31, APIKeyID: 32}, 4096, 4096, capturePolicy{}, snapshot)
+	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 31, APIKeyID: 32}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
 	ctx = recording.WithRecorder(ctx, recorder)
 	continuation, ok := recording.ContinuationFromContext(ctx)
 	require.True(t, ok)
 	submission.End()
 	snapshot.Release()
 
-	require.NoError(t, manager.ApplySnapshot(context.Background(), ConfigSnapshot{
+	require.NoError(t, manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
 		Config:        asyncTestConfig(newTarget.server.URL),
-		Source:        ConfigSourceRuntime,
+		Source:        modeltrace.ConfigSourceRuntime,
 		ConfigVersion: 1,
 	}))
-	execution := manager.StartAsyncExecution(context.Background(), continuation, AsyncExecutionMetadata{
+	execution := manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{
 		Identity: servermiddleware.ResolvedIdentity{UserID: 31, APIKeyID: 32},
 		TaskID:   "imgtask-1",
 		Model:    "gpt-image-test",
 	}, []byte(`{"prompt":"cat"}`))
 	require.NotNil(t, execution)
 	execution.End("completed", []byte(`{"ok":true}`), nil)
-	require.NoError(t, manager.ApplySnapshot(context.Background(), ConfigSnapshot{
+	require.NoError(t, manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
 		Config:        config.ModelTracingConfig{},
-		Source:        ConfigSourceRuntime,
+		Source:        modeltrace.ConfigSourceRuntime,
 		ConfigVersion: 2,
 	}))
-	require.Nil(t, manager.StartAsyncExecution(context.Background(), continuation, AsyncExecutionMetadata{TaskID: "disabled"}, nil))
+	require.Nil(t, manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{TaskID: "disabled"}, nil))
 	shutdownManager(t, manager)
 
 	oldSpans := fakeSpans(t, oldTarget)
@@ -146,7 +147,7 @@ func TestBatchImageTraceItems(t *testing.T) {
 	manager := newAsyncTestManager(t, fake.server.URL)
 	snapshot := manager.Acquire()
 	ctx, submission := snapshot.Tracer().Start(context.Background(), "batch.image.submission")
-	recorder := newTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42}, 4096, 4096, capturePolicy{}, snapshot)
+	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
 	ctx = recording.WithRecorder(ctx, recorder)
 	recording.RecordAsyncSubmission(ctx, "batch-1", []string{"item-a", "item-b"})
 	continuation, ok := recording.ContinuationFromContext(ctx)
@@ -155,7 +156,7 @@ func TestBatchImageTraceItems(t *testing.T) {
 	snapshot.Release()
 
 	for _, itemID := range []string{"item-a", "item-b"} {
-		execution := manager.StartAsyncExecution(context.Background(), continuation, AsyncExecutionMetadata{
+		execution := manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{
 			Identity: servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42},
 			TaskID:   "batch-1",
 			ItemID:   itemID,
@@ -191,14 +192,14 @@ func TestAsyncModelTraceCancellation(t *testing.T) {
 	manager := newAsyncTestManager(t, fake.server.URL)
 	snapshot := manager.Acquire()
 	ctx, submission := snapshot.Tracer().Start(context.Background(), "cancel.submission")
-	recorder := newTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 51, APIKeyID: 52}, 4096, 4096, capturePolicy{}, snapshot)
+	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 51, APIKeyID: 52}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
 	ctx = recording.WithRecorder(ctx, recorder)
 	continuation, ok := recording.ContinuationFromContext(ctx)
 	require.True(t, ok)
 	submission.End()
 	snapshot.Release()
 
-	execution := manager.StartAsyncExecution(context.Background(), continuation, AsyncExecutionMetadata{TaskID: "cancel-1"}, nil)
+	execution := manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{TaskID: "cancel-1"}, nil)
 	require.NotNil(t, execution)
 	execution.End("cancelled", nil, context.Canceled)
 	shutdownManager(t, manager)
@@ -215,8 +216,8 @@ func TestModelTraceGenerationSwap(t *testing.T) {
 
 	first := manager.Acquire()
 	_, firstSpan := first.Tracer().Start(context.Background(), "in-flight-first")
-	require.NoError(t, manager.ApplySnapshot(context.Background(), ConfigSnapshot{
-		Config: asyncTestConfig(secondTarget.server.URL), Source: ConfigSourceRuntime, ConfigVersion: 1,
+	require.NoError(t, manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: asyncTestConfig(secondTarget.server.URL), Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
 	}))
 	second := manager.Acquire()
 	_, secondSpan := second.Tracer().Start(context.Background(), "new-second")
@@ -237,8 +238,8 @@ func TestModelTraceDisableInFlight(t *testing.T) {
 	manager := newAsyncTestManager(t, fake.server.URL)
 	inFlight := manager.Acquire()
 	_, span := inFlight.Tracer().Start(context.Background(), "in-flight-before-disable")
-	require.NoError(t, manager.ApplySnapshot(context.Background(), ConfigSnapshot{
-		Config: config.ModelTracingConfig{}, Source: ConfigSourceRuntime, ConfigVersion: 1,
+	require.NoError(t, manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: config.ModelTracingConfig{}, Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
 	}))
 	require.False(t, manager.Enabled())
 	span.End()
@@ -257,7 +258,7 @@ func TestModelTraceExporterFailOpen(t *testing.T) {
 		{name: "error", exporter: errorSpanExporter{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			manager := managerWithTestExporter(tc.exporter)
+			manager := modeltrace.TestingManagerWithTestExporter(tc.exporter)
 			response := serveFailOpenRequest(t, manager)
 			require.Equal(t, http.StatusOK, response.Code)
 			require.JSONEq(t, `{"ok":true}`, response.Body.String())
@@ -267,7 +268,7 @@ func TestModelTraceExporterFailOpen(t *testing.T) {
 
 	t.Run("queue saturation never blocks response", func(t *testing.T) {
 		blocker := &blockingSpanExporter{release: make(chan struct{})}
-		manager := managerWithTestExporter(blocker)
+		manager := modeltrace.TestingManagerWithTestExporter(blocker)
 		for i := 0; i < 64; i++ {
 			response := serveFailOpenRequest(t, manager)
 			require.Equal(t, http.StatusOK, response.Code)
@@ -284,18 +285,18 @@ func TestModelTraceProductionQueueRetainsMaximumAsyncBatchBurst(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	processor := sdktrace.NewBatchSpanProcessor(
-		failOpenExporter{delegate: exporter},
-		sdktrace.WithMaxQueueSize(defaultMaxQueueSize),
-		sdktrace.WithMaxExportBatchSize(defaultMaxExportBatch),
-		sdktrace.WithBatchTimeout(defaultBatchTimeout),
-		sdktrace.WithExportTimeout(defaultExportTimeout),
+		modeltrace.TestingFailOpenExporter(exporter, nil),
+		sdktrace.WithMaxQueueSize(modeltrace.TestingDefaultMaxQueueSize),
+		sdktrace.WithMaxExportBatchSize(modeltrace.TestingDefaultMaxExportBatch),
+		sdktrace.WithBatchTimeout(modeltrace.TestingDefaultBatchTimeout),
+		sdktrace.WithExportTimeout(modeltrace.TestingDefaultExportTimeout),
 	)
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := provider.Tracer(tracerName)
+	tracer := provider.Tracer(modeltrace.TestingTracerName)
 
 	// Fill one export batch and block it in the exporter. The following burst is
 	// the worst case produced by a maximum-sized async image job.
-	for i := 0; i < defaultMaxExportBatch; i++ {
+	for i := 0; i < modeltrace.TestingDefaultMaxExportBatch; i++ {
 		_, span := tracer.Start(context.Background(), "preexisting")
 		span.End()
 	}
@@ -310,7 +311,7 @@ func TestModelTraceProductionQueueRetainsMaximumAsyncBatchBurst(t *testing.T) {
 	}
 	close(exporter.release)
 	require.NoError(t, provider.Shutdown(context.Background()))
-	require.Equal(t, defaultMaxExportBatch+maximumAsyncBatchItems, exporter.count())
+	require.Equal(t, modeltrace.TestingDefaultMaxExportBatch+maximumAsyncBatchItems, exporter.count())
 }
 
 type blockingCountingSpanExporter struct {
@@ -393,9 +394,9 @@ func (e *blockingSpanExporter) Shutdown(context.Context) error {
 	return nil
 }
 
-func newAsyncTestManager(t *testing.T, endpoint string) *Manager {
+func newAsyncTestManager(t *testing.T, endpoint string) *modeltrace.Manager {
 	t.Helper()
-	manager, err := NewManager(context.Background(), asyncTestConfig(endpoint))
+	manager, err := modeltrace.NewManager(context.Background(), asyncTestConfig(endpoint))
 	require.NoError(t, err)
 	return manager
 }
@@ -408,24 +409,7 @@ func asyncTestConfig(endpoint string) config.ModelTracingConfig {
 	}
 }
 
-func managerWithTestExporter(exporter sdktrace.SpanExporter) *Manager {
-	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(
-		failOpenExporter{delegate: exporter},
-		sdktrace.WithMaxQueueSize(2),
-		sdktrace.WithMaxExportBatchSize(1),
-		sdktrace.WithBatchTimeout(time.Millisecond),
-		sdktrace.WithExportTimeout(100*time.Millisecond),
-	))
-	cfg := config.ModelTracingConfig{Enabled: true, PromptMaxBytes: 4096, ResponseMaxBytes: 4096, MediaMaxBytes: 4096}
-	generation := &generation{
-		cfg: cfg, source: ConfigSourceDeployment,
-		fingerprint: generationFingerprint(cfg, ConfigSourceDeployment, 0),
-		provider:    provider, tracer: provider.Tracer(tracerName), shutdown: provider.Shutdown,
-	}
-	return &Manager{active: generation}
-}
-
-func serveFailOpenRequest(t *testing.T, manager *Manager) *httptest.ResponseRecorder {
+func serveFailOpenRequest(t *testing.T, manager *modeltrace.Manager) *httptest.ResponseRecorder {
 	t.Helper()
 	router := gin.New()
 	router.POST("/v1/chat/completions",
@@ -446,7 +430,7 @@ func serveFailOpenRequest(t *testing.T, manager *Manager) *httptest.ResponseReco
 	return response
 }
 
-func shutdownManager(t *testing.T, manager *Manager) {
+func shutdownManager(t *testing.T, manager *modeltrace.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

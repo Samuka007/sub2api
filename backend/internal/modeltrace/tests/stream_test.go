@@ -1,9 +1,10 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,11 +43,11 @@ func TestModelTraceSSEComplete(t *testing.T) {
 	})
 
 	require.Len(t, spans, 2)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	attrs := attributesByKey(root.Attributes)
-	require.Equal(t, expectedStreamCompleted, stringAttribute(t, attrs, streamStatusAttribute))
+	require.Equal(t, expectedStreamCompleted, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
 	require.JSONEq(t, `{"type":"response.output_text.delta","delta":"hello"}`, firstSSEDataJSON(t, stringAttribute(t, attrs, "langfuse.observation.output")))
-	require.GreaterOrEqual(t, intAttribute(t, attrs, firstOutputMsAttribute), int64(0))
+	require.GreaterOrEqual(t, intAttribute(t, attrs, modeltrace.TestingFirstOutputMsAttribute), int64(0))
 	require.Less(t, root.StartTimeUnixNano, root.EndTimeUnixNano)
 	require.Equal(t, tracepb.Status_STATUS_CODE_OK, root.Status.Code)
 }
@@ -59,10 +60,10 @@ func TestModelTraceClientDisconnect(t *testing.T) {
 	})
 
 	require.Equal(t, "data: partial-client-ou", captured)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	attrs := attributesByKey(root.Attributes)
-	require.Equal(t, expectedStreamClientDisconnected, stringAttribute(t, attrs, streamStatusAttribute))
-	require.Equal(t, "downstream_write", stringAttribute(t, attrs, streamErrorStageAttribute))
+	require.Equal(t, expectedStreamClientDisconnected, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
+	require.Equal(t, "downstream_write", stringAttribute(t, attrs, modeltrace.TestingStreamErrorStageAttribute))
 	require.Equal(t, captured, stringAttribute(t, attrs, "langfuse.observation.output"))
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 }
@@ -85,10 +86,10 @@ func TestModelTraceUpstreamStreamError(t *testing.T) {
 
 	require.Equal(t, "data: partial-upstream-output\n\n", captured)
 	require.Len(t, spans, 2)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	rootAttrs := attributesByKey(root.Attributes)
-	require.Equal(t, expectedStreamError, stringAttribute(t, rootAttrs, streamStatusAttribute))
-	require.Equal(t, "upstream_read", stringAttribute(t, rootAttrs, streamErrorStageAttribute))
+	require.Equal(t, expectedStreamError, stringAttribute(t, rootAttrs, modeltrace.TestingStreamStatusAttribute))
+	require.Equal(t, "upstream_read", stringAttribute(t, rootAttrs, modeltrace.TestingStreamErrorStageAttribute))
 	require.Equal(t, captured, stringAttribute(t, rootAttrs, "langfuse.observation.output"))
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 
@@ -117,10 +118,10 @@ func TestModelTraceCancelled(t *testing.T) {
 	})
 
 	require.Equal(t, "data: partial-before-cancel\n\n", captured)
-	root := spanNamed(t, spans, rootSpanName)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
 	attrs := attributesByKey(root.Attributes)
-	require.Equal(t, streamStatusCancelled, stringAttribute(t, attrs, streamStatusAttribute))
-	require.Equal(t, "upstream_close", stringAttribute(t, attrs, streamErrorStageAttribute))
+	require.Equal(t, modeltrace.TestingStreamStatusCancelled, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
+	require.Equal(t, "upstream_close", stringAttribute(t, attrs, modeltrace.TestingStreamErrorStageAttribute))
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 }
 
@@ -134,7 +135,7 @@ func TestModelTraceSlowExporterDoesNotDelayStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: server.URL + "/api/public/otel", PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
 	})
@@ -173,7 +174,7 @@ func runStreamTraceRequest(t *testing.T, writer http.ResponseWriter, request *ht
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	fake := newFakeOTLPServer(t)
-	manager, err := NewManager(context.Background(), config.ModelTracingConfig{
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel", PublicKey: testPublicKey, SecretKey: testSecretKey,
 		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
 	})
@@ -198,7 +199,7 @@ func runStreamTraceRequest(t *testing.T, writer http.ResponseWriter, request *ht
 	return exportedSpans(requests), captured
 }
 
-func identifiedStreamRouter(manager *Manager, handler gin.HandlerFunc) *gin.Engine {
+func identifiedStreamRouter(manager *modeltrace.Manager, handler gin.HandlerFunc) *gin.Engine {
 	router := gin.New()
 	router.POST("/v1/responses", manager.CandidateMiddleware(), func(c *gin.Context) {
 		groupID := int64(19)

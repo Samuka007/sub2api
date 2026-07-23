@@ -123,6 +123,8 @@ backend/.installed
 tests
 !deploy/tests/
 !deploy/tests/**
+!backend/internal/modeltrace/tests/
+!backend/internal/modeltrace/tests/**
 CLAUDE.md
 .claude
 scripts
@@ -130,6 +132,12 @@ scripts
 !skills/sub2api-model-trace-e2e/scripts/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
+!scripts/
+!scripts/langfuse_session_export.py
+!scripts/test_langfuse_session_export.py
+!scripts/complex_conversation_scenarios.py
+!scripts/codex_complex_real_scenarios.py
+!scripts/codex_complex_20turn_scenarios.py
 .code-review-state
 #openspec/
 code-reviews/
@@ -143,6 +151,10 @@ docs/*
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
 !docs/ASYNC_IMAGE_TASKS.md
+!docs/BATCH_IMAGE_MVP.md
+!docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
+!docs/superpowers/
+!docs/superpowers/**
 !docs/legal/
 !docs/legal/*.md
 .serena/

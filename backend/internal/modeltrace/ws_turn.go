@@ -168,8 +168,9 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 		if t.metadata.Identity.GroupID > 0 {
 			attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", t.metadata.Identity.GroupID))
 		}
-		if t.metadata.SessionID != "" {
-			attrs = append(attrs, attribute.String("langfuse.session.id", scrubURLsInString(t.metadata.SessionID)))
+		sessionID := scrubURLsInString(t.metadata.SessionID)
+		if sessionID != "" {
+			attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
 		}
 		if stream.firstOutputMs != nil {
 			attrs = append(attrs, attribute.Int64(firstOutputMsAttribute, *stream.firstOutputMs))
@@ -185,6 +186,11 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			t.span.SetStatus(codes.Ok, "")
 		} else {
 			t.span.SetStatus(codes.Error, fmt.Sprintf("websocket turn %s", stream.status))
+		}
+		if sessionID != "" {
+			cfg := t.generation.Config()
+			spanCtx := trace.ContextWithSpan(context.Background(), t.span)
+			recordConversationTrack(spanCtx, t.generation.Tracer(), cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, sessionID, t.input, output, nil)
 		}
 		t.span.End()
 	})

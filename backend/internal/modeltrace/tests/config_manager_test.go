@@ -1,10 +1,11 @@
-package modeltrace
+package modeltrace_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,9 +48,9 @@ func (modelTracePrefixEncryptor) Decrypt(value string) (string, error) {
 	return strings.TrimPrefix(value, "enc:"), nil
 }
 
-func decodeModelTraceRuntime(t *testing.T, store *modelTraceSettingsStore) RuntimeConfig {
+func decodeModelTraceRuntime(t *testing.T, store *modelTraceSettingsStore) modeltrace.RuntimeConfig {
 	t.Helper()
-	var stored RuntimeConfig
+	var stored modeltrace.RuntimeConfig
 	require.NoError(t, json.Unmarshal([]byte(store.value), &stored))
 	return stored
 }
@@ -66,16 +67,16 @@ func TestModelTraceConfigUsesDeploymentOnly(t *testing.T) {
 		CaptureMediaContent: true,
 	}
 
-	manager := NewConfigManager(deployment, nil, nil, true)
+	manager := modeltrace.NewConfigManager(deployment, nil, nil, true)
 	got := manager.Resolve(context.Background())
 
-	require.Equal(t, ConfigSourceDeployment, got.Source)
+	require.Equal(t, modeltrace.ConfigSourceDeployment, got.Source)
 	require.Equal(t, deployment, got.Config)
 	require.Zero(t, got.ConfigVersion)
 }
 
 func TestModelTraceConfigRuntimeOverridesDeployment(t *testing.T) {
-	runtime := RuntimeConfig{
+	runtime := modeltrace.RuntimeConfig{
 		Configured:          true,
 		Enabled:             true,
 		Endpoint:            "https://runtime-langfuse.example.test/api/public/otel",
@@ -90,14 +91,14 @@ func TestModelTraceConfigRuntimeOverridesDeployment(t *testing.T) {
 	raw, err := json.Marshal(runtime)
 	require.NoError(t, err)
 	store := &modelTraceSettingsStore{value: string(raw)}
-	manager := NewConfigManager(config.ModelTracingConfig{
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{
 		Enabled: true, Endpoint: "https://deployment.example.test/api/public/otel",
 		PublicKey: "deployment-public", SecretKey: "deployment-secret",
 	}, store, modelTracePrefixEncryptor{}, true)
 
 	got := manager.Resolve(context.Background())
 
-	require.Equal(t, ConfigSourceRuntime, got.Source)
+	require.Equal(t, modeltrace.ConfigSourceRuntime, got.Source)
 	require.Equal(t, int64(7), got.ConfigVersion)
 	require.Equal(t, "runtime-public", got.Config.PublicKey)
 	require.Equal(t, "runtime-secret", got.Config.SecretKey)
@@ -105,16 +106,16 @@ func TestModelTraceConfigRuntimeOverridesDeployment(t *testing.T) {
 }
 
 func TestModelTraceConfigRuntimeCanDisableDeployment(t *testing.T) {
-	raw, err := json.Marshal(RuntimeConfig{Configured: true, Enabled: false, ConfigVersion: 8})
+	raw, err := json.Marshal(modeltrace.RuntimeConfig{Configured: true, Enabled: false, ConfigVersion: 8})
 	require.NoError(t, err)
-	manager := NewConfigManager(config.ModelTracingConfig{
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{
 		Enabled: true, Endpoint: "https://deployment.example.test/api/public/otel",
 		PublicKey: "deployment-public", SecretKey: "deployment-secret",
 	}, &modelTraceSettingsStore{value: string(raw)}, modelTracePrefixEncryptor{}, true)
 
 	got := manager.Resolve(context.Background())
 
-	require.Equal(t, ConfigSourceRuntime, got.Source)
+	require.Equal(t, modeltrace.ConfigSourceRuntime, got.Source)
 	require.False(t, got.Config.Enabled)
 	require.Equal(t, int64(8), got.ConfigVersion)
 }
@@ -126,36 +127,36 @@ func TestModelTraceConfigBrokenRuntimeFallsBackToDeployment(t *testing.T) {
 	}
 
 	t.Run("malformed JSON", func(t *testing.T) {
-		manager := NewConfigManager(deployment, &modelTraceSettingsStore{value: "not-json"}, modelTracePrefixEncryptor{}, true)
+		manager := modeltrace.NewConfigManager(deployment, &modelTraceSettingsStore{value: "not-json"}, modelTracePrefixEncryptor{}, true)
 		got := manager.Resolve(context.Background())
-		require.Equal(t, ConfigSourceDeployment, got.Source)
+		require.Equal(t, modeltrace.ConfigSourceDeployment, got.Source)
 		require.Equal(t, "deployment-public", got.Config.PublicKey)
 	})
 
 	t.Run("secret cannot decrypt", func(t *testing.T) {
-		raw, err := json.Marshal(RuntimeConfig{
+		raw, err := json.Marshal(modeltrace.RuntimeConfig{
 			Configured: true, Enabled: true, Endpoint: "https://runtime.example.test/api/public/otel",
 			PublicKey: "runtime-public", SecretKeyEncrypted: "broken", ConfigVersion: 9,
 		})
 		require.NoError(t, err)
-		manager := NewConfigManager(deployment, &modelTraceSettingsStore{value: string(raw)}, modelTracePrefixEncryptor{}, true)
+		manager := modeltrace.NewConfigManager(deployment, &modelTraceSettingsStore{value: string(raw)}, modelTracePrefixEncryptor{}, true)
 		got := manager.Resolve(context.Background())
-		require.Equal(t, ConfigSourceDeployment, got.Source)
+		require.Equal(t, modeltrace.ConfigSourceDeployment, got.Source)
 		require.Equal(t, "deployment-public", got.Config.PublicKey)
 	})
 }
 
 func TestModelTraceConfigSecretTriStateAndCAS(t *testing.T) {
-	raw, err := json.Marshal(RuntimeConfig{
+	raw, err := json.Marshal(modeltrace.RuntimeConfig{
 		Configured: true, Enabled: true, Endpoint: "https://old.example.test/api/public/otel",
 		PublicKey: "old-public", SecretKeyEncrypted: "enc:old-secret",
 		PromptMaxBytes: 100, ResponseMaxBytes: 200, MediaMaxBytes: 300, ConfigVersion: 3,
 	})
 	require.NoError(t, err)
 	store := &modelTraceSettingsStore{value: string(raw)}
-	manager := NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
 
-	preserved, err := manager.Save(context.Background(), UpdateConfigRequest{
+	preserved, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 3, Enabled: true,
 		Endpoint: "https://preserved.example.test/api/public/otel", PublicKey: "preserved-public",
 		PromptMaxBytes: 101, ResponseMaxBytes: 201, MediaMaxBytes: 301,
@@ -167,7 +168,7 @@ func TestModelTraceConfigSecretTriStateAndCAS(t *testing.T) {
 	require.Equal(t, "enc:old-secret", stored.SecretKeyEncrypted)
 	require.Equal(t, int64(42), stored.UpdatedBy)
 
-	replaced, err := manager.Save(context.Background(), UpdateConfigRequest{
+	replaced, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 4, Enabled: true,
 		Endpoint: "https://replaced.example.test/api/public/otel", PublicKey: "replaced-public",
 		SecretKey:      new("new-secret"),
@@ -179,7 +180,7 @@ func TestModelTraceConfigSecretTriStateAndCAS(t *testing.T) {
 	stored = decodeModelTraceRuntime(t, store)
 	require.Equal(t, "enc:new-secret", stored.SecretKeyEncrypted)
 
-	cleared, err := manager.Save(context.Background(), UpdateConfigRequest{
+	cleared, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 5, Enabled: false,
 		Endpoint: "", PublicKey: "", SecretKey: new(""),
 		PromptMaxBytes: 103, ResponseMaxBytes: 203, MediaMaxBytes: 303,
@@ -191,7 +192,7 @@ func TestModelTraceConfigSecretTriStateAndCAS(t *testing.T) {
 	require.Empty(t, stored.SecretKeyEncrypted)
 
 	beforeConflict := store.value
-	_, err = manager.Save(context.Background(), UpdateConfigRequest{
+	_, err = manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 5, Enabled: false,
 		PromptMaxBytes: 104, ResponseMaxBytes: 204, MediaMaxBytes: 304,
 	}, 45)
@@ -201,14 +202,14 @@ func TestModelTraceConfigSecretTriStateAndCAS(t *testing.T) {
 
 func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	raw, err := json.Marshal(RuntimeConfig{
+	raw, err := json.Marshal(modeltrace.RuntimeConfig{
 		Configured: true, Enabled: true, Endpoint: "https://admin.example.test/api/public/otel",
 		PublicKey: "admin-public", SecretKeyEncrypted: "enc:admin-secret",
 		PromptMaxBytes: 100, ResponseMaxBytes: 200, MediaMaxBytes: 300, ConfigVersion: 10,
 	})
 	require.NoError(t, err)
 	store := &modelTraceSettingsStore{value: string(raw)}
-	handler := NewAdminHandler(NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true))
+	handler := modeltrace.NewAdminHandler(modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true))
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
@@ -225,7 +226,7 @@ func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 	require.NotContains(t, getRecorder.Body.String(), "admin-secret")
 	require.NotContains(t, getRecorder.Body.String(), "secret_key_encrypted")
 
-	request := UpdateConfigRequest{
+	request := modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 10, Enabled: true,
 		Endpoint: "https://updated.example.test/api/public/otel", PublicKey: "updated-public",
 		SecretKey: new("updated-secret"), PromptMaxBytes: 101, ResponseMaxBytes: 201, MediaMaxBytes: 301,
@@ -245,7 +246,7 @@ func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 
 func TestModelTraceConfigAdminRejectsNonAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewAdminHandler(NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{}, modelTracePrefixEncryptor{}, true))
+	handler := modeltrace.NewAdminHandler(modeltrace.NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{}, modelTracePrefixEncryptor{}, true))
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 100})
@@ -261,9 +262,9 @@ func TestModelTraceConfigAdminRejectsNonAdmin(t *testing.T) {
 
 func TestModelTraceConfigRejectsNewSecretWithoutDurableEncryptionKey(t *testing.T) {
 	store := &modelTraceSettingsStore{}
-	manager := NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, false)
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, false)
 
-	_, err := manager.Save(context.Background(), UpdateConfigRequest{
+	_, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 0, Enabled: true,
 		Endpoint: "https://runtime.example.test/api/public/otel", PublicKey: "runtime-public",
 		SecretKey:      new("must-not-persist"),
@@ -280,11 +281,11 @@ func TestModelTraceConfigFirstRuntimeDisableNeedsNoDurableSecret(t *testing.T) {
 		PublicKey: "deployment-public", SecretKey: "deployment-secret",
 	}
 	store := &modelTraceSettingsStore{}
-	runtime, err := NewManager(context.Background(), deployment)
+	runtime, err := modeltrace.NewManager(context.Background(), deployment)
 	require.NoError(t, err)
-	manager := NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, false, runtime)
+	manager := modeltrace.NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, false, runtime)
 
-	disabled, err := manager.Save(context.Background(), UpdateConfigRequest{
+	disabled, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 0,
 		Enabled:               false,
 		PromptMaxBytes:        100,
@@ -292,20 +293,20 @@ func TestModelTraceConfigFirstRuntimeDisableNeedsNoDurableSecret(t *testing.T) {
 		MediaMaxBytes:         300,
 	}, 99)
 	require.NoError(t, err)
-	require.Equal(t, ConfigSourceRuntime, disabled.Source)
+	require.Equal(t, modeltrace.ConfigSourceRuntime, disabled.Source)
 	require.Equal(t, int64(1), disabled.ConfigVersion)
 	require.False(t, disabled.Enabled)
 	require.False(t, disabled.HasSecret)
 	require.Empty(t, decodeModelTraceRuntime(t, store).SecretKeyEncrypted)
 
 	active := runtime.Acquire()
-	require.Equal(t, ConfigSourceRuntime, active.Source())
+	require.Equal(t, modeltrace.ConfigSourceRuntime, active.Source())
 	require.Equal(t, int64(1), active.Version())
 	require.False(t, active.Enabled())
 	active.Release()
 
 	storedDisabled := store.value
-	_, err = manager.Save(context.Background(), UpdateConfigRequest{
+	_, err = manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 1,
 		Enabled:               true,
 		Endpoint:              deployment.Endpoint,
@@ -410,7 +411,7 @@ func TestModelTraceConfigRefreshErrorKeepsActiveRuntime(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			encodeRuntime := func(endpoint string, version int64) string {
-				raw, err := json.Marshal(RuntimeConfig{
+				raw, err := json.Marshal(modeltrace.RuntimeConfig{
 					Configured: true, Enabled: true, Endpoint: endpoint,
 					PublicKey: "runtime-public", SecretKeyEncrypted: "enc:runtime-secret",
 					PromptMaxBytes: 100, ResponseMaxBytes: 200, MediaMaxBytes: 300,
@@ -421,14 +422,14 @@ func TestModelTraceConfigRefreshErrorKeepsActiveRuntime(t *testing.T) {
 			}
 
 			store := &refreshModelTraceSettingsStore{value: encodeRuntime("https://runtime-v1.example.test/api/public/otel", 1)}
-			runtime, err := NewManager(context.Background(), tt.deployment)
+			runtime, err := modeltrace.NewManager(context.Background(), tt.deployment)
 			require.NoError(t, err)
-			manager := NewConfigManager(tt.deployment, store, modelTracePrefixEncryptor{}, true, runtime)
-			manager.refreshInterval = 5 * time.Millisecond
+			manager := modeltrace.NewConfigManager(tt.deployment, store, modelTracePrefixEncryptor{}, true, runtime)
+			modeltrace.TestingSetConfigManagerRefreshInterval(manager, 5*time.Millisecond)
 			require.NoError(t, manager.Start(context.Background()))
 
 			before := runtime.Acquire()
-			require.Equal(t, ConfigSourceRuntime, before.Source())
+			require.Equal(t, modeltrace.ConfigSourceRuntime, before.Source())
 			require.Equal(t, int64(1), before.Version())
 			require.Equal(t, "https://runtime-v1.example.test/api/public/otel", before.Config().Endpoint)
 			beforeFingerprint := before.Fingerprint()
@@ -437,7 +438,7 @@ func TestModelTraceConfigRefreshErrorKeepsActiveRuntime(t *testing.T) {
 			readBaseline := store.replace("", errors.New("temporary settings read failure"))
 			require.Eventually(t, func() bool { return store.readCount() > readBaseline }, time.Second, time.Millisecond)
 			duringError := runtime.Acquire()
-			require.Equal(t, ConfigSourceRuntime, duringError.Source())
+			require.Equal(t, modeltrace.ConfigSourceRuntime, duringError.Source())
 			require.Equal(t, int64(1), duringError.Version())
 			require.Equal(t, beforeFingerprint, duringError.Fingerprint())
 			require.Equal(t, "https://runtime-v1.example.test/api/public/otel", duringError.Config().Endpoint)
@@ -448,7 +449,7 @@ func TestModelTraceConfigRefreshErrorKeepsActiveRuntime(t *testing.T) {
 			require.Eventually(t, func() bool {
 				fallback := runtime.Acquire()
 				defer fallback.Release()
-				return fallback.Source() == ConfigSourceDeployment &&
+				return fallback.Source() == modeltrace.ConfigSourceDeployment &&
 					fallback.Enabled() == tt.deployment.Enabled &&
 					fallback.Config().Endpoint == tt.deployment.Endpoint
 			}, time.Second, time.Millisecond)
@@ -457,7 +458,7 @@ func TestModelTraceConfigRefreshErrorKeepsActiveRuntime(t *testing.T) {
 			require.Eventually(t, func() bool {
 				after := runtime.Acquire()
 				defer after.Release()
-				return after.Source() == ConfigSourceRuntime && after.Version() == 2 &&
+				return after.Source() == modeltrace.ConfigSourceRuntime && after.Version() == 2 &&
 					after.Config().Endpoint == "https://runtime-v2.example.test/api/public/otel"
 			}, time.Second, time.Millisecond)
 
@@ -473,7 +474,7 @@ func TestModelTraceConfigStaleRuntimeSnapshotCannotOverwriteSave(t *testing.T) {
 	oldTarget := newFakeOTLPServer(t)
 	newTarget := newFakeOTLPServer(t)
 	deployment := asyncTestConfig(oldTarget.server.URL)
-	stored := RuntimeConfig{
+	stored := modeltrace.RuntimeConfig{
 		Configured: true, Enabled: true,
 		Endpoint: oldTarget.server.URL + "/api/public/otel", PublicKey: testPublicKey,
 		SecretKeyEncrypted: "enc:" + testSecretKey,
@@ -483,13 +484,13 @@ func TestModelTraceConfigStaleRuntimeSnapshotCannotOverwriteSave(t *testing.T) {
 	raw, err := json.Marshal(stored)
 	require.NoError(t, err)
 	store := &modelTraceSettingsStore{value: string(raw)}
-	runtime, err := NewManager(context.Background(), deployment)
+	runtime, err := modeltrace.NewManager(context.Background(), deployment)
 	require.NoError(t, err)
-	manager := NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, runtime)
+	manager := modeltrace.NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, runtime)
 
 	stalePollResult := manager.Resolve(context.Background())
 	require.NoError(t, runtime.ApplySnapshot(context.Background(), stalePollResult))
-	updated, err := manager.Save(context.Background(), UpdateConfigRequest{
+	updated, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 1,
 		Enabled:               true,
 		Endpoint:              newTarget.server.URL + "/api/public/otel",
@@ -503,7 +504,7 @@ func TestModelTraceConfigStaleRuntimeSnapshotCannotOverwriteSave(t *testing.T) {
 
 	require.NoError(t, runtime.ApplySnapshot(context.Background(), stalePollResult))
 	active := runtime.Acquire()
-	require.Equal(t, ConfigSourceRuntime, active.Source())
+	require.Equal(t, modeltrace.ConfigSourceRuntime, active.Source())
 	require.Equal(t, int64(2), active.Version())
 	require.Equal(t, newTarget.server.URL+"/api/public/otel", active.Config().Endpoint)
 	require.Equal(t, 101, active.Config().PromptMaxBytes)
@@ -525,19 +526,19 @@ func TestModelTraceConfigHotSwitchConvergesAcrossInstances(t *testing.T) {
 	secondTarget := newFakeOTLPServer(t)
 	deployment := asyncTestConfig(firstTarget.server.URL)
 	store := &casModelTraceSettingsStore{}
-	firstRuntime, err := NewManager(context.Background(), deployment)
+	firstRuntime, err := modeltrace.NewManager(context.Background(), deployment)
 	require.NoError(t, err)
-	secondRuntime, err := NewManager(context.Background(), deployment)
+	secondRuntime, err := modeltrace.NewManager(context.Background(), deployment)
 	require.NoError(t, err)
-	first := NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, firstRuntime)
-	second := NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, secondRuntime)
-	first.refreshInterval = 10 * time.Millisecond
-	second.refreshInterval = 10 * time.Millisecond
+	first := modeltrace.NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, firstRuntime)
+	second := modeltrace.NewConfigManager(deployment, store, modelTracePrefixEncryptor{}, true, secondRuntime)
+	modeltrace.TestingSetConfigManagerRefreshInterval(first, 10*time.Millisecond)
+	modeltrace.TestingSetConfigManagerRefreshInterval(second, 10*time.Millisecond)
 	require.NoError(t, first.Start(context.Background()))
 	require.NoError(t, second.Start(context.Background()))
 
 	secret := testSecretKey
-	_, err = first.Save(context.Background(), UpdateConfigRequest{
+	_, err = first.Save(context.Background(), modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 0,
 		Enabled:               true,
 		Endpoint:              secondTarget.server.URL + "/api/public/otel",
@@ -563,10 +564,10 @@ func TestModelTraceConfigHotSwitchConvergesAcrossInstances(t *testing.T) {
 
 func TestModelTraceConfigConcurrentCASAllowsOneWinner(t *testing.T) {
 	store := &casModelTraceSettingsStore{}
-	first := NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
-	second := NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+	first := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+	second := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
 	secret := "runtime-secret"
-	request := UpdateConfigRequest{
+	request := modeltrace.UpdateConfigRequest{
 		ExpectedConfigVersion: 0,
 		Enabled:               true,
 		Endpoint:              "https://langfuse.example.test/api/public/otel",
