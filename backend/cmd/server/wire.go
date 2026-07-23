@@ -113,6 +113,7 @@ func provideCleanup(
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	quotaRecovery *service.QuotaRecoveryService,
 	modelIQ *service.ModelIQService,
+	ollamaCloudUsage *service.OllamaCloudUsageService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
 ) func() {
@@ -342,6 +343,12 @@ func provideCleanup(
 			{"ModelIQService", func() error {
 				if modelIQ != nil {
 					modelIQ.Stop()
+				}
+				return nil
+			}},
+			{"OllamaCloudUsageService", func() error {
+				if ollamaCloudUsage != nil {
+					ollamaCloudUsage.Stop()
 				}
 				return nil
 			}},
