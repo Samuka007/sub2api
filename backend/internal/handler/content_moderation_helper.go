@@ -27,7 +27,25 @@ func (h *OpenAIGatewayHandler) isContentModerationTrustedAPIKey(ctx context.Cont
 	if h == nil || h.contentModerationService == nil || apiKey == nil {
 		return false
 	}
+	if requestedModel, ok := service.RequestedPublicModelFromContext(ctx); ok {
+		model = requestedModel
+	}
 	return h.contentModerationService.IsTrustedAPIKeyObserveOnly(ctx, apiKey.ID, model, endpoint)
+}
+
+func clientRequestedModel(c *gin.Context, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	if c == nil || c.Request == nil {
+		return fallback
+	}
+	if model, ok := service.RequestedPublicModelFromContext(c.Request.Context()); ok {
+		return model
+	}
+	return fallback
+}
+
+func clientRequestedUsageFields(c *gin.Context, mapping service.ChannelMappingResult, fallbackModel, upstreamModel string) service.ChannelUsageFields {
+	return mapping.ToUsageFields(clientRequestedModel(c, fallbackModel), upstreamModel)
 }
 
 func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
@@ -78,9 +96,12 @@ func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject
 		UserID:    subject.UserID,
 		Endpoint:  GetInboundEndpoint(c),
 		Provider:  contentModerationProvider(apiKey),
-		Model:     strings.TrimSpace(model),
+		Model:     clientRequestedModel(c, model),
 		Protocol:  protocol,
 		Body:      body,
+	}
+	if resolvedPlatform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
+		input.Provider = resolvedPlatform
 	}
 	if forcedPlatform, ok := middleware2.GetForcePlatformFromContext(c); ok {
 		input.Provider = strings.TrimSpace(forcedPlatform)
