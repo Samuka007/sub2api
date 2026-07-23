@@ -25,16 +25,17 @@ var ErrSparkShadowResetNotSupported = infraerrors.New(http.StatusConflict, "SPAR
 
 // Endpoints used by the OpenAI/ChatGPT/Codex quota query and reset feature.
 const (
-	chatGPTUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
-	chatGPTRateLimitCreditsURL  = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	chatGPTRateLimitResetURL    = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
-	openaiQuotaUpstreamTimeout  = 20 * time.Second
-	openaiQuotaCodexBeta        = "codex-1"
-	openaiQuotaCodexOriginator  = "Codex Desktop"
-	openaiQuotaCodexLanguageTag = "zh-CN"
-	openaiQuotaSecFetchSite     = "none"
-	openaiQuotaSecFetchMode     = "no-cors"
-	openaiQuotaSecFetchDest     = "empty"
+	chatGPTUsageURL                            = "https://chatgpt.com/backend-api/wham/usage"
+	chatGPTRateLimitCreditsURL                 = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	chatGPTRateLimitResetURL                   = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+	openaiQuotaUpstreamTimeout                 = 20 * time.Second
+	openaiQuotaCodexBeta                       = "codex-1"
+	openaiQuotaCodexOriginator                 = "Codex Desktop"
+	openaiQuotaCodexLanguageTag                = "zh-CN"
+	openaiQuotaSecFetchSite                    = "none"
+	openaiQuotaSecFetchMode                    = "no-cors"
+	openaiQuotaSecFetchDest                    = "empty"
+	openAIQuotaResetCreditsUpstreamErrorReason = "OPENAI_QUOTA_RESET_CREDITS_UPSTREAM_ERROR"
 )
 
 // OpenAIRateLimitWindow describes a single rate-limit window returned by
@@ -244,6 +245,17 @@ func NewOpenAIQuotaService(
 // OAuth account. Returns infraerrors so the handler layer can map them to
 // stable error codes / HTTP statuses.
 func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+	return s.queryUsage(ctx, accountID, false)
+}
+
+// QueryUsageStrict is used by automation that must observe failures from both
+// the usage endpoint and the reset-credit detail endpoint. QueryUsage keeps the
+// detail lookup best-effort for the existing account-list UI.
+func (s *OpenAIQuotaService) QueryUsageStrict(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+	return s.queryUsage(ctx, accountID, true)
+}
+
+func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, strictCreditDetails bool) (*OpenAIQuotaUsage, error) {
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -289,7 +301,13 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	}
 
 	payload.FetchedAt = time.Now().Unix()
-	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
+	details, detailsErr := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
+	if detailsErr != nil {
+		if strictCreditDetails {
+			return nil, detailsErr
+		}
+		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", detailsErr)
+	}
 	if details != nil {
 		hasDetailCount := details.AvailableCount != nil
 		if payload.RateLimitResetCredits == nil {
@@ -308,42 +326,60 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	return &payload, nil
 }
 
-func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64) *openAIRateLimitResetCreditDetails {
+func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64) (*openAIRateLimitResetCreditDetails, error) {
 	quotaHeaders, _, headerErr := s.buildCodexQuotaHeaders(ctx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 	if headerErr != nil {
-		slog.Warn("openai_quota_reset_credit_details_auth_failed", "account_id", accountID, "error", headerErr)
-		return nil
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr)
 	}
 	resp, err := client.R().
 		SetContext(ctx).
 		SetHeaders(quotaHeaders).
 		Get(chatGPTRateLimitCreditsURL)
 	if err != nil {
-		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", err)
-		return nil
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_RESET_CREDITS_REQUEST_FAILED", "upstream request failed: %v", err)
 	}
 	if !resp.IsSuccessState() {
-		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "status", resp.StatusCode)
-		return nil
+		status := resp.StatusCode
+		body := truncate(s.redactQuotaErrorBody(ctx, accountID, resp.String()), 240)
+		return nil, infraerrors.Newf(mapUpstreamStatus(status), openAIQuotaResetCreditsUpstreamErrorReason, "upstream returned %d: %s", status, body)
 	}
 
 	details, err := parseOpenAIRateLimitResetCreditDetails(resp.Bytes())
 	if err != nil {
 		slog.Warn("openai_quota_reset_credit_details_parse_failed", "account_id", accountID, "error", err)
 		if details.AvailableCount == nil {
-			return nil
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_RESET_CREDITS_INVALID_RESPONSE", "failed to parse reset-credit details: %v", err)
 		}
 	}
 	if details.AvailableCount == nil && !details.CreditListPresent {
-		return nil
+		return nil, nil
 	}
-	return &details
+	return &details, nil
 }
 
 // ResetCredit consumes one rate_limit_reset_credit for the given OpenAI account.
-// The redeem_request_id is auto-generated (uuid-like) — upstream uses it for
-// idempotency. Returns the consumed credit metadata so the UI can refresh.
+// The redeem_request_id is auto-generated; callers that need durable retries
+// should use ResetCreditWithRequestID and persist the ID before the first call.
 func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, accountID int64) (*OpenAIQuotaResetResult, error) {
+	redeemRequestID, err := generateRedeemRequestID()
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_QUOTA_REDEEM_ID_FAILED", "failed to generate redeem id: %v", err)
+	}
+	return s.ResetCreditWithRequestID(ctx, accountID, redeemRequestID)
+}
+
+// ResetCreditWithRequestID consumes a reset credit using the supplied upstream
+// idempotency key. Retrying an uncertain request must reuse the same key.
+func (s *OpenAIQuotaService) ResetCreditWithRequestID(
+	ctx context.Context,
+	accountID int64,
+	redeemRequestID string,
+) (*OpenAIQuotaResetResult, error) {
+	redeemRequestID = strings.TrimSpace(redeemRequestID)
+	if redeemRequestID == "" || len(redeemRequestID) > 128 {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_REDEEM_ID", "redeem request id is invalid")
+	}
+
 	// Shadow guard: resetting credits via a shadow account would silently
 	// operate on the parent's quota; that is surprising and unwanted. Callers
 	// must reset the parent account directly.
@@ -365,11 +401,6 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, accountID int64) (
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
-	}
-
-	redeemRequestID, err := generateRedeemRequestID()
-	if err != nil {
-		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_QUOTA_REDEEM_ID_FAILED", "failed to generate redeem id: %v", err)
 	}
 
 	client, err := s.privacyClientFactory(proxyURL)

@@ -112,6 +112,7 @@ func provideCleanup(
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	quotaRecovery *service.QuotaRecoveryService,
+	plusQuotaAutomation *service.PlusQuotaAutomationService,
 	modelIQ *service.ModelIQService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	auditLog *service.AuditLogService,
@@ -337,6 +338,12 @@ func provideCleanup(
 			{"QuotaRecoveryService", func() error {
 				if quotaRecovery != nil {
 					quotaRecovery.Stop()
+				}
+				return nil
+			}},
+			{"PlusQuotaAutomationService", func() error {
+				if plusQuotaAutomation != nil {
+					plusQuotaAutomation.Stop()
 				}
 				return nil
 			}},

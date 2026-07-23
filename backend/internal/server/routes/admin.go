@@ -436,6 +436,11 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.POST("/create-from-codex-pat", h.Admin.OpenAIOAuth.CreateAccountFromCodexPAT)
 		openai.GET("/accounts/:id/quota", h.Admin.OpenAIOAuth.QueryQuota)
 		openai.POST("/accounts/:id/reset-quota", h.Admin.OpenAIOAuth.ResetQuota)
+		openai.GET("/plus-quota-automation", h.Admin.PlusQuotaAutomation.Get)
+		openai.PUT("/plus-quota-automation", h.Admin.PlusQuotaAutomation.Update)
+		openai.POST("/plus-quota-automation/run", h.Admin.PlusQuotaAutomation.Run)
+		openai.GET("/plus-quota-anomalies", h.Admin.PlusQuotaAutomation.ListAnomalies)
+		openai.POST("/plus-quota-anomalies/:accountId/resolve", h.Admin.PlusQuotaAutomation.ResolveAnomaly)
 	}
 }
 

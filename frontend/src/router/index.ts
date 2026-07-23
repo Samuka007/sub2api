@@ -538,6 +538,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/plus-quota-automation',
+    name: 'AdminPlusQuotaAutomation',
+    component: () => import('@/views/admin/PlusQuotaAutomationView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Plus Quota Automation',
+      titleKey: 'admin.plusQuotaAutomation.title',
+      descriptionKey: 'admin.plusQuotaAutomation.description'
+    }
+  },
+  {
     path: '/admin/announcements',
     name: 'AdminAnnouncements',
     component: () => import('@/views/admin/AnnouncementsView.vue'),
