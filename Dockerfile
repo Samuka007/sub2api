@@ -14,6 +14,7 @@ ARG POSTGRES_IMAGE=postgres:18-alpine
 ARG GOPROXY=https://goproxy.cn,direct
 ARG GOSUMDB=sum.golang.google.cn
 ARG NPM_CONFIG_REGISTRY=
+ARG PNPM_VERSION=9.15.9
 
 # -----------------------------------------------------------------------------
 # Stage 1: Frontend Builder
@@ -22,12 +23,13 @@ ARG NPM_CONFIG_REGISTRY=
 # it on the native host arch instead of under QEMU emulation for the target.
 FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS frontend-builder
 ARG NPM_CONFIG_REGISTRY
+ARG PNPM_VERSION
 
 WORKDIR /app/frontend
 
-# Install pnpm (pinned to v9 to match CI and keep builds reproducible)
+# Install the exact pnpm version used by release builds.
 RUN if [ -n "${NPM_CONFIG_REGISTRY}" ]; then export COREPACK_NPM_REGISTRY="${NPM_CONFIG_REGISTRY}"; fi && \
-    corepack enable && corepack prepare pnpm@9 --activate
+    corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 # Install dependencies first (better caching)
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
@@ -57,6 +59,8 @@ FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} AS backend-builder
 ARG VERSION=
 ARG COMMIT=docker
 ARG DATE
+ARG BUILD_TYPE=source
+ARG INTERNAL_TAG=
 ARG GOPROXY
 ARG GOSUMDB
 # Populated by buildx from the --platform target (e.g. linux/amd64).
@@ -84,16 +88,38 @@ COPY backend/ ./
 # Copy frontend dist from previous stage (must be after backend copy to avoid being overwritten)
 COPY --from=frontend-builder /app/backend/internal/web/dist ./internal/web/dist
 
-# Build the binary (BuildType=release for CI builds, embed frontend)
+# Source builds are the safe default and cannot use the official in-place
+# binary updater. Official and internal releases must opt in explicitly.
 # Version precedence: build arg VERSION > exact git tag > cmd/server/VERSION
 RUN --mount=type=cache,id=sub2api-gomod,target=/go/pkg/mod \
     --mount=type=cache,id=sub2api-gobuild,target=/root/.cache/go-build \
-    VERSION_VALUE="${VERSION}" && \
+    REQUESTED_VERSION="${VERSION}" && \
+    VERSION_VALUE="${REQUESTED_VERSION}" && \
     if [ -z "${VERSION_VALUE}" ]; then VERSION_VALUE="$(./scripts/resolve-version.sh)"; fi && \
     DATE_VALUE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    case "${BUILD_TYPE}" in source|internal|release) ;; *) echo "invalid BUILD_TYPE: ${BUILD_TYPE}" >&2; exit 1 ;; esac && \
+    VERSION_VALUE="${VERSION_VALUE#v}" && \
+    if ! printf '%s\n' "${VERSION_VALUE}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'; then \
+        echo "VERSION must be semantic version text, got: ${VERSION_VALUE}" >&2; exit 1; \
+    fi && \
+    if [ "${BUILD_TYPE}" = "internal" ]; then \
+        if [ -z "${REQUESTED_VERSION}" ]; then \
+            echo "internal builds require an explicit VERSION such as 0.1.164+company.1" >&2; exit 1; \
+        fi; \
+        if ! printf '%s\n' "${INTERNAL_TAG}" | grep -Eq '^company-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]*)$'; then \
+            echo "internal builds require INTERNAL_TAG=company-vX.Y.Z.N" >&2; exit 1; \
+        fi; \
+        TAG_VERSION="${INTERNAL_TAG#company-v}"; \
+        INTERNAL_REVISION="${TAG_VERSION##*.}"; \
+        UPSTREAM_VERSION="${TAG_VERSION%.*}"; \
+        EXPECTED_VERSION="${UPSTREAM_VERSION}+company.${INTERNAL_REVISION}"; \
+        if [ "${VERSION_VALUE}" != "${EXPECTED_VERSION}" ]; then \
+            echo "VERSION ${VERSION_VALUE} does not match ${INTERNAL_TAG}; expected ${EXPECTED_VERSION}" >&2; exit 1; \
+        fi; \
+    fi && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -tags embed \
-    -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${COMMIT} -X main.Date=${DATE_VALUE} -X main.BuildType=release" \
+    -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${COMMIT} -X main.Date=${DATE_VALUE} -X main.BuildType=${BUILD_TYPE}" \
     -trimpath \
     -o /app/sub2api \
     ./cmd/server
