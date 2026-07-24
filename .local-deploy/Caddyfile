@@ -1,0 +1,41 @@
+{
+	servers {
+		max_header_size 64KB
+	}
+}
+
+sub2test-hendo.scitrace.cc {
+	encode zstd gzip
+
+	request_body {
+		max_size 256MB
+	}
+
+	@langfuse_otel path /api/public/otel*
+	handle @langfuse_otel {
+		reverse_proxy langfuse-otel:3000
+	}
+
+	handle {
+		reverse_proxy sub2api:8080 {
+			health_uri /health
+			health_interval 30s
+			health_timeout 10s
+
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+
+			transport http {
+				versions 1.1
+				keepalive 120s
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -91,3 +91,16 @@
 ### Credentials
 
 - No real or local test credentials recorded here. Use deployment/runtime config keys `public_key` / `secret_key` only.
+
+## 2026-07-24 - Runtime Langfuse OTLP network repair
+
+- Symptom: model requests completed successfully, but the configured Langfuse project contained no traces or observations.
+- Root cause: sub2api resolved OTLP through the external Docker network `sub2api-langfuse`, while Langfuse Web was attached only to its Compose default network. The configured `langfuse-otel` hostname therefore did not resolve from the sub2api container.
+- Deployment fix: attach `langfuse-web` to `sub2api-langfuse` with the network alias `langfuse-otel`; keep port 3000 bound to loopback only.
+- Runtime endpoint remains sourced from `MODEL_TRACING_ENDPOINT`; credentials remain sourced from the model-tracing public/secret key configuration and are not recorded here.
+- The initially deployed upstream image was revision `cd8bb98` (`0.1.164`) and did not contain the workspace model-tracing implementation. The runtime was replaced with a local release image built from revision `61d6389`, tagged `sub2api:modeltrace-61d6389`, with the production frontend embedded.
+- Because deployment endpoint validation permits plaintext HTTP only for loopback hosts, cross-container OTLP uses `https://sub2test-hendo.scitrace.cc/api/public/otel`. Caddy routes only `/api/public/otel*` to the `langfuse-otel` network alias; Langfuse port 3000 remains loopback-bound on the host.
+- Startup evidence after replacement: `model trace configuration applied` reported `enabled=true`, source `deployment`, config version `0`.
+- Production black-box verification: a non-streaming Responses request for `gpt-5.6-sol` returned HTTP 200 with session `langfuse-verified-1784909184`; Langfuse returned trace `05cdf6a7860f257204c82ae2f697cd17` named `model.request` and four observations: root `model.request`, `upstream.attempt.1` GENERATION, `chat.user`, and `chat.assistant`.
+- The repository skill's isolated Colima smoke was not run on this Debian host because the required `colima` executable/profile is unavailable. The deployed production stack was verified directly instead.
+- Build note: the 4 GiB host could not run the frontend build while Langfuse was active. Stopping Langfuse temporarily and running the cached frontend builder with a 2560 MiB Node heap completed typecheck and Vite build; Langfuse was then restored before deployment verification.

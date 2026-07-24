@@ -1,0 +1,10 @@
+services:
+  sub2api:
+    networks:
+      - sub2api-network
+      - langfuse-network
+
+networks:
+  langfuse-network:
+    external: true
+    name: sub2api-langfuse
