@@ -11,7 +11,9 @@ export default {
     },
     actions: {
       runNow: 'Scan now',
-      resolve: 'Mark resolved'
+      resolve: 'Mark resolved',
+      exportNotes: 'Export anomaly account notes',
+      exportingNotes: 'Exporting'
     },
     runtime: {
       running: 'Task running',
@@ -77,7 +79,10 @@ export default {
       runBusy: 'A scan is already running',
       runFailed: 'Failed to start scan',
       resolved: 'Anomaly marked as resolved',
-      resolveFailed: 'Failed to resolve anomaly'
+      resolveFailed: 'Failed to resolve anomaly',
+      noAccountNotesToExport: 'No anomaly accounts have notes to export',
+      accountNotesExported: 'Exported notes for {count} anomaly accounts',
+      exportAccountNotesFailed: 'Failed to export anomaly account notes'
     }
   }
 }

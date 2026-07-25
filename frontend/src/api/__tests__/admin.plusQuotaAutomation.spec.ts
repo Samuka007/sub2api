@@ -11,6 +11,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import {
+  exportAnomalyNotes,
   getAutomation,
   listAnomalies,
   resolveAnomaly,
@@ -120,4 +121,38 @@ describe('admin Plus quota automation API', () => {
     })
     expect(post).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/42/resolve')
   })
+
+  it('downloads the open anomaly notes snapshot as a TXT blob', async () => {
+    const controller = new AbortController()
+    const blob = new Blob(['\uFEFFnote one\nnote two'], { type: 'text/plain;charset=utf-8' })
+    get.mockResolvedValueOnce({
+      data: blob,
+      status: 200,
+      headers: {
+        'content-disposition': 'attachment; filename="account-notes.txt"',
+        'x-exported-count': '2'
+      }
+    })
+
+    await expect(exportAnomalyNotes({ signal: controller.signal })).resolves.toEqual({
+      blob,
+      count: 2,
+      filename: 'account-notes.txt'
+    })
+    expect(get).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/export-notes', {
+      responseType: 'blob',
+      signal: controller.signal
+    })
+  })
+
+  it('returns an empty export for a 204 response', async () => {
+    get.mockResolvedValueOnce({ data: null, status: 204, headers: {} })
+
+    await expect(exportAnomalyNotes()).resolves.toEqual({
+      blob: null,
+      count: 0,
+      filename: null
+    })
+  })
+
 })

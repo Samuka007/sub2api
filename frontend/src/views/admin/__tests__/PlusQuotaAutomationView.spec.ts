@@ -11,19 +11,23 @@ const {
   updateAutomation,
   runAutomation,
   listAnomalies,
+  exportAnomalyNotes,
   resolveAnomaly,
   getGroups,
   showError,
-  showSuccess
+  showSuccess,
+  showWarning
 } = vi.hoisted(() => ({
   getAutomation: vi.fn(),
   updateAutomation: vi.fn(),
   runAutomation: vi.fn(),
   listAnomalies: vi.fn(),
+  exportAnomalyNotes: vi.fn(),
   resolveAnomaly: vi.fn(),
   getGroups: vi.fn(),
   showError: vi.fn(),
-  showSuccess: vi.fn()
+  showSuccess: vi.fn(),
+  showWarning: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -33,6 +37,7 @@ vi.mock('@/api/admin', () => ({
       updateAutomation,
       runAutomation,
       listAnomalies,
+      exportAnomalyNotes,
       resolveAnomaly
     },
     groups: {
@@ -44,7 +49,8 @@ vi.mock('@/api/admin', () => ({
 vi.mock('@/stores', () => ({
   useAppStore: () => ({
     showError,
-    showSuccess
+    showSuccess,
+    showWarning
   })
 }))
 
@@ -167,10 +173,12 @@ describe('admin PlusQuotaAutomationView', () => {
     updateAutomation.mockReset()
     runAutomation.mockReset()
     listAnomalies.mockReset()
+    exportAnomalyNotes.mockReset()
     resolveAnomaly.mockReset()
     getGroups.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
+    showWarning.mockReset()
 
     getAutomation.mockResolvedValue(idleOverview())
     getGroups.mockResolvedValue([{
@@ -185,6 +193,92 @@ describe('admin PlusQuotaAutomationView', () => {
       page: 1,
       page_size: 20
     })
+    exportAnomalyNotes.mockResolvedValue({ blob: null, count: 0, filename: null })
+  })
+
+  it('downloads the complete server snapshot as one note per line in a TXT file', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const exportBlob = new Blob(
+      ['\uFEFFFirst account note\nLine 1 Line 2 Line 3 Line 4\nLast account note'],
+      { type: 'text/plain;charset=utf-8' }
+    )
+    exportAnomalyNotes.mockResolvedValueOnce({
+      blob: exportBlob,
+      count: 3,
+      filename: 'server-account-notes.txt'
+    })
+
+    let downloadedFilename = ''
+    const originalCreateObjectURL = window.URL.createObjectURL
+    const originalRevokeObjectURL = window.URL.revokeObjectURL
+    window.URL.createObjectURL = vi.fn(() => 'blob:account-notes') as typeof window.URL.createObjectURL
+    window.URL.revokeObjectURL = vi.fn(() => {}) as typeof window.URL.revokeObjectURL
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloadedFilename = this.download
+    })
+
+    try {
+      await wrapper.get('[data-test="export-account-notes"]').trigger('click')
+      await flushPromises()
+
+      expect(exportAnomalyNotes).toHaveBeenCalledWith(
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+      expect(window.URL.createObjectURL).toHaveBeenCalledWith(exportBlob)
+      expect(downloadedFilename).toBe('server-account-notes.txt')
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(window.URL.revokeObjectURL).toHaveBeenCalledWith('blob:account-notes')
+      expect(showSuccess).toHaveBeenCalledWith(
+        'admin.plusQuotaAutomation.messages.accountNotesExported'
+      )
+    } finally {
+      wrapper.unmount()
+      window.URL.createObjectURL = originalCreateObjectURL
+      window.URL.revokeObjectURL = originalRevokeObjectURL
+      clickSpy.mockRestore()
+    }
+  })
+
+  it('does not download when open anomalies have no non-empty notes', async () => {
+    getAutomation.mockResolvedValue({
+      ...idleOverview(),
+      config: { ...idleOverview().config, group_id: 0 }
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    exportAnomalyNotes.mockResolvedValueOnce({ blob: null, count: 0, filename: null })
+    const originalCreateObjectURL = window.URL.createObjectURL
+    window.URL.createObjectURL = vi.fn(() => 'blob:should-not-exist') as typeof window.URL.createObjectURL
+
+    try {
+      const exportButton = wrapper.get('[data-test="export-account-notes"]')
+      expect(exportButton.attributes('disabled')).toBeUndefined()
+      await exportButton.trigger('click')
+      await flushPromises()
+
+      expect(showWarning).toHaveBeenCalledWith(
+        'admin.plusQuotaAutomation.messages.noAccountNotesToExport'
+      )
+      expect(window.URL.createObjectURL).not.toHaveBeenCalled()
+      expect(showSuccess).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      window.URL.createObjectURL = originalCreateObjectURL
+    }
+  })
+
+  it('reports account note export failures', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    exportAnomalyNotes.mockRejectedValueOnce(new Error('account notes unavailable'))
+
+    await wrapper.get('[data-test="export-account-notes"]').trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('account notes unavailable')
+    expect(showSuccess).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('shows the dedicated busy message when a manual run returns 409', async () => {

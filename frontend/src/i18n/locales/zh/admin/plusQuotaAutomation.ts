@@ -11,7 +11,9 @@ export default {
     },
     actions: {
       runNow: '立即扫描',
-      resolve: '标记已解决'
+      resolve: '标记已解决',
+      exportNotes: '导出异常账号备注',
+      exportingNotes: '正在导出'
     },
     runtime: {
       running: '任务运行中',
@@ -77,7 +79,10 @@ export default {
       runBusy: '已有扫描任务正在运行',
       runFailed: '启动扫描任务失败',
       resolved: '异常已标记为解决',
-      resolveFailed: '解决异常失败'
+      resolveFailed: '解决异常失败',
+      noAccountNotesToExport: '当前异常账号没有可导出的备注',
+      accountNotesExported: '已导出 {count} 个异常账号的备注',
+      exportAccountNotesFailed: '导出异常账号备注失败'
     }
   }
 }

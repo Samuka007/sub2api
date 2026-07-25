@@ -66,6 +66,12 @@ export interface PlusQuotaAnomaliesResponse {
   page_size: number
 }
 
+export interface PlusQuotaAnomalyNotesExport {
+  blob: Blob | null
+  count: number
+  filename: string | null
+}
+
 export async function getAutomation(): Promise<PlusQuotaAutomationOverview> {
   const { data } = await apiClient.get<PlusQuotaAutomationOverview>(AUTOMATION_PATH)
   return data
@@ -91,6 +97,29 @@ export async function listAnomalies(
   return data
 }
 
+export async function exportAnomalyNotes(
+  options?: { signal?: AbortSignal }
+): Promise<PlusQuotaAnomalyNotesExport> {
+  const response = await apiClient.get<Blob>(`${ANOMALIES_PATH}/export-notes`, {
+    responseType: 'blob',
+    signal: options?.signal
+  })
+  if (response.status === 204) {
+    return { blob: null, count: 0, filename: null }
+  }
+
+  const disposition = response.headers?.['content-disposition']
+  const filenameMatch = typeof disposition === 'string'
+    ? disposition.match(/filename="?([^";]+)"?/i)
+    : null
+  const count = Number.parseInt(String(response.headers?.['x-exported-count'] || ''), 10)
+  return {
+    blob: response.data,
+    count: Number.isFinite(count) && count > 0 ? count : 0,
+    filename: filenameMatch?.[1] || null
+  }
+}
+
 export async function resolveAnomaly(accountId: number): Promise<void> {
   await apiClient.post(`${ANOMALIES_PATH}/${accountId}/resolve`)
 }
@@ -100,6 +129,7 @@ export const plusQuotaAutomationAPI = {
   updateAutomation,
   runAutomation,
   listAnomalies,
+  exportAnomalyNotes,
   resolveAnomaly
 }
 

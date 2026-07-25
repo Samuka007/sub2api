@@ -1012,6 +1012,54 @@ func (s *PlusQuotaAutomationService) ListAnomalies(
 	}, nil
 }
 
+// ExportOpenAnomalyNotes builds the complete export from one account snapshot.
+func (s *PlusQuotaAutomationService) ExportOpenAnomalyNotes(
+	ctx context.Context,
+) ([]string, error) {
+	accounts, err := s.accountRepo.ListAllWithFilters(ctx, PlatformOpenAI, AccountTypeOAuth, "", "", 0, "")
+	if err != nil {
+		return nil, err
+	}
+
+	type noteEntry struct {
+		accountID int64
+		note      string
+	}
+	entries := make([]noteEntry, 0)
+	for i := range accounts {
+		account := &accounts[i]
+		anomaly, parseErr := plusQuotaAnomalyFromAccount(account)
+		if parseErr != nil {
+			slog.Warn("plus_quota_anomaly_parse_failed", "account_id", account.ID, "error", parseErr)
+			continue
+		}
+		if anomaly == nil || anomaly.Status != PlusQuotaAnomalyStatusOpen {
+			continue
+		}
+		note := normalizePlusQuotaAnomalyNote(account.Notes)
+		if note == "" {
+			continue
+		}
+		entries = append(entries, noteEntry{accountID: account.ID, note: note})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].accountID < entries[j].accountID
+	})
+
+	notes := make([]string, len(entries))
+	for i := range entries {
+		notes[i] = entries[i].note
+	}
+	return notes, nil
+}
+
+func normalizePlusQuotaAnomalyNote(note *string) string {
+	if note == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(*note), " ")
+}
+
 func (s *PlusQuotaAutomationService) ResolveAnomaly(ctx context.Context, accountID int64) (*PlusQuotaAnomaly, error) {
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {

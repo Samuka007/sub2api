@@ -312,9 +312,11 @@ func TestPlusQuotaAutomationReusesRequestIDWhenSuccessPersistenceFails(t *testin
 }
 
 func TestPlusQuotaAutomationRecordsAndAutomaticallyResolves401(t *testing.T) {
+	notes := "Credential owner needs to refresh this account"
 	account := &Account{
 		ID:       2,
 		Name:     "plus-two",
+		Notes:    &notes,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Status:   StatusActive,
@@ -347,6 +349,15 @@ func TestPlusQuotaAutomationRecordsAndAutomaticallyResolves401(t *testing.T) {
 	require.Equal(t, "expired@example.com", list.Items[0].Email)
 	require.Equal(t, "query", list.Items[0].Stage)
 	require.Equal(t, 1, list.Items[0].Count)
+	exportedNotes, err := svc.ExportOpenAnomalyNotes(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{notes}, exportedNotes)
+
+	updatedNotes := "  Credential owner\r\nhas been\t notified  "
+	account.Notes = &updatedNotes
+	exportedNotes, err = svc.ExportOpenAnomalyNotes(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"Credential owner has been notified"}, exportedNotes)
 
 	listByAccountID, err := svc.ListAnomalies(context.Background(), PlusQuotaAnomalyStatusOpen, "2", 1, 20)
 	require.NoError(t, err)
@@ -368,6 +379,17 @@ func TestPlusQuotaAutomationRecordsAndAutomaticallyResolves401(t *testing.T) {
 	require.Equal(t, 1, resolvedList.Total)
 	require.NotNil(t, resolvedList.Items[0].ResolvedAt)
 	require.Equal(t, secondSeen, *resolvedList.Items[0].ResolvedAt)
+	exportedNotes, err = svc.ExportOpenAnomalyNotes(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, exportedNotes)
+}
+
+func TestNormalizePlusQuotaAnomalyNote(t *testing.T) {
+	require.Empty(t, normalizePlusQuotaAnomalyNote(nil))
+	empty := " \r\n\t "
+	require.Empty(t, normalizePlusQuotaAnomalyNote(&empty))
+	multiline := "one\r\ntwo\nthree\u0085four\u2028five\u2029six"
+	require.Equal(t, "one two three four five six", normalizePlusQuotaAnomalyNote(&multiline))
 }
 
 func TestPlusQuotaAutomationRecordsResetCreditDetails401AtCreditsStage(t *testing.T) {

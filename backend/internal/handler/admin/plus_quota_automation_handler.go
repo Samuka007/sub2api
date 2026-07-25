@@ -1,7 +1,11 @@
 package admin
 
 import (
+	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -71,6 +75,28 @@ func (h *PlusQuotaAutomationHandler) ListAnomalies(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+func (h *PlusQuotaAutomationHandler) ExportAnomalyNotes(c *gin.Context) {
+	notes, err := h.service.ExportOpenAnomalyNotes(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if len(notes) == 0 {
+		c.Status(http.StatusNoContent)
+		return
+	}
+
+	filename := fmt.Sprintf(
+		"sub2api-plus-anomaly-account-notes-%s.txt",
+		time.Now().UTC().Format("20060102150405"),
+	)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Exported-Count", strconv.Itoa(len(notes)))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte("\uFEFF"+strings.Join(notes, "\n")))
 }
 
 func (h *PlusQuotaAutomationHandler) ResolveAnomaly(c *gin.Context) {

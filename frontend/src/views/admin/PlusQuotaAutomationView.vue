@@ -145,19 +145,41 @@
               @change="handleStatusChange"
             />
           </div>
-          <button
-            type="button"
-            class="btn btn-secondary self-end sm:self-auto"
-            :disabled="overviewLoading || anomaliesLoading"
-            :title="t('common.refresh')"
-            @click="refreshAll"
-          >
-            <Icon
-              name="refresh"
-              size="md"
-              :class="{ 'animate-spin': overviewLoading || anomaliesLoading }"
-            />
-          </button>
+          <div class="flex items-center gap-2 self-end sm:self-auto">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              data-test="export-account-notes"
+              :disabled="exportingNotes"
+              @click="exportAccountNotes"
+            >
+              <Icon
+                :name="exportingNotes ? 'refresh' : 'download'"
+                size="sm"
+                :class="{ 'animate-spin': exportingNotes }"
+              />
+              <span>
+                {{
+                  exportingNotes
+                    ? t('admin.plusQuotaAutomation.actions.exportingNotes')
+                    : t('admin.plusQuotaAutomation.actions.exportNotes')
+                }}
+              </span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="overviewLoading || anomaliesLoading"
+              :title="t('common.refresh')"
+              @click="refreshAll"
+            >
+              <Icon
+                name="refresh"
+                size="md"
+                :class="{ 'animate-spin': overviewLoading || anomaliesLoading }"
+              />
+            </button>
+          </div>
         </div>
       </template>
 
@@ -316,6 +338,7 @@ const anomalies = ref<PlusQuotaAnomaly[]>([])
 const overviewLoading = ref(false)
 const groupsLoading = ref(false)
 const anomaliesLoading = ref(false)
+const exportingNotes = ref(false)
 const savingConfig = ref(false)
 const runSubmitting = ref(false)
 const showRunConfirm = ref(false)
@@ -443,6 +466,7 @@ const summaryItems = computed(() => {
 })
 
 let anomaliesAbortController: AbortController | null = null
+let notesExportAbortController: AbortController | null = null
 let overviewPollTimer: number | null = null
 let overviewRequestSequence = 0
 let foregroundOverviewRequests = 0
@@ -589,6 +613,53 @@ async function loadAnomalies() {
   }
 }
 
+function accountNotesExportTimestamp(): string {
+  return new Date().toISOString().replace(/\D/g, '').slice(0, 14)
+}
+
+async function exportAccountNotes() {
+  if (exportingNotes.value) return
+
+  const controller = new AbortController()
+  notesExportAbortController = controller
+  exportingNotes.value = true
+  try {
+    const result = await adminAPI.plusQuotaAutomation.exportAnomalyNotes({
+      signal: controller.signal
+    })
+    if (controller.signal.aborted || isUnmounted) return
+
+    if (!result.blob) {
+      appStore.showWarning(t('admin.plusQuotaAutomation.messages.noAccountNotesToExport'))
+      return
+    }
+
+    const url = window.URL.createObjectURL(result.blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.filename
+      || `sub2api-plus-anomaly-account-notes-${accountNotesExportTimestamp()}.txt`
+    try {
+      link.click()
+    } finally {
+      window.URL.revokeObjectURL(url)
+    }
+    appStore.showSuccess(
+      t('admin.plusQuotaAutomation.messages.accountNotesExported', { count: result.count })
+    )
+  } catch (error) {
+    if (controller.signal.aborted || isUnmounted) return
+    appStore.showError(
+      apiErrorMessage(error, t('admin.plusQuotaAutomation.messages.exportAccountNotesFailed'))
+    )
+  } finally {
+    if (notesExportAbortController === controller) {
+      notesExportAbortController = null
+      exportingNotes.value = false
+    }
+  }
+}
+
 async function saveConfig() {
   if (!configValid.value || savingConfig.value) return
   savingConfig.value = true
@@ -726,5 +797,6 @@ onUnmounted(() => {
   overviewRequestSequence += 1
   stopOverviewPolling()
   anomaliesAbortController?.abort()
+  notesExportAbortController?.abort()
 })
 </script>
