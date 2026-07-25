@@ -1,6 +1,6 @@
 # 4Sub2 Git 协作与上游同步规范
 
-本文档是 `Jonesxq/4Sub2` 的 Git 工作约定。目标是在两人协作开发的同时，持续、可审计地吸收 `Wei-Shaw/sub2api` 的官方更新，并保证生产环境可以明确定位和回滚。
+本文档是 `Alle-Group/sub2api` 的 Git 工作约定。目标是在两人协作开发的同时，持续、可审计地吸收 `Wei-Shaw/sub2api` 的官方更新，并保证生产环境可以明确定位和回滚。
 
 ## 1. 核心原则
 
@@ -17,14 +17,14 @@
 
 | 名称 | 地址 | 用途 |
 | --- | --- | --- |
-| `origin` | `git@github.com:Jonesxq/4Sub2.git` | 团队私有仓库，可推送 |
+| `origin` | `git@github.com:Alle-Group/sub2api.git` | 团队私有仓库，可推送 |
 | `upstream` | `git@github.com:Wei-Shaw/sub2api.git` | Sub2API 官方仓库，只读 |
 
 首次配置：
 
 ```bash
-git clone git@github.com:Jonesxq/4Sub2.git
-cd 4Sub2
+git clone git@github.com:Alle-Group/sub2api.git
+cd sub2api
 git remote add upstream git@github.com:Wei-Shaw/sub2api.git
 git remote set-url --push upstream no_push
 git fetch upstream --tags

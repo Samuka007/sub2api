@@ -2,7 +2,7 @@
 
 本文档用于说明 4Sub2 的私有功能、源代码架构，以及团队后续协作开发时应遵循的约定。
 
-[查看 Git 协作与上游同步规范](GIT_WORKFLOW.md) | [查看源码恢复记录](RECOVERY.md) | [查看历史生产部署记录](docs/deployments/company-v0.1.161.1.md)
+[查看 Git 协作与上游同步规范](GIT_WORKFLOW.md) | [查看历史源码恢复记录](RECOVERY.md) | [查看最新生产部署记录](docs/deployments/company-v0.1.164.1.md)
 
 ## 仓库信息
 
@@ -13,9 +13,9 @@
 | 上游项目 | `Wei-Shaw/sub2api` |
 | 上游基线 | `v0.1.164` / `cd8bb98c44303b2c8f04c0da340447c992f0cb7d` |
 | 上游升级标签 | `v0.1.164` |
-| 最近内部发布标签 | `company-v0.1.163.2` |
-| 最近内部发布提交 | `fca6930ca` |
-| 私有功能恢复提交 | `baa4271` |
+| 最近内部发布标签 | `company-v0.1.164.1` |
+| 最近内部发布提交 | `f3c6895a6f0b64eb6a638e3f89ea9b86a08c7c1d` |
+| 初始私有功能恢复提交 | `69c85913dc0732382eb2e1572c488b47b89b511d` |
 | 同步目标源码版本 | `0.1.164` |
 
 当前私有功能源码由官方基线、部署时保留的源码冻结包以及生产补丁重建而成。
@@ -33,6 +33,8 @@ git diff v0.1.164..HEAD
 同时恢复了上游的 [中文说明](README_CN.md) 和 [日文说明](README_JA.md)，用于查阅完整的
 Sub2API 公共功能、安装方式和配置项。两份上游说明中的公开仓库克隆、安装和发布命令仅供参考；
 内部开发、发布和部署必须遵循 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。
+该文档中的仓库地址是迁移前记录；当前团队仓库地址以本页“仓库信息”和本地 `origin` 为准：
+`git@github.com:Alle-Group/sub2api.git`。
 
 `v0.1.164` 文档新增的组合分组能力已纳入本次同步。管理员可以使用组合分组将请求模型解析到
 具体供应商，完整运维说明见 [`docs/COMPOSITE_GROUPS.md`](docs/COMPOSITE_GROUPS.md)。上游本次
@@ -140,6 +142,44 @@ Model IQ 为已登录用户提供 GPT 模型测试结果对比页面。页面会
 - [`frontend/src/components/channels/PricingRow.vue`](frontend/src/components/channels/PricingRow.vue)
 - [`frontend/src/components/channels/SupportedModelChip.vue`](frontend/src/components/channels/SupportedModelChip.vue)
 
+### 5. Plus 配额自动化
+
+管理员可以在「管理后台 → Plus 用量刷新」选择一个 OpenAI 账号分组，配置自动扫描周期
+和用量阈值，也可以立即发起手动扫描。自动扫描默认关闭；默认周期为 5 分钟，允许范围为
+1–1440 分钟；默认阈值为 100%，允许范围为 1–100%。启用自动扫描时必须选择目标分组。
+
+系统只处理目标分组内状态正常的 OpenAI OAuth、非影子 Plus 账号。当任一受支持的额度窗口
+达到阈值且账号存在可用重置次数时，任务会消耗 1 次重置次数刷新额度窗口。页面展示上次和
+下次执行时间、扫描统计和运行状态，并集中记录查询用量、查询重置次数或执行重置时出现的
+401 异常；管理员可以搜索、筛选和标记异常已解决，账号恢复授权后也会在后续扫描中自动关闭异常。
+
+重置流程使用 30 分钟冷却、持久化幂等 request ID 和 PostgreSQL advisory lock，避免失败重试
+或多实例并发造成重复消耗。单次扫描最多并发处理 3 个账号。
+
+核心文件：
+
+- [`backend/internal/service/plus_quota_automation_service.go`](backend/internal/service/plus_quota_automation_service.go)
+- [`backend/internal/service/openai_quota_service.go`](backend/internal/service/openai_quota_service.go)
+- [`backend/internal/handler/admin/plus_quota_automation_handler.go`](backend/internal/handler/admin/plus_quota_automation_handler.go)
+- [`frontend/src/api/admin/plusQuotaAutomation.ts`](frontend/src/api/admin/plusQuotaAutomation.ts)
+- [`frontend/src/views/admin/PlusQuotaAutomationView.vue`](frontend/src/views/admin/PlusQuotaAutomationView.vue)
+
+### 6. 限流账号自动恢复（Hermes）
+
+Hermes 是默认关闭的后台恢复任务，用于重新核对仍处于限流状态的 OpenAI 和 Anthropic OAuth
+账号。它只接受来自上游的新鲜、权威额度证据；只有上游返回可用状态，并且额度窗口与数据库中
+保存的重置窗口匹配时，才会通过 compare-and-clear 清除限流状态。查询失败、证据缺失、窗口不匹配
+或任务超时都会保持原限流状态，按 fail-closed 处理。
+
+任务通过 PostgreSQL advisory lock 保证只有一个运行实例，并在清除数据库状态前检查运行时限流
+状态没有被更新。当前仅支持单应用进程部署，因为进程内运行时限流状态尚不能跨应用实例失效。
+
+核心文件：
+
+- [`backend/internal/service/quota_recovery_service.go`](backend/internal/service/quota_recovery_service.go)
+- [`backend/internal/service/quota_recovery_checker.go`](backend/internal/service/quota_recovery_checker.go)
+- [`backend/internal/config/config.go`](backend/internal/config/config.go)
+
 恢复记录中曾使用“自定义版本比较”这一表述。私有补丁中没有独立的应用升级版本比较器，
 这里实际指的是 `ModelIqView.vue` 中的模型对比排序和趋势计算逻辑。
 
@@ -219,6 +259,9 @@ View 可以组合完整业务流程，但应通过 API 模块调用后端。可�
 - PostgreSQL 保存用户、渠道、分组、订单等长期数据，模型雷达快照也通过现有设置存储路径保存。
 - Redis 为上游 Sub2API 功能提供共享缓存、队列、限流和协调能力。
 - Model IQ 使用小型进程内缓存，因为它只代理一个有严格大小限制的比较快照。
+- Plus 配额自动化将配置和运行状态保存在设置表，将异常和重置状态保存在账号扩展字段，并使用
+  PostgreSQL advisory lock 串行化执行。
+- Hermes 从上游读取额度证据，并使用 PostgreSQL advisory lock 和 compare-and-clear 安全恢复限流账号。
 - 生产 Go 二进制通过 `embed` 构建标签嵌入已经编译好的前端资源。
 
 ## 私有功能请求流程
@@ -292,6 +335,11 @@ KeysView
 | `GET` | `/channels/group-pricing` | 已登录用户 | 获取可见分组与模型价格 |
 | `GET` | `/admin/model-radar` | 管理员 | 获取当前模型雷达快照 |
 | `POST` | `/admin/model-radar/refresh` | 管理员 | 发起受控的手动刷新 |
+| `GET` | `/admin/openai/plus-quota-automation` | 管理员 | 获取 Plus 自动化配置和运行状态 |
+| `PUT` | `/admin/openai/plus-quota-automation` | 管理员 | 更新目标分组、周期和用量阈值 |
+| `POST` | `/admin/openai/plus-quota-automation/run` | 管理员 | 立即发起一次 Plus 配额扫描 |
+| `GET` | `/admin/openai/plus-quota-anomalies` | 管理员 | 分页查询 Plus 账号 401 异常 |
+| `POST` | `/admin/openai/plus-quota-anomalies/:accountId/resolve` | 管理员 | 将指定账号异常标记为已解决 |
 
 ## Model IQ 配置
 
@@ -310,6 +358,24 @@ export CODEX_RADAR_API_TOKEN="replace-at-runtime"
 ```
 
 服务会拒绝非 HTTPS 的上游地址。Token 只保存在后端，不会通过公共设置或 Model IQ 响应返回。
+
+## 限流账号自动恢复配置
+
+Hermes 必须显式启用，修改配置后需要重启服务：
+
+```yaml
+quota_recovery:
+  enabled: false
+  interval_seconds: 86400
+  batch_size: 50
+  concurrency: 3
+  timeout_seconds: 25
+  jitter_seconds: 10
+```
+
+该任务会使用真实账号凭据访问上游额度接口，因此保持默认关闭。启用前必须确认当前是单应用
+进程部署，并确保数据库连接池至少允许两个连接。完整环境变量示例见
+[`deploy/.env.example`](deploy/.env.example)，YAML 示例见 [`deploy/config.example.yaml`](deploy/config.example.yaml)。
 
 ## 源码目录
 
@@ -342,32 +408,44 @@ export CODEX_RADAR_API_TOKEN="replace-at-runtime"
 |   `-- public/                     # 前端静态资源
 |-- deploy/                         # Docker Compose 和部署脚本
 |-- docs/                           # 功能与运维文档
-|-- README_US.md                    # 私有功能和架构说明
-`-- RECOVERY.md                     # 源码恢复来源与验证记录
+|-- GIT_WORKFLOW.md                 # Git 协作、上游同步和回滚流程
+|-- README.md                       # 私有功能和架构说明
+|-- README_CN.md                    # 上游中文说明
+|-- README_JA.md                    # 上游日文说明
+`-- RECOVERY.md                     # 历史源码恢复来源与验证记录
 ```
 
-## 私有代码文件清单
+## 私有功能核心文件
 
-私有功能新增的后端文件：
+以下清单用于快速定位主要入口，不承诺穷举所有配套测试、生成文件和上游接入修改。
+
+私有功能的后端核心文件：
 
 ```text
 backend/internal/handler/admin/model_radar_handler.go
+backend/internal/handler/admin/plus_quota_automation_handler.go
 backend/internal/handler/model_iq_handler.go
 backend/internal/handler/model_iq_handler_test.go
 backend/internal/server/routes/model_radar.go
 backend/internal/service/model_iq_service.go
 backend/internal/service/model_iq_service_test.go
 backend/internal/service/model_radar_service.go
+backend/internal/service/plus_quota_automation_service.go
+backend/internal/service/plus_quota_automation_service_test.go
+backend/internal/service/quota_recovery_checker.go
+backend/internal/service/quota_recovery_service.go
 ```
 
-私有功能新增的前端文件：
+私有功能的前端核心文件：
 
 ```text
 frontend/src/api/modelIq.ts
 frontend/src/api/modelRadar.ts
+frontend/src/api/admin/plusQuotaAutomation.ts
 frontend/src/components/keys/GroupPricingPopover.vue
 frontend/src/router/__tests__/model-iq-route.spec.ts
 frontend/src/views/admin/ModelRadarView.vue
+frontend/src/views/admin/PlusQuotaAutomationView.vue
 frontend/src/views/user/ModelIqView.vue
 frontend/src/views/user/__tests__/ModelIqView.spec.ts
 ```
@@ -402,18 +480,21 @@ pnpm test:run
 
 ```bash
 cd backend
-go test ./internal/config ./internal/handler ./internal/service
-go test ./...
+go test -tags=unit ./...
+go test -tags=integration ./...
+golangci-lint run ./...
 ```
 
-修改 Wire Provider 后执行：
+修改 Ent Schema 后执行并提交生成文件：
 
 ```bash
 cd backend
-wire ./cmd/server
+go generate ./ent
+go generate ./cmd/server
 ```
 
-需要将重新生成的 `backend/cmd/server/wire_gen.go` 与 Provider 修改一起提交。
+仅修改 Wire Provider 时执行 `go generate ./cmd/server`。需要将重新生成的
+`backend/cmd/server/wire_gen.go` 与 Provider 修改一起提交。
 
 ## 安全与维护规则
 
@@ -427,13 +508,16 @@ wire ./cmd/server
 - 合并新的官方版本时，应对照当前上游标签重新评估私有功能，不能仅凭 Git 自动合并成功
   就认为功能完全兼容。
 
-## 当前恢复版本验证情况
+## 最近内部发布验证情况
 
-- 前端类型检查通过。
-- 前端 ESLint 检查通过。
-- 前端测试通过：175 个测试文件，共 1,209 项测试。
-- Wire 依赖生成通过。
-- 受影响的后端包已在 Linux 环境编译通过。
-- Model IQ 和 Codex Radar 配置相关测试通过。
+`company-v0.1.164.1` 发布前后已经完成以下验证：
 
-完整的来源说明和恢复边界请查看 [`RECOVERY.md`](RECOVERY.md)。
+- 前端依赖锁定安装、类型检查、ESLint 和完整测试通过。
+- 后端 unit、integration 测试和 `golangci-lint` 通过。
+- `make VERSION=0.1.164+company.1 build` 完整构建通过。
+- GitHub CI、Branch Policy 和 Security Scan 全部通过。
+- 生产镜像、数据库迁移、容器健康状态和关键公开接口均已核验。
+
+历史源码恢复过程与当时边界请查看 [`RECOVERY.md`](RECOVERY.md)；该文档不是当前完整基线。
+当前实际部署证据和回滚基线请查看
+[`docs/deployments/company-v0.1.164.1.md`](docs/deployments/company-v0.1.164.1.md)。
