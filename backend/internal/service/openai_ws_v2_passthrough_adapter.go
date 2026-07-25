@@ -19,6 +19,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// ErrOpenAIWSClientDisconnected signals that the client WebSocket peer closed
+// before a passthrough turn reached its terminal event.
+var ErrOpenAIWSClientDisconnected = errors.New("websocket client disconnected before turn completion")
+
 type openAIWSClientFrameConn struct {
 	conn                 *coderws.Conn
 	controlCtx           context.Context
@@ -964,10 +968,15 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	upstreamFirstMessageSent = true
 
+	clientDisconnected := &atomic.Bool{}
+
 	readNextClientFrame := func(readCtx context.Context, conn openaiwsv2.FrameConn) (coderws.MessageType, []byte, error) {
 		for {
 			msgType, payload, readErr := conn.ReadFrame(readCtx)
 			if readErr != nil {
+				if readCtx.Err() == nil {
+					clientDisconnected.Store(true)
+				}
 				return msgType, payload, readErr
 			}
 			if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
@@ -1038,8 +1047,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnResult.Usage.OutputTokens,
 					turnResult.Usage.CacheReadInputTokens,
 				)
+				var turnErr error
+				if clientDisconnected.Load() {
+					turnErr = ErrOpenAIWSClientDisconnected
+				}
 				if hooks != nil && hooks.AfterTurn != nil {
-					hooks.AfterTurn(turnNo, turnResult, nil)
+					hooks.AfterTurn(turnNo, turnResult, turnErr)
 				}
 				finishedTraceTurn.Store(int32(turnNo))
 			},
@@ -1169,8 +1182,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		if turnCount == 0 {
 			turnNo := int(currentTurn.Load())
 			if finishedTraceTurn.Load() < int32(turnNo) {
+				var disconnectTurnErr error
+				if clientDisconnected.Load() {
+					disconnectTurnErr = ErrOpenAIWSClientDisconnected
+				}
 				if hooks != nil && hooks.AfterTurn != nil {
-					hooks.AfterTurn(turnNo, result, nil)
+					hooks.AfterTurn(turnNo, result, disconnectTurnErr)
 				}
 				finishedTraceTurn.Store(int32(turnNo))
 			}
@@ -1238,6 +1255,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		relayErr,
 		relayExit.WroteDownstream,
 	)
+	if clientDisconnected.Load() {
+		turnErr = ErrOpenAIWSClientDisconnected
+	}
 	turnNo := int(currentTurn.Load())
 	if finishedTraceTurn.Load() < int32(turnNo) {
 		if hooks != nil && hooks.AfterTurn != nil {

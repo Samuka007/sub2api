@@ -165,6 +165,9 @@ func (t *openAIWSTraceTurns) finishOpen() {
 
 func classifyOpenAIWSTraceOutcome(result *service.OpenAIForwardResult, turnErr error) (string, string, error) {
 	if turnErr != nil {
+		if errors.Is(turnErr, service.ErrOpenAIWSClientDisconnected) {
+			return string(recording.StreamClientDisconnected), "downstream_write", turnErr
+		}
 		if errors.Is(turnErr, context.Canceled) {
 			return string(recording.StreamCancelled), "turn_cancelled", turnErr
 		}
