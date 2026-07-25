@@ -244,6 +244,109 @@ func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 	require.Equal(t, http.StatusConflict, conflictRecorder.Code)
 }
 
+func TestModelTraceConfigRejectsEndpointCredentialsQueriesAndFragments(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://user:credential-canary@langfuse.example.test/api/public/otel",
+		"https://langfuse.example.test/api/public/otel?token=query-canary",
+		"https://langfuse.example.test/api/public/otel#fragment-canary",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			store := &modelTraceSettingsStore{}
+			manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+			secret := "runtime-secret"
+
+			_, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
+				ExpectedConfigVersion: 0,
+				Enabled:               true,
+				Endpoint:              endpoint,
+				PublicKey:             "runtime-public",
+				SecretKey:             &secret,
+				PromptMaxBytes:        100,
+				ResponseMaxBytes:      200,
+				MediaMaxBytes:         300,
+			}, 99)
+
+			require.Error(t, err)
+			require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+			require.Empty(t, store.value, "invalid endpoint must not persist a runtime snapshot")
+		})
+	}
+}
+
+func TestModelTraceConfigAdminAPIRejectsEndpointCredentialsQueriesAndFragments(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://user:credential-canary@langfuse.example.test/api/public/otel",
+		"https://langfuse.example.test/api/public/otel?token=query-canary",
+		"https://langfuse.example.test/api/public/otel#fragment-canary",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			store := &modelTraceSettingsStore{}
+			manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+			handler := modeltrace.NewAdminHandler(manager)
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+				c.Set(string(middleware.ContextKeyUserRole), "admin")
+				c.Next()
+			})
+			router.PUT("/api/v1/admin/model-tracing/config", handler.UpdateConfig)
+			secret := "runtime-secret"
+			body, err := json.Marshal(modeltrace.UpdateConfigRequest{
+				ExpectedConfigVersion: 0,
+				Enabled:               true,
+				Endpoint:              endpoint,
+				PublicKey:             "runtime-public",
+				SecretKey:             &secret,
+				PromptMaxBytes:        100,
+				ResponseMaxBytes:      200,
+				MediaMaxBytes:         300,
+			})
+			require.NoError(t, err)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/v1/admin/model-tracing/config", bytes.NewReader(body)))
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code)
+			require.Empty(t, store.value, "invalid endpoint must not persist a runtime snapshot")
+		})
+	}
+}
+
+func TestModelTraceConfigPublicReadDoesNotEchoInvalidStoredEndpoint(t *testing.T) {
+	const invalidEndpoint = "https://user:credential-canary@langfuse.example.test/api/public/otel?token=query-canary#fragment-canary"
+	raw, err := json.Marshal(modeltrace.RuntimeConfig{
+		Configured:          true,
+		Enabled:             true,
+		Endpoint:            invalidEndpoint,
+		PublicKey:           "runtime-public",
+		SecretKeyEncrypted:  "enc:runtime-secret",
+		PromptMaxBytes:      100,
+		ResponseMaxBytes:    200,
+		MediaMaxBytes:       300,
+		ConfigVersion:       4,
+	})
+	require.NoError(t, err)
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{value: string(raw)}, modelTracePrefixEncryptor{}, true)
+
+	public := manager.GetConfig(context.Background())
+	require.Equal(t, modeltrace.ConfigSourceDeployment, public.Source)
+	require.Empty(t, public.Endpoint)
+
+	g := gin.New()
+	g.Use(func(c *gin.Context) {
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+		c.Set(string(middleware.ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	handler := modeltrace.NewAdminHandler(manager)
+	g.GET("/api/v1/admin/model-tracing/config", handler.GetConfig)
+	recorder := httptest.NewRecorder()
+	g.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/model-tracing/config", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	for _, canary := range []string{"credential-canary", "query-canary", "fragment-canary"} {
+		require.NotContains(t, recorder.Body.String(), canary)
+	}
+}
+
 func TestModelTraceConfigAdminRejectsNonAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := modeltrace.NewAdminHandler(modeltrace.NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{}, modelTracePrefixEncryptor{}, true))

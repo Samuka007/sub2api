@@ -1,16 +1,97 @@
 package modeltrace
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const (
+	conversationTrackQueueCapacity = 8
+	conversationTrackPayloadLimit  = 64 << 10
+	conversationTrackTimeout       = 2 * time.Second
+)
+
+type conversationTrackJob struct {
+	parent     context.Context
+	tracer     trace.Tracer
+	generation *GenerationSnapshot
+	sessionID  string
+	input      []byte
+	output     []byte
+	headers    http.Header
+}
+
+var (
+	conversationTrackQueue      = make(chan conversationTrackJob, conversationTrackQueueCapacity)
+	conversationTrackWorkerOnce sync.Once
+)
+
+func startConversationTrackWorker() {
+	conversationTrackWorkerOnce.Do(func() {
+		go func() {
+			for job := range conversationTrackQueue {
+				job.run()
+			}
+		}()
+	})
+}
+
+// enqueueConversationTrack schedules optional conversation enrichment without
+// delaying the completed model request. The fixed worker and bounded queue make
+// overload a deliberate drop rather than a goroutine or memory leak.
+func enqueueConversationTrack(parent context.Context, generation *GenerationSnapshot, sessionID string, input, output []byte, headers http.Header) {
+	if generation == nil || !generation.Enabled() || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	startConversationTrackWorker()
+	retained := generation.Retain()
+	job := conversationTrackJob{
+		parent:     parent,
+		tracer:     generation.Tracer(),
+		generation: retained,
+		sessionID:  scrubURLsInString(sessionID),
+		input:      boundedConversationPayload(input),
+		output:     boundedConversationPayload(output),
+		headers:    headers.Clone(),
+	}
+	select {
+	case conversationTrackQueue <- job:
+	default:
+		retained.Release()
+		slog.Debug("modeltrace conversation tracking dropped because queue is full")
+	}
+}
+
+func (j conversationTrackJob) run() {
+	if j.generation == nil {
+		return
+	}
+	defer j.generation.Release()
+	ctx, cancel := context.WithTimeout(j.parent, conversationTrackTimeout)
+	defer cancel()
+	cfg := j.generation.Config()
+	recordConversationTrack(ctx, j.tracer, cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, j.sessionID, j.input, j.output, j.headers)
+}
+
+func boundedConversationPayload(payload []byte) []byte {
+	if len(payload) <= conversationTrackPayloadLimit {
+		return payload
+	}
+	return bytes.Clone(payload[:conversationTrackPayloadLimit])
+}
 
 // WriteConversationEvents emits chat.* child spans under the current turn span.
 func WriteConversationEvents(ctx context.Context, tracer trace.Tracer, events []ChatEvent) {

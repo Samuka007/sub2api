@@ -29,6 +29,9 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 			{name: "IPv6 loopback HTTP", endpoint: "http://[::1]:3000"},
 			{name: "remote domain HTTP", endpoint: "http://langfuse.example.com", wantError: true},
 			{name: "remote IP HTTP", endpoint: "http://192.0.2.10:3000", wantError: true},
+			{name: "userinfo", endpoint: "https://user:credential-canary@langfuse.example.com/api/public/otel", wantError: true},
+			{name: "query", endpoint: "https://langfuse.example.com/api/public/otel?token=query-canary", wantError: true},
+			{name: "fragment", endpoint: "https://langfuse.example.com/api/public/otel#fragment-canary", wantError: true},
 			{name: "unsupported scheme", endpoint: "ftp://localhost/traces", wantError: true},
 			{name: "empty endpoint", endpoint: "", wantError: true},
 		}

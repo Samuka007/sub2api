@@ -3,6 +3,7 @@ package modeltrace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -125,6 +126,7 @@ func (s *candidateState) start(c *gin.Context, identity middleware.ResolvedIdent
 			},
 			s.generation,
 		)
+		recorder.setTraceCorrelation(clientRequestID(c), extractSession(nil, c))
 		ctx = recording.WithRecorder(ctx, recorder)
 		c.Request = c.Request.WithContext(ctx)
 		s.span = span
@@ -139,6 +141,7 @@ func (s *candidateState) start(c *gin.Context, identity middleware.ResolvedIdent
 			}
 			c.Request.Body = s.requestCapture
 		}
+		s.bindRequestCapture(c, recorder)
 
 		s.originalWriter = c.Writer
 		s.response = &responseRecorder{
@@ -147,6 +150,15 @@ func (s *candidateState) start(c *gin.Context, identity middleware.ResolvedIdent
 			recorder:       recorder,
 		}
 		c.Writer = s.response
+	})
+}
+
+func (s *candidateState) bindRequestCapture(c *gin.Context, recorder *traceRecorder) {
+	if s == nil || s.requestCapture == nil || recorder == nil {
+		return
+	}
+	s.requestCapture.setCaptureObserver(func(captured []byte) {
+		recorder.setTraceCorrelation("", extractSession(captured, c))
 	})
 }
 
@@ -171,6 +183,10 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 	clientOutput, clientOutputBytes := s.response.bytesAndTotal()
 	stream := s.recorder.streamSnapshot(false)
 	isStream := stream.started || strings.Contains(strings.ToLower(s.response.Header().Get("Content-Type")), "text/event-stream")
+	if isStream && errors.Is(c.Request.Context().Err(), context.Canceled) && (stream.status == "" || stream.status == streamStatusCompleted) {
+		s.recorder.observeClientWrite(0, context.Canceled)
+		stream = s.recorder.streamSnapshot(false)
+	}
 	if isStream && stream.status == "" {
 		stream.status = streamStatusCompleted
 	}
@@ -219,8 +235,12 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 			attrs = append(attrs, attribute.String("error.type", stream.errorType))
 		}
 	}
-	if reqID := scrubURLsInString(clientRequestID(c)); reqID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", reqID))
+	if extracted := scrubURLsInString(extractSession(clientInput, c)); extracted != "" {
+		s.recorder.setTraceCorrelation("", extracted)
+	}
+	requestID, session := s.recorder.traceCorrelation()
+	if requestID != "" {
+		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
 	}
 	if s.identity.UserID > 0 {
 		attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(s.identity.UserID, 10)))
@@ -231,9 +251,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 	if s.identity.GroupID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", s.identity.GroupID))
 	}
-	session := ""
-	if extracted := scrubURLsInString(extractSession(clientInput, c)); extracted != "" {
-		session = extracted
+	if session != "" {
 		attrs = append(attrs, attribute.String("langfuse.session.id", session))
 	}
 	s.span.SetAttributes(attrs...)
@@ -252,7 +270,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 			header = c.Request.Header
 		}
 		spanCtx := trace.ContextWithSpan(context.Background(), s.span)
-		recordConversationTrack(spanCtx, s.generation.Tracer(), cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, session, clientInput, clientOutput, header)
+		enqueueConversationTrack(spanCtx, s.generation, session, clientInput, clientOutput, header)
 	}
 	s.recorder.FinishRequest()
 	s.span.End()
@@ -260,9 +278,20 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 
 type requestCaptureReadCloser struct {
 	io.ReadCloser
-	limit int
-	buf   bytes.Buffer
-	total int
+	limit     int
+	buf       bytes.Buffer
+	total     int
+	onCapture func([]byte)
+}
+
+func (r *requestCaptureReadCloser) setCaptureObserver(onCapture func([]byte)) {
+	if r == nil {
+		return
+	}
+	r.onCapture = onCapture
+	if r.onCapture != nil && r.buf.Len() > 0 {
+		r.onCapture(r.buf.Bytes())
+	}
 }
 
 func (r *requestCaptureReadCloser) Read(p []byte) (int, error) {
@@ -274,6 +303,9 @@ func (r *requestCaptureReadCloser) Read(p []byte) (int, error) {
 			remaining = n
 		}
 		_, _ = r.buf.Write(p[:remaining])
+		if r.onCapture != nil {
+			r.onCapture(r.buf.Bytes())
+		}
 	}
 	return n, err
 }

@@ -1852,6 +1852,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if cyberBlockedThisConn && !currentTurnTrustedObserve {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
+				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
+					Provider:      string(account.Platform),
+					Operation:     "responses_websocket",
+					ClientModel:   currentTurnModel,
+					UpstreamModel: account.GetMappedModel(currentTurnModel),
+					AccountID:     account.ID,
+				})
 				if turn == 1 {
 					return nil
 				}
@@ -1880,6 +1887,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 				currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
+				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
+					Provider:      string(account.Platform),
+					Operation:     "responses_websocket",
+					ClientModel:   currentTurnModel,
+					UpstreamModel: account.GetMappedModel(currentTurnModel),
+					AccountID:     account.ID,
+				})
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {

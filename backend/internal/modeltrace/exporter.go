@@ -388,6 +388,25 @@ func splitEndpoint(raw string) (host string, path string, insecure bool) {
 	return
 }
 
+// sanitizeEndpointForDisplay removes URL components that must never be exposed
+// in model-tracing configuration responses. It tolerates legacy persisted
+// values so administrators can inspect and replace them without revealing
+// credentials or query fragments.
+func sanitizeEndpointForDisplay(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" {
+		return ""
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 // ValidateEndpoint: HTTPS always allowed; HTTP only for loopback.
 func ValidateEndpoint(raw string) error {
 	raw = strings.TrimSpace(raw)
@@ -400,6 +419,18 @@ func ValidateEndpoint(raw string) error {
 	}
 	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
 		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("endpoint host is empty")
+	}
+	if u.User != nil {
+		return errors.New("endpoint must not include userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("endpoint must not include a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("endpoint must not include a fragment")
 	}
 	host := u.Hostname()
 	if strings.EqualFold(u.Scheme, "http") && !isLoopbackHost(host) {

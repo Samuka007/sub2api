@@ -181,17 +181,23 @@ ACTUAL_MAP="$TMP_DIR/actual.tsv"
 clickhouse_query "SELECT metadata['request_id'], metadata['entry_protocol'] FROM traces WHERE startsWith(metadata['request_id'], '$PREFIX-') ORDER BY metadata['request_id'] FORMAT TabSeparated" >"$ACTUAL_MAP"
 cmp -s "$EXPECTED_MAP" "$ACTUAL_MAP" || { diff -u "$EXPECTED_MAP" "$ACTUAL_MAP" >&2 || true; fail "request-to-protocol mapping mismatch"; }
 
-TRACE_ROW=$(clickhouse_query "SELECT count(), uniqExact(id), uniqExact(metadata['request_id']), countIf(name = 'model.request'), countIf(user_id = ''), countIf(metadata['api_key_id'] = ''), countIf(metadata['group_id'] = ''), countIf(NOT has(tags, concat('entry_protocol:', metadata['entry_protocol']))) FROM traces WHERE startsWith(metadata['request_id'], '$PREFIX-') FORMAT TabSeparated")
-IFS=$'\t' read -r T_COUNT T_IDS T_REQUESTS T_ROOT_NAMES T_EMPTY_USER T_EMPTY_KEY T_EMPTY_GROUP T_MISSING_TAG <<<"$TRACE_ROW"
-[[ "$T_COUNT" == "$CASE_COUNT" && "$T_IDS" == "$CASE_COUNT" && "$T_REQUESTS" == "$CASE_COUNT" && "$T_ROOT_NAMES" == "$CASE_COUNT" ]] \
-  || fail "trace identity/cardinality mismatch: $TRACE_ROW"
-[[ "$T_EMPTY_USER" == "0" && "$T_EMPTY_KEY" == "0" && "$T_EMPTY_GROUP" == "0" && "$T_MISSING_TAG" == "0" ]] \
-  || fail "trace identity/tag metadata incomplete: $TRACE_ROW"
+# 根与 Generation 层级必须逐请求精确验证；跨协议总量只作诊断，绝不能替代父子关系。
+HIERARCHY_MAP="$TMP_DIR/hierarchy.tsv"
+clickhouse_query "SELECT t.metadata['request_id'], countIf(o.name = 'model.request' AND o.type = 'SPAN' AND isNull(o.parent_observation_id)), countIf(o.type = 'GENERATION'), countIf(o.type = 'GENERATION' AND toString(o.parent_observation_id) = roots.root_id), countIf(o.end_time IS NULL) FROM traces AS t INNER JOIN observations AS o ON o.trace_id = t.id INNER JOIN (SELECT trace_id, anyIf(id, name = 'model.request' AND type = 'SPAN' AND isNull(parent_observation_id)) AS root_id FROM observations WHERE trace_id IN (SELECT id FROM traces WHERE startsWith(metadata['request_id'], '$PREFIX-')) GROUP BY trace_id) AS roots ON roots.trace_id = t.id WHERE startsWith(t.metadata['request_id'], '$PREFIX-') GROUP BY t.id, t.metadata['request_id'], roots.root_id ORDER BY t.metadata['request_id'] FORMAT TabSeparated" >"$HIERARCHY_MAP"
+HIERARCHY_COUNT=0
+while IFS=$'\t' read -r REQUEST_ID ROOTS GENERATIONS DIRECT_GENERATIONS UNFINISHED; do
+  [[ -n "$REQUEST_ID" ]] || fail "empty request id in per-trace hierarchy result"
+  [[ "$ROOTS" == "1" && "$GENERATIONS" == "1" && "$DIRECT_GENERATIONS" == "1" && "$UNFINISHED" == "0" ]] \
+    || fail "per-request hierarchy mismatch: request=$REQUEST_ID roots=$ROOTS generations=$GENERATIONS direct_generations=$DIRECT_GENERATIONS unfinished=$UNFINISHED"
+  HIERARCHY_COUNT=$((HIERARCHY_COUNT + 1))
+done <"$HIERARCHY_MAP"
+[[ "$HIERARCHY_COUNT" == "$CASE_COUNT" ]] \
+  || fail "per-request hierarchy row count=$HIERARCHY_COUNT, want $CASE_COUNT"
 
 OBS_ROW=$(clickhouse_query "SELECT countIf(name = 'model.request' AND type = 'SPAN'), countIf(type = 'GENERATION'), countIf(end_time IS NULL), countIf(level = 'ERROR'), countIf(position(input, '$CANARY') > 0) FROM observations WHERE trace_id IN (SELECT id FROM traces WHERE startsWith(metadata['request_id'], '$PREFIX-')) FORMAT TabSeparated")
 IFS=$'\t' read -r ROOT_COUNT GENERATION_COUNT UNFINISHED_COUNT ERROR_COUNT CANARY_INPUTS <<<"$OBS_ROW"
 [[ "$ROOT_COUNT" == "$CASE_COUNT" && "$GENERATION_COUNT" == "$CASE_COUNT" && "$UNFINISHED_COUNT" == "0" && "$ERROR_COUNT" == "0" ]] \
-  || fail "observation hierarchy/status mismatch: roots=$ROOT_COUNT generations=$GENERATION_COUNT unfinished=$UNFINISHED_COUNT errors=$ERROR_COUNT"
+  || fail "protocol matrix summary mismatch after per-request hierarchy validation: roots=$ROOT_COUNT generations=$GENERATION_COUNT unfinished=$UNFINISHED_COUNT errors=$ERROR_COUNT"
 (( CANARY_INPUTS >= CASE_COUNT )) || fail "trace inputs lost client prompts: matches=$CANARY_INPUTS cases=$CASE_COUNT"
 
 # 已知 usage 的协议逐项对齐上游事实；total cost 字段必须存在（允许免费测试组为 0）。

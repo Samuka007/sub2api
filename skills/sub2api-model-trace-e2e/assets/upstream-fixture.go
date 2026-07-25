@@ -2,16 +2,20 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const successSSE = "event: message_start\n" +
@@ -26,9 +30,10 @@ const successSSE = "event: message_start\n" +
 	"data: {\"type\":\"message_stop\"}\n\n"
 
 type counters struct {
-	fail, ok, hold, image, otlpOK, otlpError, otlpSlow             atomic.Int64
-	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet atomic.Int64
-	batchMetadata, batchDownload                                   atomic.Int64
+	fail, ok, hold, image, partial, slow, failOpen, otlpOK, otlpError, otlpSlow atomic.Int64
+	wsConnections, wsTurns, wsDisconnectTurns                                    atomic.Int64
+	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet                atomic.Int64
+	batchMetadata, batchDownload                                                    atomic.Int64
 }
 
 var stats counters
@@ -198,6 +203,229 @@ func writeSSE(w http.ResponseWriter, requestID string) {
 	}
 }
 
+const partialSSE = "event: message_start\n" +
+	"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_e2e_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-e2e\",\"stop_reason\":\"\",\"usage\":{\"input_tokens\":7}}}\n\n" +
+	"event: content_block_start\n" +
+	"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+	"event: content_block_delta\n" +
+	"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"e2e upstream partial\"}}\n\n"
+
+const delayedPrefixSSE = "event: message_start\n" +
+	"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_e2e_disconnect\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-e2e\",\"stop_reason\":\"\",\"usage\":{\"input_tokens\":7}}}\n\n" +
+	"event: content_block_start\n" +
+	"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+	"event: content_block_delta\n" +
+	"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"e2e client disconnect partial\"}}\n\n"
+
+const delayedSuffixSSE = "event: message_delta\n" +
+	"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+	"event: message_stop\n" +
+	"data: {\"type\":\"message_stop\"}\n\n"
+
+func writePartialSSE(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(partialSSE)+64))
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, partialSSE)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func writeDelayedSSE(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, delayedPrefixSSE)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	time.Sleep(1500 * time.Millisecond)
+	_, _ = fmt.Fprint(w, delayedSuffixSSE)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func websocketAccept(key string) string {
+	hash := sha1.Sum([]byte(strings.TrimSpace(key) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(hash[:])
+}
+
+func readWebSocketFrame(reader *bufio.Reader) (byte, []byte, error) {
+	first, err := reader.ReadByte()
+	if err != nil {
+		return 0, nil, err
+	}
+	second, err := reader.ReadByte()
+	if err != nil {
+		return 0, nil, err
+	}
+	opcode := first & 0x0f
+	masked := second&0x80 != 0
+	length := uint64(second & 0x7f)
+	switch length {
+	case 126:
+		var value uint16
+		if err := binary.Read(reader, binary.BigEndian, &value); err != nil {
+			return 0, nil, err
+		}
+		length = uint64(value)
+	case 127:
+		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+			return 0, nil, err
+		}
+	}
+	if length > 1<<20 {
+		return 0, nil, fmt.Errorf("websocket frame exceeds fixture limit: %d", length)
+	}
+	var mask [4]byte
+	if masked {
+		if _, err := io.ReadFull(reader, mask[:]); err != nil {
+			return 0, nil, err
+		}
+	}
+	payload := make([]byte, int(length))
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return 0, nil, err
+	}
+	if masked {
+		for index := range payload {
+			payload[index] ^= mask[index%len(mask)]
+		}
+	}
+	return opcode, payload, nil
+}
+
+func writeWebSocketText(writer *bufio.Writer, payload string) error {
+	bytes := []byte(payload)
+	if err := writer.WriteByte(0x81); err != nil {
+		return err
+	}
+	switch {
+	case len(bytes) <= 125:
+		if err := writer.WriteByte(byte(len(bytes))); err != nil {
+			return err
+		}
+	case len(bytes) <= 65535:
+		if err := writer.WriteByte(126); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.BigEndian, uint16(len(bytes))); err != nil {
+			return err
+		}
+	default:
+		if err := writer.WriteByte(127); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.BigEndian, uint64(len(bytes))); err != nil {
+			return err
+		}
+	}
+	if _, err := writer.Write(bytes); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func writeWebSocketClose(writer *bufio.Writer) error {
+	if _, err := writer.Write([]byte{0x88, 0x00}); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func writeWSResponse(writer *bufio.Writer, turn int, disconnect bool) error {
+	responseID := fmt.Sprintf("resp_e2e_ws_%d", turn)
+	if disconnect {
+		responseID = "resp_e2e_ws_disconnect"
+	}
+	if err := writeWebSocketText(writer, fmt.Sprintf(`{"type":"response.created","response":{"id":"%s","model":"gpt-e2e-ws-upstream"}}`, responseID)); err != nil {
+		return err
+	}
+	delta := fmt.Sprintf("e2e ws turn %d", turn)
+	if disconnect {
+		delta = "e2e ws disconnect partial"
+	}
+	if err := writeWebSocketText(writer, fmt.Sprintf(`{"type":"response.output_text.delta","response_id":"%s","delta":"%s"}`, responseID, delta)); err != nil {
+		return err
+	}
+	if disconnect {
+		stats.wsDisconnectTurns.Add(1)
+		time.Sleep(1500 * time.Millisecond)
+	}
+	return writeWebSocketText(writer, fmt.Sprintf(`{"type":"response.completed","response":{"id":"%s","model":"gpt-e2e-ws-upstream","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18}}}`, responseID))
+}
+
+func serveResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !requireBearer(w, r) {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "websocket hijacking unsupported", http.StatusInternalServerError)
+		return
+	}
+	connection, readerWriter, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer func() { _ = connection.Close() }()
+	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+	if key == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(readerWriter, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", websocketAccept(key))
+	if err := readerWriter.Flush(); err != nil {
+		return
+	}
+	stats.wsConnections.Add(1)
+	turn := 0
+	for {
+		opcode, payload, err := readWebSocketFrame(readerWriter.Reader)
+		if err != nil {
+			return
+		}
+		switch opcode {
+		case 0x8:
+			_ = writeWebSocketClose(readerWriter.Writer)
+			return
+		case 0x9:
+			if _, err := readerWriter.Writer.Write([]byte{0x8a, byte(len(payload))}); err != nil {
+				return
+			}
+			if _, err := readerWriter.Writer.Write(payload); err != nil || readerWriter.Flush() != nil {
+				return
+			}
+			continue
+		case 0x1:
+			if !json.Valid(payload) || strings.TrimSpace(gjsonString(payload, "type")) != "response.create" {
+				return
+			}
+			turn++
+			stats.wsTurns.Add(1)
+			disconnect := strings.Contains(string(payload), "ws-disconnect")
+			if err := writeWSResponse(readerWriter.Writer, turn, disconnect); err != nil {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+func gjsonString(payload []byte, key string) string {
+	var value map[string]any
+	if json.Unmarshal(payload, &value) != nil {
+		return ""
+	}
+	text, _ := value[key].(string)
+	return text
+}
+
 func main() {
 	geminiAPIKey := os.Getenv("E2E_GEMINI_API_KEY")
 	mediaCanary := os.Getenv("E2E_BATCH_MEDIA_CANARY")
@@ -224,8 +452,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		payload := map[string]any{
 			"fail": stats.fail.Load(), "ok": stats.ok.Load(), "hold": stats.hold.Load(),
+			"partial": stats.partial.Load(), "slow": stats.slow.Load(), "fail_open": stats.failOpen.Load(),
 			"image": stats.image.Load(), "otlp_ok": stats.otlpOK.Load(),
 			"otlp_error": stats.otlpError.Load(), "otlp_slow": stats.otlpSlow.Load(),
+			"ws_connections": stats.wsConnections.Load(), "ws_turns": stats.wsTurns.Load(),
+			"ws_disconnect_turns": stats.wsDisconnectTurns.Load(),
 			"batch_auth_ok": stats.batchAuthOK.Load(), "batch_auth_fail": stats.batchAuthFail.Load(),
 			"batch_upload": stats.batchUpload.Load(), "batch_create": stats.batchCreate.Load(),
 			"batch_get": stats.batchGet.Load(), "batch_metadata": stats.batchMetadata.Load(),
@@ -253,6 +484,26 @@ func main() {
 		stats.ok.Add(1)
 		writeSSE(w, "req_e2e_success_attempt")
 	})
+	mux.HandleFunc("/partial/v1/messages", func(w http.ResponseWriter, _ *http.Request) {
+		stats.partial.Add(1)
+		writePartialSSE(w)
+	})
+	mux.HandleFunc("/slow/v1/messages", func(w http.ResponseWriter, _ *http.Request) {
+		stats.slow.Add(1)
+		writeDelayedSSE(w)
+	})
+	for suffix, requestID := range map[string]string{
+		"baseline": "req_e2e_failopen_baseline",
+		"500":      "req_e2e_failopen_500",
+		"slow":     "req_e2e_failopen_slow",
+	} {
+		requestID := requestID
+		mux.HandleFunc("/fail-open-"+suffix+"/v1/messages", func(w http.ResponseWriter, _ *http.Request) {
+			stats.failOpen.Add(1)
+			writeSSE(w, requestID)
+		})
+	}
+	mux.HandleFunc("/ws/v1/responses", serveResponsesWebSocket)
 	mux.HandleFunc("/hold/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		stats.hold.Add(1)
 		release, ready := gate.snapshot()

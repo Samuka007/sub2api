@@ -68,6 +68,26 @@ func TestModelTraceClientDisconnect(t *testing.T) {
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 }
 
+func TestModelTraceRequestContextCancellationMarksClientDisconnected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-test","stream":true}`)).WithContext(ctx)
+
+	spans, captured := runStreamTraceRequest(t, httptest.NewRecorder(), request, func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		_, err := c.Writer.Write([]byte("data: partial-before-client-close\n\n"))
+		require.NoError(t, err)
+		cancel()
+	})
+
+	require.Equal(t, "data: partial-before-client-close\n\n", captured)
+	root := spanNamed(t, spans, modeltrace.TestingRootSpanName)
+	attrs := attributesByKey(root.Attributes)
+	require.Equal(t, expectedStreamClientDisconnected, stringAttribute(t, attrs, modeltrace.TestingStreamStatusAttribute))
+	require.Equal(t, "downstream_write", stringAttribute(t, attrs, modeltrace.TestingStreamErrorStageAttribute))
+	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
+}
+
 func TestModelTraceUpstreamStreamError(t *testing.T) {
 	upstreamErr := errors.New("upstream stream reset")
 	spans, captured := runStreamTrace(t, httptest.NewRecorder(), func(c *gin.Context) {

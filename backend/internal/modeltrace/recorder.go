@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,9 @@ type traceRecorder struct {
 	ctx                context.Context
 	tracer             trace.Tracer
 	identity           servermiddleware.ResolvedIdentity
+	correlationMu      sync.RWMutex
+	requestID          string
+	sessionID          string
 	generation         *GenerationSnapshot
 	promptMaxBytes     int
 	responseMaxBytes   int
@@ -64,6 +68,29 @@ func (r *traceRecorder) TraceInputLimit() int {
 		return 0
 	}
 	return r.promptMaxBytes
+}
+
+func (r *traceRecorder) setTraceCorrelation(requestID, sessionID string) {
+	if r == nil {
+		return
+	}
+	r.correlationMu.Lock()
+	defer r.correlationMu.Unlock()
+	if requestID = scrubURLsInString(requestID); requestID != "" {
+		r.requestID = requestID
+	}
+	if sessionID = scrubURLsInString(sessionID); sessionID != "" {
+		r.sessionID = sessionID
+	}
+}
+
+func (r *traceRecorder) traceCorrelation() (requestID, sessionID string) {
+	if r == nil {
+		return "", ""
+	}
+	r.correlationMu.RLock()
+	defer r.correlationMu.RUnlock()
+	return r.requestID, r.sessionID
 }
 
 func (r *traceRecorder) TraceContinuation() recording.TraceContinuation {
@@ -171,12 +198,15 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 	name := fmt.Sprintf("upstream.attempt.%d", index)
 	_, span := r.tracer.Start(r.ctx, name, trace.WithSpanKind(trace.SpanKindClient))
 
+	requestID, sessionID := r.traceCorrelation()
 	observationMetadata := attemptObservationMetadata{
 		AttemptIndex: index,
 		AccountID:    metadata.AccountID,
 		Provider:     metadata.Provider,
 		ClientModel:  scrubURLsInString(metadata.ClientModel),
 		Endpoint:     sanitizeAttemptEndpoint(metadata.Endpoint),
+		RequestID:    requestID,
+		SessionID:    sessionID,
 		APIKeyID:     r.identity.APIKeyID,
 		UserID:       r.identity.UserID,
 		GroupID:      r.identity.GroupID,
@@ -188,6 +218,21 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		attribute.String("langfuse.observation.input", captureModelContentWithType(input, len(input), r.promptMaxBytes, metadata.ContentType, r.capturePolicy)),
 		attribute.String("langfuse.observation.metadata", string(metadataJSON)),
 		attribute.Int64("modeltrace.attempt.index", int64(index)),
+	}
+	if requestID != "" {
+		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
+	}
+	if r.identity.UserID > 0 {
+		attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(r.identity.UserID, 10)))
+	}
+	if r.identity.APIKeyID > 0 {
+		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", r.identity.APIKeyID))
+	}
+	if r.identity.GroupID > 0 {
+		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", r.identity.GroupID))
+	}
+	if sessionID != "" {
+		attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
 	}
 	if metadata.Operation != "" {
 		attrs = append(attrs, attribute.String("gen_ai.operation.name", metadata.Operation))
@@ -205,8 +250,8 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 	if metadata.AccountID > 0 {
 		attrs = append(attrs, attribute.Int64("modeltrace.account.id", metadata.AccountID))
 	}
-	if observationMetadata.Endpoint != "" {
-		attrs = append(attrs, attribute.String("server.address", observationMetadata.Endpoint))
+	if address := attemptServerAddress(metadata.Endpoint); address != "" {
+		attrs = append(attrs, attribute.String("server.address", address))
 	}
 	span.SetAttributes(attrs...)
 
@@ -461,6 +506,8 @@ type attemptObservationMetadata struct {
 	Provider     string `json:"provider,omitempty"`
 	ClientModel  string `json:"client_model,omitempty"`
 	Endpoint     string `json:"endpoint,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
 	APIKeyID     int64  `json:"api_key_id,omitempty"`
 	UserID       int64  `json:"user_id,omitempty"`
 	GroupID      int64  `json:"group_id,omitempty"`
@@ -612,17 +659,13 @@ func (r *attemptResponseReadCloser) bytesAndTotal() ([]byte, int) {
 }
 
 func sanitizeAttemptEndpoint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	return attemptServerAddress(raw)
+}
+
+func attemptServerAddress(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
 		return ""
 	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return ""
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.ForceQuery = false
-	parsed.Fragment = ""
-	return parsed.String()
+	return parsed.Host
 }

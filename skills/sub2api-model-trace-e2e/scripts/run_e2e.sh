@@ -52,6 +52,7 @@ need_cmd curl
 need_cmd jq
 need_cmd openssl
 need_cmd python3
+need_cmd go
 
 # 0. 前置检查
 [[ -f "$REPO_ROOT/backend/cmd/server/main.go" ]] || fail "must run from sub2api repo root, got $REPO_ROOT"
@@ -68,6 +69,7 @@ docker rm -f \
   sub2api-langfuse-clickhouse-1 sub2api-langfuse-minio-1 \
   >/dev/null 2>&1 || true
 docker volume rm -f sub2api-e2e-data \
+  langfuse_langfuse_postgres_data langfuse_langfuse_clickhouse_data langfuse_langfuse_clickhouse_logs langfuse_langfuse_minio_data langfuse_langfuse_redis_data \
   sub2api-langfuse_postgres_data sub2api-langfuse_clickhouse_data sub2api-langfuse_clickhouse_logs sub2api-langfuse_minio_data sub2api-langfuse_redis_data \
   >/dev/null 2>&1 || true
 
@@ -174,6 +176,9 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run --rm \
   golang:1.26.5 \
   sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags embed -ldflags="-s -w -X main.Version=e2e-test" -o /out/sub2api ./cmd/server'
 [[ -x "$BIN_DIR/sub2api" ]] || fail "binary not produced at $BIN_DIR/sub2api"
+RAW_RST_CLIENT_BIN="$BIN_DIR/raw-http-rst-client"
+go build -o "$RAW_RST_CLIENT_BIN" "$SKILL_DIR/scripts/raw_http_rst_client.go"
+[[ -x "$RAW_RST_CLIENT_BIN" ]] || fail "raw TCP RST client was not produced at $RAW_RST_CLIENT_BIN"
 
 # 4. 启动 sub2api（AUTO_SETUP，--network host 共享 VM 127.0.0.1）
 log "starting sub2api server"
@@ -372,6 +377,13 @@ STREAM_REQUEST_ID="e2e-stream-$RUN_ID"
 STREAM_SESSION_ID="e2e-stream-session-$RUN_ID"
 BATCH_REQUEST_ID="e2e-batch-$RUN_ID"
 BATCH_TASK_NAME="e2e-batch-task-$RUN_ID"
+PARTIAL_STREAM_REQUEST_ID="e2e-partial-stream-$RUN_ID"
+PARTIAL_STREAM_SESSION_ID="e2e-partial-stream-session-$RUN_ID"
+CLIENT_DISCONNECT_REQUEST_ID="e2e-client-disconnect-$RUN_ID"
+CLIENT_DISCONNECT_SESSION_ID="e2e-client-disconnect-session-$RUN_ID"
+WS_MULTI_CONNECTION_ID="e2e-ws-multi-$RUN_ID"
+WS_SWITCH_CONNECTION_ID="e2e-ws-switch-$RUN_ID"
+WS_DISCONNECT_CONNECTION_ID="e2e-ws-disconnect-$RUN_ID"
 
 log "verifying anonymous and unknown credentials remain untraced"
 ANON_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
@@ -503,6 +515,8 @@ curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: applicatio
 FAILOVER_APIKEY="sk-e2e-failover-$(openssl rand -hex 16)"
 docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api \
   -c "UPDATE api_keys SET key='$FAILOVER_APIKEY' WHERE name='e2e-failover-key';" >/dev/null
+FAILOVER_API_KEY_ID=$(docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc "SELECT id FROM api_keys WHERE name='e2e-failover-key' LIMIT 1")
+[[ -n "$FAILOVER_API_KEY_ID" ]] || fail "failover api key id missing"
 FAIL_ACCOUNT_PAYLOAD=$(jq -nc --argjson group_id "$FAILOVER_GROUP_ID" '{
   name:"e2e-fail-account", platform:"anthropic", type:"apikey", concurrency:1, priority:1,
   group_ids:[$group_id], credentials:{api_key:"e2e-upstream-fail-key", base_url:"http://127.0.0.1:18081/fail", model_mapping:{"gpt-4":"claude-e2e"}}, extra:{}
@@ -586,6 +600,45 @@ STREAM_BODY=$(<"$STREAM_RESPONSE_FILE")
 [[ "$STREAM_BODY" == *'"finish_reason":"stop"'* ]] || fail "stream response missing successful terminal chunk"
 [[ "$STREAM_BODY" == *'data: [DONE]'* ]] || fail "stream response missing [DONE] terminal frame"
 log "stream client frames verified: http=$STREAM_CODE content_delta=1 terminal=1"
+
+# 6.4 客户端可见部分输出和实际传输错误必须落为已结束的 Langfuse Trace。
+PARTIAL_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.partial')
+update_success_account_endpoint "http://127.0.0.1:18081/partial"
+PARTIAL_STREAM_RESPONSE_FILE="$REPO_ROOT/.e2e-tmp/partial-stream-response.sse"
+PARTIAL_STREAM_CODE=$(curl -N -sS -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $FAILOVER_APIKEY" \
+  -H "X-Client-Request-ID: $PARTIAL_STREAM_REQUEST_ID" \
+  -d "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"partial upstream stream must remain observable\"}],\"session_id\":\"$PARTIAL_STREAM_SESSION_ID\",\"stream\":true}" \
+  -o "$PARTIAL_STREAM_RESPONSE_FILE" -w '%{http_code}' || true)
+[[ "$PARTIAL_STREAM_CODE" == "200" ]] || { cat "$PARTIAL_STREAM_RESPONSE_FILE" >&2; fail "partial upstream stream returned HTTP $PARTIAL_STREAM_CODE, want 200"; }
+PARTIAL_STREAM_BODY=$(<"$PARTIAL_STREAM_RESPONSE_FILE")
+[[ "$PARTIAL_STREAM_BODY" == *"e2e upstream partial"* ]] || fail "partial upstream stream lost client-visible partial output"
+PARTIAL_FIXTURE_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.partial')
+[[ "$PARTIAL_FIXTURE_AFTER" == "$((PARTIAL_FIXTURE_BEFORE + 1))" ]] || fail "partial upstream fixture call delta=$((PARTIAL_FIXTURE_AFTER - PARTIAL_FIXTURE_BEFORE)), want 1"
+
+SLOW_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.slow')
+update_success_account_endpoint "http://127.0.0.1:18081/slow"
+CLIENT_DISCONNECT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.out"
+CLIENT_DISCONNECT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.err"
+if "$RAW_RST_CLIENT_BIN" \
+  -addr 127.0.0.1:8080 \
+  -token "$FAILOVER_APIKEY" \
+  -request-id "$CLIENT_DISCONNECT_REQUEST_ID" \
+  -session-id "$CLIENT_DISCONNECT_SESSION_ID" \
+  >"$CLIENT_DISCONNECT_OUTPUT_FILE" 2>"$CLIENT_DISCONNECT_ERROR_FILE"; then
+  CLIENT_DISCONNECT_RST_EXIT=0
+else
+  CLIENT_DISCONNECT_RST_EXIT=$?
+fi
+[[ "$CLIENT_DISCONNECT_RST_EXIT" == "0" ]] || { cat "$CLIENT_DISCONNECT_ERROR_FILE" >&2; fail "raw TCP RST client failed after delayed prefix: exit=$CLIENT_DISCONNECT_RST_EXIT"; }
+CLIENT_DISCONNECT_OUTPUT=$(<"$CLIENT_DISCONNECT_OUTPUT_FILE")
+[[ "$CLIENT_DISCONNECT_OUTPUT" == *"RST_CLIENT_OK addr=127.0.0.1:8080 request_id=$CLIENT_DISCONNECT_REQUEST_ID received_prefix=1"* ]] \
+  || fail "raw TCP RST client did not confirm delayed prefix and RST close"
+sleep 2
+SLOW_FIXTURE_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.slow')
+[[ "$SLOW_FIXTURE_AFTER" == "$((SLOW_FIXTURE_BEFORE + 1))" ]] || fail "slow stream fixture call delta=$((SLOW_FIXTURE_AFTER - SLOW_FIXTURE_BEFORE)), want 1"
+log "partial upstream and real client TCP RST disconnect verified: partial_calls=1 slow_calls=1 rst_client=1"
+
 update_success_account_endpoint "http://127.0.0.1:18081/hold"
 
 # 6.5 运行时快照：请求处理中关闭追踪仍完成原 Trace；后续请求立即不追踪。
@@ -643,15 +696,62 @@ POST_DISABLE_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
 apply_runtime_tracing_config 4 true "$LANGFUSE_URL"
 log "in-flight snapshot verified: old_request=completed new_request=untraced"
 
-# 6.6 真实 OTLP 500 与慢导出器不得改变业务响应或阻塞请求路径。
+# 6.6 真实 OTLP 500 与慢导出器不得改变完整业务响应、上游调用、Usage 或计费。
+assert_fail_open_response() {
+  local label="$1" response_file="$2"
+  jq -e '.choices[0].message.content == "e2e upstream success" and .usage.prompt_tokens == 7 and .usage.completion_tokens == 3 and .usage.total_tokens == 10' "$response_file" >/dev/null \
+    || fail "$label business response or deterministic usage changed"
+}
+wait_fail_open_usage_after() {
+  local cursor="$1" row count input output total total_cost actual_cost
+  for _ in {1..100}; do
+    row=$(docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc "SELECT count(*), COALESCE(sum(input_tokens), 0), COALESCE(sum(output_tokens), 0), COALESCE(sum(total_cost), 0), COALESCE(sum(actual_cost), 0) FROM usage_logs WHERE api_key_id = $FAILOVER_API_KEY_ID AND id > $cursor")
+    IFS='|' read -r count input output total_cost actual_cost <<<"$row"
+    total=$((input + output))
+    if [[ "$count" == "1" && "$input" == "7" && "$output" == "3" && "$total" == "10" ]]; then
+      printf '%s|%s|%s|%s|%s\n' "$input" "$output" "$total" "$total_cost" "$actual_cost"
+      return
+    fi
+    sleep 0.1
+  done
+  fail "Usage record missing or unstable after cursor=$cursor: $row"
+}
+usage_log_cursor() {
+  docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc "SELECT COALESCE(max(id), 0) FROM usage_logs WHERE api_key_id = $FAILOVER_API_KEY_ID"
+}
+
+FAIL_OPEN_UPSTREAM_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+update_success_account_endpoint "http://127.0.0.1:18081/fail-open-baseline"
+FAIL_OPEN_BASELINE_CURSOR=$(usage_log_cursor)
+FAIL_OPEN_BASELINE_RESPONSE="$REPO_ROOT/.e2e-tmp/fail-open-baseline.json"
+FAIL_OPEN_BASELINE_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $HOLD_APIKEY" \
+  -H "X-Client-Request-ID: e2e-export-baseline-$RUN_ID" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"fail-open baseline usage and billing"}]}' \
+  -o "$FAIL_OPEN_BASELINE_RESPONSE" -w '%{http_code}')
+[[ "$FAIL_OPEN_BASELINE_CODE" == "200" ]] || fail "fail-open baseline business request returned HTTP $FAIL_OPEN_BASELINE_CODE, want 200"
+assert_fail_open_response "fail-open baseline" "$FAIL_OPEN_BASELINE_RESPONSE"
+FAIL_OPEN_UPSTREAM_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+[[ "$FAIL_OPEN_UPSTREAM_AFTER" == "$((FAIL_OPEN_UPSTREAM_BEFORE + 1))" ]] || fail "fail-open baseline upstream call delta=$((FAIL_OPEN_UPSTREAM_AFTER - FAIL_OPEN_UPSTREAM_BEFORE)), want 1"
+FAIL_OPEN_BASELINE_USAGE=$(wait_fail_open_usage_after "$FAIL_OPEN_BASELINE_CURSOR")
+
 EXPORT_FAIL_REQUEST_ID="e2e-export-fail-$RUN_ID"
 apply_runtime_tracing_config 5 true "http://127.0.0.1:18081/otlp-500"
+update_success_account_endpoint "http://127.0.0.1:18081/fail-open-500"
+EXPORT_FAIL_UPSTREAM_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+EXPORT_FAIL_CURSOR=$(usage_log_cursor)
+EXPORT_FAIL_RESPONSE="$REPO_ROOT/.e2e-tmp/export-fail-response.json"
 EXPORT_FAIL_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" -H "Authorization: Bearer $HOLD_APIKEY" \
   -H "X-Client-Request-ID: $EXPORT_FAIL_REQUEST_ID" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"exporter 500 must fail open"}]}' \
-  -o /dev/null -w '%{http_code}')
+  -o "$EXPORT_FAIL_RESPONSE" -w '%{http_code}')
 [[ "$EXPORT_FAIL_CODE" == "200" ]] || fail "OTLP-500 business request returned HTTP $EXPORT_FAIL_CODE, want 200"
+assert_fail_open_response "OTLP-500" "$EXPORT_FAIL_RESPONSE"
+EXPORT_FAIL_UPSTREAM_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+[[ "$EXPORT_FAIL_UPSTREAM_AFTER" == "$((EXPORT_FAIL_UPSTREAM_BEFORE + 1))" ]] || fail "OTLP-500 upstream call delta=$((EXPORT_FAIL_UPSTREAM_AFTER - EXPORT_FAIL_UPSTREAM_BEFORE)), want 1"
+EXPORT_FAIL_USAGE=$(wait_fail_open_usage_after "$EXPORT_FAIL_CURSOR")
+[[ "$EXPORT_FAIL_USAGE" == "$FAIL_OPEN_BASELINE_USAGE" ]] || fail "OTLP-500 changed Usage or billing: baseline=$FAIL_OPEN_BASELINE_USAGE failed=$EXPORT_FAIL_USAGE"
 OTLP_ERROR_COUNT=0
 for i in {1..100}; do
   OTLP_ERROR_COUNT=$(curl -fsS http://localhost:18081/stats | jq -r '.otlp_error')
@@ -663,17 +763,26 @@ apply_runtime_tracing_config 6 true "$LANGFUSE_URL"
 
 SLOW_EXPORT_REQUEST_ID="e2e-export-slow-$RUN_ID"
 apply_runtime_tracing_config 7 true "http://127.0.0.1:18081/otlp-slow"
+update_success_account_endpoint "http://127.0.0.1:18081/fail-open-slow"
+SLOW_EXPORT_UPSTREAM_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+SLOW_EXPORT_CURSOR=$(usage_log_cursor)
+SLOW_EXPORT_RESPONSE="$REPO_ROOT/.e2e-tmp/export-slow-response.json"
 SLOW_STARTED_NS=$(python3 -c 'import time; print(time.time_ns())')
 SLOW_EXPORT_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" -H "Authorization: Bearer $HOLD_APIKEY" \
   -H "X-Client-Request-ID: $SLOW_EXPORT_REQUEST_ID" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"slow exporter must not block"}]}' \
-  -o /dev/null -w '%{http_code}')
+  -o "$SLOW_EXPORT_RESPONSE" -w '%{http_code}')
 SLOW_FINISHED_NS=$(python3 -c 'import time; print(time.time_ns())')
 SLOW_ELAPSED_MS=$(python3 -c 'import sys; print((int(sys.argv[2])-int(sys.argv[1]))//1000000)' "$SLOW_STARTED_NS" "$SLOW_FINISHED_NS")
 [[ "$SLOW_EXPORT_CODE" == "200" ]] || fail "slow-export business request returned HTTP $SLOW_EXPORT_CODE, want 200"
+assert_fail_open_response "slow OTLP" "$SLOW_EXPORT_RESPONSE"
 python3 -c 'import sys; raise SystemExit(0 if int(sys.argv[1]) < 2000 else 1)' "$SLOW_ELAPSED_MS" \
   || fail "slow exporter blocked business response for ${SLOW_ELAPSED_MS}ms"
+SLOW_EXPORT_UPSTREAM_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
+[[ "$SLOW_EXPORT_UPSTREAM_AFTER" == "$((SLOW_EXPORT_UPSTREAM_BEFORE + 1))" ]] || fail "slow OTLP upstream call delta=$((SLOW_EXPORT_UPSTREAM_AFTER - SLOW_EXPORT_UPSTREAM_BEFORE)), want 1"
+SLOW_EXPORT_USAGE=$(wait_fail_open_usage_after "$SLOW_EXPORT_CURSOR")
+[[ "$SLOW_EXPORT_USAGE" == "$FAIL_OPEN_BASELINE_USAGE" ]] || fail "slow OTLP changed Usage or billing: baseline=$FAIL_OPEN_BASELINE_USAGE slow=$SLOW_EXPORT_USAGE"
 OTLP_SLOW_COUNT=0
 for i in {1..100}; do
   OTLP_SLOW_COUNT=$(curl -fsS http://localhost:18081/stats | jq -r '.otlp_slow')
@@ -682,7 +791,64 @@ for i in {1..100}; do
 done
 (( OTLP_SLOW_COUNT >= 1 )) || fail "slow OTLP fixture did not receive an export"
 apply_runtime_tracing_config 8 true "$LANGFUSE_URL"
-log "export fail-open verified: otlp_500=$OTLP_ERROR_COUNT slow_exports=$OTLP_SLOW_COUNT business_ms=$SLOW_ELAPSED_MS"
+log "export fail-open verified: otlp_500=$OTLP_ERROR_COUNT slow_exports=$OTLP_SLOW_COUNT business_ms=$SLOW_ELAPSED_MS upstream_calls=1 usage_billing=stable"
+
+# 6.7 真实 Responses WebSocket：同一连接多回合、回合间配置切换和客户端断连。
+log "creating deterministic OpenAI Responses WebSocket account"
+WS_GROUP_ID=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"e2e-openai-ws","description":"e2e responses websocket tracing","platform":"openai","rate_multiplier":1,"is_exclusive":false,"status":"active","allow_messages_dispatch":true}' \
+  http://localhost:8080/api/v1/admin/groups | jq -er '.data.id')
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"name\":\"e2e-openai-ws-key\",\"group_id\":$WS_GROUP_ID}" http://localhost:8080/api/v1/keys >/dev/null
+WS_APIKEY="sk-e2e-openai-ws-$(openssl rand -hex 16)"
+docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api \
+  -c "UPDATE api_keys SET key='$WS_APIKEY' WHERE name='e2e-openai-ws-key';" >/dev/null
+WS_ACCOUNT_PAYLOAD=$(jq -nc --argjson group_id "$WS_GROUP_ID" '{
+  name:"e2e-openai-ws-account",platform:"openai",type:"apikey",concurrency:1,priority:1,status:"active",schedulable:true,
+  group_ids:[$group_id],credentials:{api_key:"e2e-ws-upstream-key",base_url:"http://127.0.0.1:18081/ws",model_mapping:{"gpt-e2e-ws":"gpt-e2e-ws-upstream"}},
+  extra:{openai_responses_supported:true,openai_responses_mode:"force_responses",openai_apikey_responses_websockets_v2_enabled:true}
+}')
+WS_ACCOUNT_ID=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "$WS_ACCOUNT_PAYLOAD" http://localhost:8080/api/v1/admin/accounts | jq -er '.data.id')
+[[ -n "$WS_ACCOUNT_ID" ]] || fail "Responses WebSocket account creation failed"
+WS_CLIENT_URL="ws://127.0.0.1:8080/v1/responses"
+WS_CLIENT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-client.err"
+WS_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.ws_turns')
+WS_MULTI_CLIENT_OUTPUT=$(go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_MULTI_CONNECTION_ID" --mode multi 2>"$WS_CLIENT_ERROR_FILE") \
+  || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket multi-turn client failed"; }
+[[ "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=1 response_id=resp_e2e_ws_"* && "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=2 response_id=resp_e2e_ws_"* ]] \
+  || fail "Responses WebSocket multi-turn client output mismatch"
+
+WS_SWITCH_READY_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.ready"
+WS_SWITCH_CONTINUE_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.continue"
+WS_SWITCH_CLIENT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.out"
+rm -f "$WS_SWITCH_READY_FILE" "$WS_SWITCH_CONTINUE_FILE" "$WS_SWITCH_CLIENT_OUTPUT_FILE"
+go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_SWITCH_CONNECTION_ID" --mode pause \
+  --ready-file "$WS_SWITCH_READY_FILE" --continue-file "$WS_SWITCH_CONTINUE_FILE" >"$WS_SWITCH_CLIENT_OUTPUT_FILE" 2>"$WS_CLIENT_ERROR_FILE" &
+WS_SWITCH_CLIENT_PID=$!
+for _ in {1..100}; do
+  [[ -f "$WS_SWITCH_READY_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$WS_SWITCH_READY_FILE" ]] || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket first turn did not complete before config switch"; }
+apply_runtime_tracing_config 9 false "$LANGFUSE_URL"
+: >"$WS_SWITCH_CONTINUE_FILE"
+wait "$WS_SWITCH_CLIENT_PID" || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket second turn failed after config switch"; }
+WS_SWITCH_CLIENT_OUTPUT=$(<"$WS_SWITCH_CLIENT_OUTPUT_FILE")
+[[ "$WS_SWITCH_CLIENT_OUTPUT" == *"turn_index=1 response_id=resp_e2e_ws_"* && "$WS_SWITCH_CLIENT_OUTPUT" == *"turn_index=2 response_id=resp_e2e_ws_"* ]] \
+  || fail "Responses WebSocket config-switch client output mismatch"
+apply_runtime_tracing_config 10 true "$LANGFUSE_URL"
+
+WS_DISCONNECT_CLIENT_OUTPUT=$(go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
+  || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket disconnect client failed"; }
+[[ "$WS_DISCONNECT_CLIENT_OUTPUT" == *"WS_DISCONNECTED connection_request_id=$WS_DISCONNECT_CONNECTION_ID partial_response_id=resp_e2e_ws_disconnect"* ]] \
+  || fail "Responses WebSocket disconnect client did not close after partial output"
+sleep 2
+WS_FIXTURE_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.ws_turns')
+[[ "$WS_FIXTURE_AFTER" == "$((WS_FIXTURE_BEFORE + 5))" ]] || fail "Responses WebSocket fixture turn delta=$((WS_FIXTURE_AFTER - WS_FIXTURE_BEFORE)), want 5"
+WS_DISCONNECT_TURNS=$(curl -fsS http://localhost:18081/stats | jq -r '.ws_disconnect_turns')
+[[ "$WS_DISCONNECT_TURNS" == "1" ]] || fail "Responses WebSocket fixture did not observe one disconnect turn: got=$WS_DISCONNECT_TURNS"
+log "Responses WebSocket multi-turn, config switch, and disconnect clients verified: turns=5"
 
 
 # 6.4 真实 batch image API -> queue -> worker -> Langfuse continuation。
@@ -908,7 +1074,7 @@ LARGE_TRUNCATED_MATCH=$(echo "$LARGE_INPUT_ROW" | cut -f4)
 STREAM_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE session_id = '$STREAM_SESSION_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
 [[ -n "$STREAM_TRACE_ID" ]] || fail "stream request did not export a trace"
 STREAM_TRACE_COUNT=$(clickhouse_query "SELECT count() FROM traces WHERE session_id = '$STREAM_SESSION_ID' FORMAT TabSeparated")
-STREAM_OBS_ROW=$(clickhouse_query "SELECT count(), countIf(type = 'GENERATION'), countIf(name = 'model.request' AND type = 'SPAN'), countIf(name = 'upstream.attempt.1' AND type = 'GENERATION' AND metadata['endpoint'] = 'http://127.0.0.1:18081/ok/v1/messages'), countIf(end_time IS NULL) FROM observations WHERE trace_id = '$STREAM_TRACE_ID' FORMAT TabSeparated")
+STREAM_OBS_ROW=$(clickhouse_query "SELECT count(), countIf(type = 'GENERATION'), countIf(name = 'model.request' AND type = 'SPAN'), countIf(name = 'upstream.attempt.1' AND type = 'GENERATION' AND metadata['endpoint'] = '127.0.0.1:18081'), countIf(end_time IS NULL) FROM observations WHERE trace_id = '$STREAM_TRACE_ID' FORMAT TabSeparated")
 STREAM_OBS_COUNT=$(echo "$STREAM_OBS_ROW" | cut -f1)
 STREAM_GEN_COUNT=$(echo "$STREAM_OBS_ROW" | cut -f2)
 STREAM_ROOT_MATCH=$(echo "$STREAM_OBS_ROW" | cut -f3)
@@ -927,6 +1093,72 @@ STREAM_UPSTREAM_TERMINAL=$(echo "$STREAM_STATE_ROW" | cut -f4)
 STREAM_MODEL_MATCH=$(echo "$STREAM_STATE_ROW" | cut -f5)
 [[ "$STREAM_COMPLETED_MATCH" == "1" && "$STREAM_ERROR_ROOT" == "0" && "$STREAM_CLIENT_TERMINAL" == "1" && "$STREAM_UPSTREAM_TERMINAL" == "1" && "$STREAM_MODEL_MATCH" == "1" ]] \
   || fail "stream terminal/model mismatch: completed=$STREAM_COMPLETED_MATCH error_root=$STREAM_ERROR_ROOT client_terminal=$STREAM_CLIENT_TERMINAL upstream_terminal=$STREAM_UPSTREAM_TERMINAL model=$STREAM_MODEL_MATCH"
+
+assert_exact_root_generation() {
+  local label="$1" trace_id="$2" root_id row observations roots generations direct unfinished
+  root_id=$(clickhouse_query "SELECT id FROM observations WHERE trace_id = '$trace_id' AND name = 'model.request' AND type = 'SPAN' AND isNull(parent_observation_id) LIMIT 1 FORMAT TabSeparated")
+  [[ -n "$root_id" ]] || fail "$label has no parentless root span"
+  row=$(clickhouse_query "SELECT count(), countIf(name = 'model.request' AND type = 'SPAN' AND isNull(parent_observation_id)), countIf(type = 'GENERATION'), countIf(type = 'GENERATION' AND toString(parent_observation_id) = '$root_id'), countIf(end_time IS NULL) FROM observations WHERE trace_id = '$trace_id' FORMAT TabSeparated")
+  IFS=$'\t' read -r observations roots generations direct unfinished <<<"$row"
+  [[ "$observations" == "2" && "$roots" == "1" && "$generations" == "1" && "$direct" == "1" && "$unfinished" == "0" ]] \
+    || fail "$label hierarchy mismatch: observations=$observations roots=$roots generations=$generations direct_generations=$direct unfinished=$unfinished"
+}
+assert_stream_terminal() {
+  local label="$1" trace_id="$2" expected_status="$3" expected_output="$4" row status_matches errors output_matches
+  row=$(clickhouse_query "SELECT countIf(name = 'model.request' AND JSONExtractString(metadata['attributes'], 'modeltrace.stream.status') = '$expected_status'), countIf(name = 'model.request' AND level = 'ERROR'), countIf(name = 'model.request' AND position(ifNull(output, ''), '$expected_output') > 0) FROM observations WHERE trace_id = '$trace_id' FORMAT TabSeparated")
+  IFS=$'\t' read -r status_matches errors output_matches <<<"$row"
+  [[ "$status_matches" == "1" && "$errors" == "1" && "$output_matches" == "1" ]] \
+    || fail "$label terminal mismatch: status=$status_matches errors=$errors partial_output=$output_matches"
+}
+ws_trace_id_for_turn() {
+  local connection_id="$1" turn_index="$2" count row trace_id observed_connection turn_request observed_turn
+  count=$(clickhouse_query "SELECT count() FROM traces WHERE coalesce(nullIf(JSONExtractString(metadata['attributes'], 'langfuse.trace.metadata.connection_request_id'), ''), metadata['connection_request_id']) = '$connection_id' AND if(JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index') > 0, JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index'), toInt32OrZero(metadata['turn_index'])) = $turn_index FORMAT TabSeparated")
+  [[ "$count" == "1" ]] || fail "Responses WebSocket trace count mismatch: connection=$connection_id turn=$turn_index traces=$count"
+  row=$(clickhouse_query "SELECT id, coalesce(nullIf(JSONExtractString(metadata['attributes'], 'langfuse.trace.metadata.connection_request_id'), ''), metadata['connection_request_id']), coalesce(nullIf(JSONExtractString(metadata['attributes'], 'langfuse.trace.metadata.turn_request_id'), ''), metadata['turn_request_id']), if(JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index') > 0, JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index'), toInt32OrZero(metadata['turn_index'])) FROM traces WHERE coalesce(nullIf(JSONExtractString(metadata['attributes'], 'langfuse.trace.metadata.connection_request_id'), ''), metadata['connection_request_id']) = '$connection_id' AND if(JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index') > 0, JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index'), toInt32OrZero(metadata['turn_index'])) = $turn_index FORMAT TabSeparated")
+  IFS=$'\t' read -r trace_id observed_connection turn_request observed_turn <<<"$row"
+  [[ -n "$trace_id" && "$observed_connection" == "$connection_id" && -n "$turn_request" && "$observed_turn" == "$turn_index" ]] \
+    || fail "Responses WebSocket trace metadata mismatch: connection=$connection_id turn=$turn_index row=$row"
+  printf '%s\n' "$trace_id"
+}
+
+# F-024：真实部分流错误与真实客户端中途断连都保留部分输出、错误终态和已结束父子层级。
+PARTIAL_STREAM_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE metadata['request_id'] = '$PARTIAL_STREAM_REQUEST_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
+[[ -n "$PARTIAL_STREAM_TRACE_ID" ]] || fail "partial upstream stream did not export a trace"
+assert_exact_root_generation "partial upstream stream" "$PARTIAL_STREAM_TRACE_ID"
+assert_stream_terminal "partial upstream stream" "$PARTIAL_STREAM_TRACE_ID" "stream_error" "e2e upstream partial"
+PARTIAL_ATTEMPT_OUTPUT=$(clickhouse_query "SELECT output FROM observations WHERE trace_id = '$PARTIAL_STREAM_TRACE_ID' AND type = 'GENERATION' FORMAT TabSeparated")
+[[ "$PARTIAL_ATTEMPT_OUTPUT" == *"e2e upstream partial"* ]] || fail "partial upstream Generation lost partial output"
+
+CLIENT_DISCONNECT_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE metadata['request_id'] = '$CLIENT_DISCONNECT_REQUEST_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
+[[ -n "$CLIENT_DISCONNECT_TRACE_ID" ]] || fail "real client disconnect did not export a trace"
+assert_exact_root_generation "real client disconnect" "$CLIENT_DISCONNECT_TRACE_ID"
+assert_stream_terminal "real client disconnect" "$CLIENT_DISCONNECT_TRACE_ID" "client_disconnected" "e2e client disconnect partial"
+
+# F-026：按 connection request id、每回合独立 request id 与 turn index 精确检索 WebSocket Trace。
+WS_MULTI_TURN_ONE_TRACE_ID=$(ws_trace_id_for_turn "$WS_MULTI_CONNECTION_ID" 1)
+WS_MULTI_TURN_TWO_TRACE_ID=$(ws_trace_id_for_turn "$WS_MULTI_CONNECTION_ID" 2)
+[[ "$WS_MULTI_TURN_ONE_TRACE_ID" != "$WS_MULTI_TURN_TWO_TRACE_ID" ]] || fail "Responses WebSocket turns shared a Trace unexpectedly"
+for pair in "turn-one:$WS_MULTI_TURN_ONE_TRACE_ID:e2e ws turn 1" "turn-two:$WS_MULTI_TURN_TWO_TRACE_ID:e2e ws turn 2"; do
+  label=${pair%%:*}
+  remainder=${pair#*:}
+  trace_id=${remainder%%:*}
+  expected_output=${remainder#*:}
+  assert_exact_root_generation "Responses WebSocket $label" "$trace_id"
+  ws_completed=$(clickhouse_query "SELECT countIf(name = 'model.request' AND JSONExtractString(metadata['attributes'], 'modeltrace.stream.status') = 'completed'), countIf(name = 'model.request' AND level = 'ERROR'), countIf(name = 'model.request' AND position(ifNull(output, ''), '$expected_output') > 0) FROM observations WHERE trace_id = '$trace_id' FORMAT TabSeparated")
+  IFS=$'\t' read -r ws_status ws_errors ws_output <<<"$ws_completed"
+  [[ "$ws_status" == "1" && "$ws_errors" == "0" && "$ws_output" == "1" ]] || fail "Responses WebSocket $label terminal mismatch: completed=$ws_status errors=$ws_errors output=$ws_output"
+done
+
+WS_SWITCH_TURN_ONE_TRACE_ID=$(ws_trace_id_for_turn "$WS_SWITCH_CONNECTION_ID" 1)
+assert_exact_root_generation "Responses WebSocket pre-switch turn" "$WS_SWITCH_TURN_ONE_TRACE_ID"
+WS_SWITCH_TURN_ONE_STATE=$(clickhouse_query "SELECT countIf(name = 'model.request' AND JSONExtractString(metadata['attributes'], 'modeltrace.stream.status') = 'completed') FROM observations WHERE trace_id = '$WS_SWITCH_TURN_ONE_TRACE_ID' FORMAT TabSeparated")
+[[ "$WS_SWITCH_TURN_ONE_STATE" == "1" ]] || fail "Responses WebSocket pre-switch turn did not complete"
+WS_SWITCH_TURN_TWO_TRACE_COUNT=$(clickhouse_query "SELECT count() FROM traces WHERE coalesce(nullIf(JSONExtractString(metadata['attributes'], 'langfuse.trace.metadata.connection_request_id'), ''), metadata['connection_request_id']) = '$WS_SWITCH_CONNECTION_ID' AND if(JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index') > 0, JSONExtractInt(metadata['attributes'], 'langfuse.trace.metadata.turn_index'), toInt32OrZero(metadata['turn_index'])) = 2 FORMAT TabSeparated")
+[[ "$WS_SWITCH_TURN_TWO_TRACE_COUNT" == "0" ]] || fail "Responses WebSocket post-disable turn unexpectedly exported $WS_SWITCH_TURN_TWO_TRACE_COUNT traces"
+
+WS_DISCONNECT_TRACE_ID=$(ws_trace_id_for_turn "$WS_DISCONNECT_CONNECTION_ID" 1)
+assert_exact_root_generation "Responses WebSocket disconnect" "$WS_DISCONNECT_TRACE_ID"
+assert_stream_terminal "Responses WebSocket disconnect" "$WS_DISCONNECT_TRACE_ID" "client_disconnected" "e2e ws disconnect partial"
 
 # 8.6 配置切换边界：在途 Trace 使用旧快照完成；关闭后的新请求不落 Trace。
 HOLD_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE metadata['request_id'] = '$HOLD_REQUEST_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
@@ -973,6 +1205,13 @@ SENSITIVE_HITS=$(clickhouse_query "SELECT count() FROM traces t INNER JOIN obser
 EXTRA_SENSITIVE_HITS=$(clickhouse_query "SELECT count() FROM traces t INNER JOIN observations o ON o.trace_id = t.id WHERE position(concat(ifNull(t.input, ''), ifNull(t.output, ''), toString(t.metadata), ifNull(o.input, ''), ifNull(o.output, ''), toString(o.metadata)), '$ALL_FAIL_APIKEY') > 0 OR position(concat(ifNull(t.input, ''), ifNull(t.output, ''), toString(t.metadata), ifNull(o.input, ''), ifNull(o.output, ''), toString(o.metadata)), '$HOLD_APIKEY') > 0 OR position(concat(ifNull(t.input, ''), ifNull(t.output, ''), toString(t.metadata), ifNull(o.input, ''), ifNull(o.output, ''), toString(o.metadata)), 'e2e-all-fail-upstream-1') > 0 OR position(concat(ifNull(t.input, ''), ifNull(t.output, ''), toString(t.metadata), ifNull(o.input, ''), ifNull(o.output, ''), toString(o.metadata)), 'e2e-all-fail-upstream-2') > 0 OR position(concat(ifNull(t.input, ''), ifNull(t.output, ''), toString(t.metadata), ifNull(o.input, ''), ifNull(o.output, ''), toString(o.metadata)), 'e2e-hold-upstream') > 0 FORMAT TabSeparated")
 TOTAL_SENSITIVE_HITS=$((SENSITIVE_HITS + EXTRA_SENSITIVE_HITS))
 [[ "$TOTAL_SENSITIVE_HITS" == "0" ]] || fail "Langfuse stored $TOTAL_SENSITIVE_HITS observations containing a credential or media canary"
+
+if [[ "${RUN_PROTOCOL_MATRIX:-false}" == "true" ]]; then
+  log "running real protocol matrix as a required full-scale acceptance gate"
+  TOKEN="$TOKEN" REPO_ROOT="$REPO_ROOT" RUN_ID="$RUN_ID-matrix" bash "$SKILL_DIR/scripts/run_protocol_matrix.sh"
+  log "protocol matrix passed as a required full-scale acceptance gate"
+fi
+
 
 # 9. 输出
 echo "$TRACE_ID"

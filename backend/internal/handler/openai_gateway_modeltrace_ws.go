@@ -123,6 +123,18 @@ func (t *openAIWSTraceTurns) observeClientWrite(turn int, payload []byte, writeE
 	}
 }
 
+func (t *openAIWSTraceTurns) beginAttempt(turn int, metadata recording.AttemptMetadata) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	turnTrace := t.activeTurns[turn]
+	t.mu.Unlock()
+	if turnTrace != nil {
+		turnTrace.BeginAttempt(metadata)
+	}
+}
+
 func (t *openAIWSTraceTurns) finish(turn int, result *service.OpenAIForwardResult, turnErr error) {
 	if t == nil {
 		return

@@ -1,4 +1,3 @@
-version: "2.4"
 
 # =============================================================================
 # Sub2API Docker Compose - Local Directory Version
@@ -7,18 +6,25 @@ version: "2.4"
 # volumes, making it easy to migrate the entire deployment by simply copying
 # the deploy directory.
 #
-# Quick Start:
-#   1. Copy .env.example to .env and configure
+# Quick Start (run from this directory):
+#   1. Create a local, untracked environment file with fresh secrets:
+#      umask 077 && cp .env.example .env && {
+#        printf '\nPOSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)";
+#        printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)";
+#        printf 'TOTP_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)";
+#      } >> .env
 #   2. mkdir -p data postgres_data redis_data
-#   3. docker-compose -f docker-compose.local.yml up -d
-#   4. Check logs: docker-compose -f docker-compose.local.yml logs -f sub2api
+#   3. docker compose -f sub2api-compose.yml up --build -d
+#   4. docker compose -f sub2api-compose.yml logs -f sub2api
 #   5. Access: http://localhost:8080
 #
 # Migration to New Server:
-#   1. docker-compose -f docker-compose.local.yml down
-#   2. tar czf sub2api-deploy.tar.gz deploy/
-#   3. Transfer to new server and extract
-#   4. docker-compose -f docker-compose.local.yml up -d
+#   1. Stop services: docker compose -f sub2api-compose.yml down
+#   2. Transfer the full source checkout and the untracked .env through a
+#      secure channel; do not add .env to source control.
+#   3. From .local-deploy on the new server: docker compose -f
+#      sub2api-compose.yml up --build -d
+# The application image is built from the transferred source checkout.
 # =============================================================================
 
 services:
@@ -26,7 +32,10 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: sub2api:modeltrace-61d6389
+    image: sub2api:modeltrace-local
+    build:
+      context: ..
+      dockerfile: .local-deploy/Dockerfile.modeltrace
     container_name: sub2api
     restart: unless-stopped
     ulimits:
@@ -116,6 +125,9 @@ services:
 
       # =======================================================================
       # Model Request Tracing (Langfuse OTLP)
+      # The default deployment only joins sub2api-network. When tracing is
+      # enabled, MODEL_TRACING_ENDPOINT must be reachable from that network
+      # (for example, a public endpoint or an operator-provided network overlay).
       # =======================================================================
       - MODEL_TRACING_ENABLED=${MODEL_TRACING_ENABLED:-false}
       - MODEL_TRACING_ENDPOINT=${MODEL_TRACING_ENDPOINT:-}
@@ -194,7 +206,6 @@ services:
         condition: service_healthy
     networks:
       - sub2api-network
-      - langfuse-network
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s
@@ -271,12 +282,8 @@ services:
       retries: 5
       start_period: 5s
 
-# =============================================================================
-# Networks
-# =============================================================================
+# The default deployment has no external-network prerequisite. PostgreSQL,
+# Redis, and Sub2API share this project-managed bridge network.
 networks:
   sub2api-network:
     driver: bridge
-  langfuse-network:
-    external: true
-    name: sub2api-langfuse

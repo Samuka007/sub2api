@@ -116,6 +116,8 @@ backend/data/
 backend/config.yaml
 deploy/config.yaml
 backend/.installed
+.local-deploy/.env
+.local-deploy/data/config.yaml
 
 # ===================
 # 其他

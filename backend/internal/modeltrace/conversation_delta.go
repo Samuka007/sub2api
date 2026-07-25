@@ -40,15 +40,13 @@ func ExtractConversationDelta(sessionID, turnID string, input, output []byte, ex
 	}
 
 	compact := false
-	if existing != nil {
-		for id, name := range existing {
-			if !isConversationContentEvent(name) {
-				continue
-			}
-			if _, ok := inputIDs[id]; !ok {
-				compact = true
-				break
-			}
+	for id, name := range existing {
+		if !isConversationContentEvent(name) {
+			continue
+		}
+		if _, ok := inputIDs[id]; !ok {
+			compact = true
+			break
 		}
 	}
 
@@ -272,9 +270,9 @@ func extractConversationText(value gjson.Result) string {
 			continue
 		}
 		if b.Len() > 0 {
-			b.WriteByte('\n')
+			_ = b.WriteByte('\n')
 		}
-		b.WriteString(text)
+		_, _ = b.WriteString(text)
 	}
 	if b.Len() > 0 {
 		return b.String()

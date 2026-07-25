@@ -24,6 +24,7 @@ docker rm -f \
 log "removing volumes"
 docker volume rm -f \
   sub2api-e2e-data \
+  langfuse_langfuse_postgres_data langfuse_langfuse_clickhouse_data langfuse_langfuse_clickhouse_logs langfuse_langfuse_minio_data langfuse_langfuse_redis_data \
   langfuse_postgres_data langfuse_clickhouse_data langfuse_clickhouse_logs langfuse_minio_data langfuse_redis_data \
   sub2api-langfuse_postgres_data sub2api-langfuse_clickhouse_data sub2api-langfuse_clickhouse_logs sub2api-langfuse_minio_data sub2api-langfuse_redis_data \
   >/dev/null 2>&1 || true

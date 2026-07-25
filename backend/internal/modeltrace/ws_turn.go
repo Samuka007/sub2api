@@ -45,6 +45,7 @@ type ResponsesWSTurn struct {
 	output      bytes.Buffer
 	outputBytes int
 	endOnce     sync.Once
+	attempt     recording.Attempt
 }
 
 // StartResponsesWSTurn starts a new root for one accepted response.create. A
@@ -75,6 +76,7 @@ func (m *Manager) StartResponsesWSTurn(parent context.Context, metadata Response
 		input = input[:cfg.PromptMaxBytes]
 	}
 	recorder := newTraceRecorder(ctx, tracer, metadata.Identity, cfg.PromptMaxBytes, cfg.ResponseMaxBytes, policy, generation)
+	recorder.setTraceCorrelation(metadata.TurnRequestID, metadata.SessionID)
 	recorder.ctx = recording.WithRecorder(ctx, recorder)
 	recorder.BeginStream()
 	turn := &ResponsesWSTurn{
@@ -93,6 +95,19 @@ func (t *ResponsesWSTurn) Context() context.Context {
 		return context.Background()
 	}
 	return t.recorder.ctx
+}
+
+// BeginAttempt records the actual upstream WebSocket send as this turn's direct Generation child.
+func (t *ResponsesWSTurn) BeginAttempt(metadata recording.AttemptMetadata) {
+	if t == nil || t.recorder == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.attempt != nil {
+		return
+	}
+	t.attempt = recording.BeginAttempt(t.recorder.ctx, metadata, t.input)
 }
 
 // ObserveClientWrite records only frames successfully written to the client.
@@ -125,24 +140,36 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 	t.endOnce.Do(func() {
 		defer t.generation.Release()
 		t.recorder.EndStream(recording.StreamOutcome{Status: recording.StreamStatus(status), ErrorStage: errorStage, Err: err})
-		t.recorder.FinishRequest()
-		stream := t.recorder.streamSnapshot(false)
-		if stream.status == "" {
-			stream.status = streamStatusCompleted
-		}
 
 		t.mu.Lock()
 		output := bytes.Clone(t.output.Bytes())
 		outputBytes := t.outputBytes
+		attempt := t.attempt
 		t.mu.Unlock()
 
+		stream := t.recorder.streamSnapshot(false)
+		if stream.status == "" {
+			stream.status = streamStatusCompleted
+		}
+		if attempt != nil {
+			attemptErr := err
+			if attemptErr == nil && stream.status != streamStatusCompleted {
+				attemptErr = fmt.Errorf("websocket turn %s", stream.status)
+			}
+			attempt.End(recording.AttemptResult{Output: output, HTTPStatus: http.StatusOK, Err: attemptErr})
+		}
+		t.recorder.FinishRequest()
+
+		requestID, sessionID := t.recorder.traceCorrelation()
 		metadataJSON, _ := json.Marshal(map[string]any{
-			"connection_request_id": t.metadata.ConnectionRequestID,
-			"turn_request_id":       t.metadata.TurnRequestID,
+			"connection_request_id": scrubURLsInString(t.metadata.ConnectionRequestID),
+			"turn_request_id":       scrubURLsInString(t.metadata.TurnRequestID),
+			"request_id":            requestID,
 			"turn_index":            t.metadata.TurnIndex,
 			"api_key_id":            t.metadata.Identity.APIKeyID,
 			"user_id":               t.metadata.Identity.UserID,
 			"group_id":              t.metadata.Identity.GroupID,
+			"session_id":            sessionID,
 		})
 		attrs := []attribute.KeyValue{
 			attribute.String("langfuse.trace.name", rootSpanName),
@@ -156,8 +183,11 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			attribute.String("url.path", t.metadata.Path),
 			attribute.String(streamStatusAttribute, stream.status),
 		}
+		if requestID != "" {
+			attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
+		}
 		if t.metadata.Model != "" {
-			attrs = append(attrs, attribute.String("gen_ai.request.model", scrubURLsInString(t.metadata.Model)))
+			attrs = append(attrs, attribute.String("modeltrace.client.request.model", scrubURLsInString(t.metadata.Model)))
 		}
 		if t.metadata.Identity.UserID > 0 {
 			attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(t.metadata.Identity.UserID, 10)))
@@ -168,7 +198,6 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 		if t.metadata.Identity.GroupID > 0 {
 			attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", t.metadata.Identity.GroupID))
 		}
-		sessionID := scrubURLsInString(t.metadata.SessionID)
 		if sessionID != "" {
 			attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
 		}
@@ -188,9 +217,8 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			t.span.SetStatus(codes.Error, fmt.Sprintf("websocket turn %s", stream.status))
 		}
 		if sessionID != "" {
-			cfg := t.generation.Config()
 			spanCtx := trace.ContextWithSpan(context.Background(), t.span)
-			recordConversationTrack(spanCtx, t.generation.Tracer(), cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, sessionID, t.input, output, nil)
+			enqueueConversationTrack(spanCtx, t.generation, sessionID, t.input, output, nil)
 		}
 		t.span.End()
 	})

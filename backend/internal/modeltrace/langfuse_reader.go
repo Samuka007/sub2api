@@ -13,7 +13,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const defaultLangfuseReadTimeout = 5 * time.Second
+const (
+	defaultLangfuseReadTimeout = 5 * time.Second
+	maxLangfuseReadPages       = 10
+	maxLangfuseReadTraces      = 100
+)
 
 // LangfuseReader loads conversation message IDs from the Langfuse Public API.
 type LangfuseReader struct {
@@ -44,12 +48,14 @@ func langfusePublicBaseURL(endpoint string) string {
 		return ""
 	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" {
 		return ""
 	}
+	parsed.User = nil
 	parsed.Path = ""
 	parsed.RawPath = ""
 	parsed.RawQuery = ""
+	parsed.ForceQuery = false
 	parsed.Fragment = ""
 	return strings.TrimRight(parsed.String(), "/")
 }
@@ -88,9 +94,8 @@ func (r *LangfuseReader) ListChatMessageIDs(ctx context.Context, sessionID strin
 }
 
 func (r *LangfuseReader) listTraceIDs(ctx context.Context, sessionID string) ([]string, error) {
-	page := 1
 	var out []string
-	for {
+	for page := 1; page <= maxLangfuseReadPages; page++ {
 		q := url.Values{}
 		q.Set("sessionId", sessionID)
 		q.Set("page", fmt.Sprintf("%d", page))
@@ -112,15 +117,17 @@ func (r *LangfuseReader) listTraceIDs(ctx context.Context, sessionID string) ([]
 		}
 		for _, item := range resp.Data {
 			if id := strings.TrimSpace(item.ID); id != "" {
+				if len(out) >= maxLangfuseReadTraces {
+					return nil, fmt.Errorf("langfuse public api trace count exceeds %d", maxLangfuseReadTraces)
+				}
 				out = append(out, id)
 			}
 		}
 		if page >= resp.Meta.TotalPages || len(resp.Data) == 0 {
-			break
+			return out, nil
 		}
-		page++
 	}
-	return out, nil
+	return nil, fmt.Errorf("langfuse public api trace pagination exceeds %d pages", maxLangfuseReadPages)
 }
 
 type langfuseObservation struct {
@@ -129,9 +136,8 @@ type langfuseObservation struct {
 }
 
 func (r *LangfuseReader) listObservations(ctx context.Context, traceID string) ([]langfuseObservation, error) {
-	page := 1
 	var out []langfuseObservation
-	for {
+	for page := 1; page <= maxLangfuseReadPages; page++ {
 		q := url.Values{}
 		q.Set("traceId", traceID)
 		q.Set("page", fmt.Sprintf("%d", page))
@@ -159,11 +165,10 @@ func (r *LangfuseReader) listObservations(ctx context.Context, traceID string) (
 			})
 		}
 		if page >= resp.Meta.TotalPages || len(resp.Data) == 0 {
-			break
+			return out, nil
 		}
-		page++
 	}
-	return out, nil
+	return nil, fmt.Errorf("langfuse public api observation pagination exceeds %d pages", maxLangfuseReadPages)
 }
 
 func messageIDFromMetadata(raw json.RawMessage) string {
@@ -197,7 +202,7 @@ func (r *LangfuseReader) getJSON(ctx context.Context, pathQuery string) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, err

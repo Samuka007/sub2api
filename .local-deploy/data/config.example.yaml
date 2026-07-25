@@ -1,0 +1,43 @@
+# Example local configuration only. It is not consumed by Docker Compose.
+# With AUTO_SETUP=true, the application writes
+# .local-deploy/data/config.yaml at first startup from environment variables.
+# If you need a file-based override, copy this file to config.yaml, supply
+# non-empty secrets locally, and keep that file untracked.
+# Do not place credentials or production JWT material in this example.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  mode: release
+
+database:
+  host: postgres
+  port: 5432
+  user: sub2api
+  password: ""
+  dbname: sub2api
+  sslmode: disable
+
+redis:
+  host: redis
+  port: 6379
+  username: ""
+  password: ""
+  db: 0
+  enable_tls: false
+
+jwt:
+  secret: ""
+  expire_hour: 24
+
+default:
+  user_concurrency: 5
+  user_balance: 0
+  api_key_prefix: sk-
+  rate_multiplier: 1
+
+rate_limit:
+  requests_per_minute: 60
+  burst_size: 10
+
+timezone: Asia/Shanghai

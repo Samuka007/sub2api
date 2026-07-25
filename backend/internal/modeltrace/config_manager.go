@@ -424,7 +424,7 @@ func publicFromSnapshot(snapshot ConfigSnapshot) PublicConfig {
 	value := snapshot.Config
 	return PublicConfig{
 		Configured: snapshot.Source == ConfigSourceRuntime, Enabled: value.Enabled,
-		Endpoint: value.Endpoint, PublicKey: value.PublicKey, HasSecret: value.SecretKey != "",
+		Endpoint: sanitizeEndpointForDisplay(value.Endpoint), PublicKey: value.PublicKey, HasSecret: value.SecretKey != "",
 		PromptMaxBytes: value.PromptMaxBytes, ResponseMaxBytes: value.ResponseMaxBytes,
 		MediaMaxBytes: value.MediaMaxBytes, CaptureMediaContent: value.CaptureMediaContent,
 		Source: snapshot.Source, ConfigVersion: snapshot.ConfigVersion,
@@ -434,7 +434,7 @@ func publicFromSnapshot(snapshot ConfigSnapshot) PublicConfig {
 
 func publicFromRuntime(stored RuntimeConfig) PublicConfig {
 	return PublicConfig{
-		Configured: true, Enabled: stored.Enabled, Endpoint: stored.Endpoint, PublicKey: stored.PublicKey,
+		Configured: true, Enabled: stored.Enabled, Endpoint: sanitizeEndpointForDisplay(stored.Endpoint), PublicKey: stored.PublicKey,
 		HasSecret: stored.SecretKeyEncrypted != "", PromptMaxBytes: stored.PromptMaxBytes,
 		ResponseMaxBytes: stored.ResponseMaxBytes, MediaMaxBytes: stored.MediaMaxBytes,
 		CaptureMediaContent: stored.CaptureMediaContent, Source: ConfigSourceRuntime,
@@ -443,8 +443,12 @@ func publicFromRuntime(stored RuntimeConfig) PublicConfig {
 }
 
 func normalizeConfig(value config.ModelTracingConfig) (config.ModelTracingConfig, bool) {
+	value.Endpoint = strings.TrimSpace(value.Endpoint)
 	value.PromptMaxBytes, value.ResponseMaxBytes, value.MediaMaxBytes = boundedSizes(value)
 	if !value.Enabled {
+		// Disabled snapshots cannot start an exporter. Canonicalize an old
+		// persisted endpoint so it cannot be reflected by a later public read.
+		value.Endpoint = sanitizeEndpointForDisplay(value.Endpoint)
 		return value, true
 	}
 	if ValidateEndpoint(value.Endpoint) != nil || value.PublicKey == "" || value.SecretKey == "" {

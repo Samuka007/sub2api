@@ -77,7 +77,7 @@ type TestingEntryFacts struct {
 
 func TestingResolveEntryFacts(path, contentType string, body []byte) TestingEntryFacts {
 	facts := resolveEntryFacts(path, contentType, body)
-	return TestingEntryFacts{Protocol: facts.Protocol, ClientModel: facts.ClientModel}
+	return TestingEntryFacts(facts)
 }
 
 func TestingGenerationFingerprint(cfg config.ModelTracingConfig, source string, version int64) string {

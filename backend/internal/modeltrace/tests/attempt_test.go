@@ -72,7 +72,7 @@ func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 		require.NoError(t, err)
 		attempt := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{
 			Provider: "anthropic", Operation: "chat", ClientModel: "gpt-4", UpstreamModel: "claude-secure",
-			AccountID: 42, Endpoint: "https://user:password@anthropic.example/v1/messages?api_key=url-secret",
+			AccountID: 42, Endpoint: "https://user:password@anthropic.example/custom-base-path-canary/v1/messages?api_key=url-secret",
 		}, []byte(`{"model":"claude-secure","authorization":"Bearer upstream-secret"}`))
 		attempt.End(recording.AttemptResult{
 			Output: []byte(`{"access_token":"response-secret","content":"ok"}`), HTTPStatus: http.StatusOK,
@@ -88,6 +88,7 @@ func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 		stringAttribute(t, rootAttrs, "langfuse.observation.output"),
 		stringAttribute(t, attemptAttrs, "langfuse.observation.input"),
 		stringAttribute(t, attemptAttrs, "langfuse.observation.output"),
+		stringAttribute(t, attemptAttrs, "langfuse.observation.metadata"),
 		stringAttribute(t, attemptAttrs, "server.address"),
 	}, "\n")
 	for _, secret := range []string{"client-secret", "private-image-bytes", media, "password", "url-secret", "upstream-secret", "response-secret", "client-response-secret"} {
@@ -95,7 +96,9 @@ func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 	}
 	require.Contains(t, captured, modeltrace.TestingRedactedValue)
 	require.Contains(t, captured, `"fingerprint":"sha256:`)
-	require.Contains(t, captured, "https://anthropic.example/v1/messages")
+	require.Equal(t, "anthropic.example", stringAttribute(t, attemptAttrs, "server.address"))
+	require.Contains(t, captured, "anthropic.example")
+	require.NotContains(t, captured, "custom-base-path-canary")
 }
 
 func TestModelTraceRootMultipartDefaultOmitsFileContent(t *testing.T) {

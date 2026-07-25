@@ -49,8 +49,8 @@ pnpm --dir "$REPO_ROOT/frontend" run test:run
 log "phase 6/9: building production backend and frontend artifacts"
 make -C "$REPO_ROOT" build
 
-log "phase 7/9: running real Langfuse full-scale black-box suite"
-BATCH_ITEM_COUNT=200 bash "$SCRIPT_DIR/run_e2e.sh"
+log "phase 7/9: running real Langfuse full-scale black-box suite and protocol matrix"
+BATCH_ITEM_COUNT=200 RUN_PROTOCOL_MATRIX=true bash "$SCRIPT_DIR/run_e2e.sh"
 
 log "phase 8/9: recording request-path allocation and latency baseline"
 (

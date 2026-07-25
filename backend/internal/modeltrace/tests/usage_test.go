@@ -142,6 +142,59 @@ func TestModelTraceUsageBelongsOnlyToSuccessfulAttempt(t *testing.T) {
 	}
 }
 
+func TestModelTraceAttemptsCarryRequestIdentityAndSessionWithAndWithoutUsage(t *testing.T) {
+	manager, fake := newUsageTestManager(t)
+	router := gin.New()
+	router.POST("/v1/responses", manager.CandidateMiddleware(), installUsageTestIdentity(), func(c *gin.Context) {
+		_, err := c.GetRawData()
+		require.NoError(t, err)
+
+		used := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{
+			Provider: "openai", Operation: "responses", UpstreamModel: "gpt-used", AccountID: 29,
+		}, []byte(`{"model":"gpt-used"}`))
+		used.End(recording.AttemptResult{HTTPStatus: http.StatusOK, Output: []byte(`{"id":"resp_used"}`)})
+		recording.RecordUsage(c.Request.Context(), recording.UsageFacts{
+			Known: true, RequestID: "usage-used", AccountID: 29, InputTokens: 3, OutputTokens: 2,
+		})
+
+		failed := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{
+			Provider: "openai", Operation: "responses", UpstreamModel: "gpt-failed", AccountID: 30,
+		}, []byte(`{"model":"gpt-failed"}`))
+		failed.End(recording.AttemptResult{HTTPStatus: http.StatusBadGateway, Output: []byte(`{"error":"failed"}`)})
+
+		withoutUsage := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{
+			Provider: "openai", Operation: "responses", UpstreamModel: "gpt-no-usage", AccountID: 31,
+		}, []byte(`{"model":"gpt-no-usage"}`))
+		withoutUsage.End(recording.AttemptResult{HTTPStatus: http.StatusOK, Output: []byte(`{"id":"resp_no_usage"}`)})
+		c.JSON(http.StatusOK, gin.H{"id": "resp_client"})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-test","session_id":"attempt-session"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Client-Request-ID", "attempt-request")
+	router.ServeHTTP(httptest.NewRecorder(), request)
+	shutdownUsageTestManager(t, manager)
+
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	spans := exportedSpans(requests)
+	require.Len(t, spans, 4)
+	for _, name := range []string{"upstream.attempt.1", "upstream.attempt.2", "upstream.attempt.3"} {
+		attrs := attributesByKey(spanNamed(t, spans, name).Attributes)
+		require.Equal(t, "attempt-request", stringAttribute(t, attrs, "langfuse.trace.metadata.request_id"), name)
+		require.Equal(t, "73", stringAttribute(t, attrs, "langfuse.user.id"), name)
+		require.Equal(t, int64(71), intAttribute(t, attrs, "langfuse.trace.metadata.api_key_id"), name)
+		require.Equal(t, int64(19), intAttribute(t, attrs, "langfuse.trace.metadata.group_id"), name)
+		require.Equal(t, "attempt-session", stringAttribute(t, attrs, "langfuse.session.id"), name)
+	}
+
+	require.Equal(t, int64(3), intAttribute(t, attributesByKey(spanNamed(t, spans, "upstream.attempt.1").Attributes), "gen_ai.usage.input_tokens"))
+	for _, name := range []string{"upstream.attempt.2", "upstream.attempt.3"} {
+		attrs := attributesByKey(spanNamed(t, spans, name).Attributes)
+		require.NotContains(t, attrs, "gen_ai.usage.input_tokens", name)
+	}
+}
+
 func TestModelTraceDetachedUsageUpdatesSuccessfulAttemptAfterRequestFinish(t *testing.T) {
 	manager, fake := newUsageTestManager(t)
 	var detached context.Context

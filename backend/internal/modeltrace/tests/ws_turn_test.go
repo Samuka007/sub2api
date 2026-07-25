@@ -1,13 +1,10 @@
 package modeltrace_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
-	"io"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -118,21 +115,17 @@ func TestModelTraceResponsesWebSocketDisconnect(t *testing.T) {
 	require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, root.Status.Code)
 }
 
-func TestModelTraceResponsesWebSocketHTTPAttempt(t *testing.T) {
+func TestModelTraceResponsesWebSocketAttempt(t *testing.T) {
 	manager, fake := newWSTurnTestManager(t)
 	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
 		Identity:            servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
 		ConnectionRequestID: "connection-http", TurnRequestID: "http-turn-1",
 		TurnIndex: 1, Path: "/v1/responses", Model: "gpt-test",
 	}, []byte(`{"type":"response.create","model":"gpt-test"}`))
-	attempt := recording.BeginAttempt(turn.Context(), recording.AttemptMetadata{
+	turn.BeginAttempt(recording.AttemptMetadata{
 		Provider: "grok", Operation: "responses", ClientModel: "gpt-test", UpstreamModel: "grok-test",
 		AccountID: 29, Endpoint: "https://api.x.ai/v1/responses",
-	}, []byte(`{"model":"grok-test"}`))
-	body := attempt.ObserveResponse(http.StatusOK, io.NopCloser(bytes.NewBufferString(`{"id":"resp_http"}`)))
-	_, err := io.ReadAll(body)
-	require.NoError(t, err)
-	require.NoError(t, body.Close())
+	})
 	turn.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_http"}}`), nil)
 	turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
 
@@ -145,6 +138,7 @@ func TestModelTraceResponsesWebSocketHTTPAttempt(t *testing.T) {
 	upstream := spanNamed(t, spans, "upstream.attempt.1")
 	require.Equal(t, root.TraceId, upstream.TraceId)
 	require.Equal(t, root.SpanId, upstream.ParentSpanId)
+	require.Contains(t, stringAttribute(t, attributesByKey(upstream.Attributes), "langfuse.observation.output"), "resp_http")
 }
 
 func TestModelTraceResponsesWebSocketInputCaptureIsBounded(t *testing.T) {
