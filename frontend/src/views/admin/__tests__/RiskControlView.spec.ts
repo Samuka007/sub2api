@@ -105,6 +105,7 @@ const baseConfig = (): ContentModerationConfig => ({
     type: 'all',
     models: [],
   },
+  trusted_api_keys: [],
 })
 
 const runtimeStatus = () => ({
@@ -228,6 +229,7 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
     await findButtonByText(wrapper, 'admin.riskControl.tabs.scope').trigger('click')
     await findButtonByText(wrapper, 'admin.riskControl.modelFilterInclude').trigger('click')
     await wrapper.get('[data-test="model-filter-input"]').setValue('gpt-5.5, gpt-5.4')
@@ -239,6 +241,47 @@ describe('admin RiskControlView', () => {
         type: 'include',
         models: ['gpt-5.5', 'gpt-5.4'],
       },
+    }))
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('saves scoped trusted API keys in observe-only mode', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.addTrustedAPIKey').trigger('click')
+    await wrapper.get('[data-test="trusted-api-key-id-0"]').setValue('42')
+    await wrapper.get('[data-test="trusted-api-key-reason-0"]').setValue('administrator maintenance')
+    await wrapper.get('[data-test="trusted-api-key-models-0"]').setValue('gpt-5.6-sol\ncodex-auto-review')
+    await wrapper.get('[data-test="trusted-api-key-endpoints-0"]').setValue('/v1/responses')
+    await wrapper.get('[data-test="trusted-api-key-expiry-0"]').setValue('')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      trusted_api_keys: [{
+        api_key_id: 42,
+        models: ['gpt-5.6-sol', 'codex-auto-review'],
+        endpoints: ['/v1/responses'],
+        expires_at: undefined,
+        reason: 'administrator maintenance',
+      }],
     }))
     expect(showError).not.toHaveBeenCalled()
   })
@@ -261,6 +304,7 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
     await findButtonByText(wrapper, 'admin.riskControl.tabs.riskThresholds').trigger('click')
     await wrapper.get('[data-test="risk-threshold-sexual"]').setValue('72')
     await wrapper.get('[data-test="risk-threshold-harassment"]').setValue('99')
@@ -274,6 +318,105 @@ describe('admin RiskControlView', () => {
       }),
     }))
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('restores trusted key settings when the dialog is cancelled', async () => {
+    const config = baseConfig()
+    config.trusted_api_keys = [{
+      api_key_id: 42,
+      models: ['gpt-5.6-sol'],
+      endpoints: ['/v1/responses'],
+      reason: 'administrator maintenance',
+    }]
+    getConfig.mockResolvedValue(config)
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await wrapper.get('[aria-label="admin.riskControl.removeTrustedAPIKey"]').trigger('click')
+    await findButtonByText(wrapper, 'common.cancel').trigger('click')
+
+    const setupState = (wrapper.vm.$ as unknown as { setupState: { configForm: { trusted_api_keys: unknown[] } } }).setupState
+    expect(setupState.configForm.trusted_api_keys).toHaveLength(1)
+    expect(updateConfig).not.toHaveBeenCalled()
+  })
+
+  it('rejects trusted key scopes that exceed the server limit', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.addTrustedAPIKey').trigger('click')
+    await wrapper.get('[data-test="trusted-api-key-id-0"]').setValue('42')
+    await wrapper.get('[data-test="trusted-api-key-reason-0"]').setValue('administrator maintenance')
+    await wrapper.get('[data-test="trusted-api-key-models-0"]').setValue(
+      Array.from({ length: 101 }, (_, index) => `model-${index}`).join('\n')
+    )
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('trustedAPIKeyScopeTooMany'))
+    expect(updateConfig).not.toHaveBeenCalled()
+  })
+
+  it('marks expired trusted keys as inactive', async () => {
+    const config = baseConfig()
+    config.trusted_api_keys = [{
+      api_key_id: 42,
+      models: [],
+      endpoints: [],
+      expires_at: '2020-01-01T00:00:00Z',
+      reason: 'expired maintenance window',
+    }]
+    getConfig.mockResolvedValue(config)
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+
+    expect(wrapper.get('[data-test="trusted-api-key-status-0"]').text()).toContain('trustedAPIKeyExpired')
   })
 
   it('describes worker runtime as async audit and pre-block record processing', async () => {

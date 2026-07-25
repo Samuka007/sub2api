@@ -6,6 +6,9 @@
 .git
 .gitignore
 .gitattributes
+.codegraph/
+.pnpm-store/
+.vite/
 
 # Documentation
 *.md
@@ -37,6 +40,7 @@ node_modules/
 
 # Go build cache (will be built in container)
 backend/vendor/
+backend/bin/
 
 # Test files
 *_test.go
@@ -48,6 +52,15 @@ coverage/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ecdsa
+id_ed25519
+id_dsa
+*.ppk
 
 # Local config
 config.yaml

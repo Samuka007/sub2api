@@ -279,6 +279,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/model-iq',
+    name: 'ModelIq',
+    component: () => import('@/views/user/ModelIqView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'GPT Model IQ Ranking',
+      titleKey: 'modelIq.title',
+      descriptionKey: 'modelIq.description'
+    }
+  },
+  {
     path: '/subscriptions',
     name: 'Subscriptions',
     component: () => import('@/views/user/SubscriptionsView.vue'),
@@ -416,6 +428,17 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/model-radar',
+    name: 'AdminModelRadar',
+    component: () => import('@/views/admin/ModelRadarView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Model Radar',
+      titleKey: 'nav.modelRadar'
+    }
+  },
+  {
     path: '/admin/audit-logs',
     name: 'AdminAuditLogs',
     component: () => import('@/views/admin/AuditLogView.vue'),
@@ -512,6 +535,18 @@ const routes: RouteRecordRaw[] = [
       title: 'Account Management',
       titleKey: 'admin.accounts.title',
       descriptionKey: 'admin.accounts.description'
+    }
+  },
+  {
+    path: '/admin/plus-quota-automation',
+    name: 'AdminPlusQuotaAutomation',
+    component: () => import('@/views/admin/PlusQuotaAutomationView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Plus Quota Automation',
+      titleKey: 'admin.plusQuotaAutomation.title',
+      descriptionKey: 'admin.plusQuotaAutomation.description'
     }
   },
   {

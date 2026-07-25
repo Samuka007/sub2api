@@ -10,6 +10,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 type contentModerationRepository struct {
@@ -18,6 +19,34 @@ type contentModerationRepository struct {
 
 func NewContentModerationRepository(db *sql.DB) service.ContentModerationRepository {
 	return &contentModerationRepository{db: db}
+}
+
+func (r *contentModerationRepository) ExistingAPIKeyIDs(ctx context.Context, apiKeyIDs []int64) ([]int64, error) {
+	if r == nil || r.db == nil || len(apiKeyIDs) == 0 {
+		return []int64{}, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id
+FROM api_keys
+WHERE id = ANY($1)
+  AND deleted_at IS NULL
+`, pq.Array(apiKeyIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	ids := make([]int64, 0, len(apiKeyIDs))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (r *contentModerationRepository) CreateLog(ctx context.Context, log *service.ContentModerationLog) error {
@@ -182,7 +211,7 @@ func (r *contentModerationRepository) CountFlaggedByUserSince(ctx context.Contex
 	if userID <= 0 {
 		return 0, nil
 	}
-	// SQL 中的 'cyber_policy' 字面量须与 service.ContentModerationActionCyberPolicy 保持一致。
+	// SQL 中的 action 字面量须与 service 包中的对应常量保持一致。
 	var count int
 	err := r.db.QueryRowContext(ctx, `
 WITH last_auto_ban AS (
@@ -195,6 +224,7 @@ FROM content_moderation_logs
 WHERE user_id = $1
   AND flagged = TRUE
   AND action <> 'hash_block'
+  AND action <> 'trusted_observe'
   AND ($3::bool IS FALSE OR action <> 'cyber_policy')
   AND created_at >= $2
   AND created_at > COALESCE((SELECT at FROM last_auto_ban), '-infinity'::timestamptz)

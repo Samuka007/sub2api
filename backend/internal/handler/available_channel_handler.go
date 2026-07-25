@@ -67,15 +67,17 @@ type userAvailableGroup struct {
 
 // userSupportedModelPricing 用户可见的定价字段白名单。
 type userSupportedModelPricing struct {
-	BillingMode      string                   `json:"billing_mode"`
-	InputPrice       *float64                 `json:"input_price"`
-	OutputPrice      *float64                 `json:"output_price"`
-	CacheWritePrice  *float64                 `json:"cache_write_price"`
-	CacheReadPrice   *float64                 `json:"cache_read_price"`
-	ImageInputPrice  *float64                 `json:"image_input_price"`
-	ImageOutputPrice *float64                 `json:"image_output_price"`
-	PerRequestPrice  *float64                 `json:"per_request_price"`
-	Intervals        []userPricingIntervalDTO `json:"intervals"`
+	BillingMode         string                   `json:"billing_mode"`
+	InputPrice          *float64                 `json:"input_price"`
+	OutputPrice         *float64                 `json:"output_price"`
+	CacheWritePrice     *float64                 `json:"cache_write_price"`
+	CacheReadPrice      *float64                 `json:"cache_read_price"`
+	ImageInputPrice     *float64                 `json:"image_input_price"`
+	ImageOutputPrice    *float64                 `json:"image_output_price"`
+	PerRequestPrice     *float64                 `json:"per_request_price"`
+	Intervals           []userPricingIntervalDTO `json:"intervals"`
+	ReferenceMultiplier *float64                 `json:"reference_multiplier,omitempty"`
+	ReferenceSource     string                   `json:"reference_source,omitempty"`
 }
 
 // userPricingIntervalDTO 定价区间白名单（去掉内部 ID、SortOrder 等前端不渲染的字段）。
@@ -118,6 +120,12 @@ type userAvailableChannel struct {
 
 // List 列出当前用户可见的「可用渠道」。
 // GET /api/v1/channels/available
+// userGroupPricingModels is the narrow payload used by the API key page popover.
+type userGroupPricingModels struct {
+	GroupID int64                `json:"group_id"`
+	Models  []userSupportedModel `json:"models"`
+}
+
 func (h *AvailableChannelHandler) List(c *gin.Context) {
 	subject, ok := middleware.GetAuthSubjectFromContext(c)
 	if !ok {
@@ -167,6 +175,77 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 			Platforms:   sections,
 		})
 	}
+
+	response.Success(c, out)
+}
+
+// GroupPricing returns only group-to-model pricing for API key hover popovers.
+// It intentionally ignores the available-channels page feature flag.
+// GET /api/v1/channels/group-pricing
+func (h *AvailableChannelHandler) GroupPricing(c *gin.Context) {
+	subject, ok := middleware.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	userGroups, err := h.apiKeyService.GetAvailableGroups(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	allowedGroupIDs := make(map[int64]struct{}, len(userGroups))
+	for i := range userGroups {
+		allowedGroupIDs[userGroups[i].ID] = struct{}{}
+	}
+
+	channels, err := h.channelService.ListAvailable(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	groupModels := make(map[int64][]userSupportedModel, len(userGroups))
+	seen := make(map[int64]map[string]struct{}, len(userGroups))
+	for _, ch := range channels {
+		if ch.Status != service.StatusActive {
+			continue
+		}
+		visibleGroups := filterUserVisibleGroups(ch.Groups, allowedGroupIDs)
+		if len(visibleGroups) == 0 {
+			continue
+		}
+		for _, g := range visibleGroups {
+			platformSet := map[string]struct{}{g.Platform: {}}
+			models := toUserSupportedModels(ch.SupportedModels, platformSet)
+			if len(models) == 0 {
+				continue
+			}
+			if seen[g.ID] == nil {
+				seen[g.ID] = make(map[string]struct{}, len(models))
+			}
+			for _, model := range models {
+				key := model.Platform + ":" + model.Name
+				if _, ok := seen[g.ID][key]; ok {
+					continue
+				}
+				seen[g.ID][key] = struct{}{}
+				groupModels[g.ID] = append(groupModels[g.ID], model)
+			}
+		}
+	}
+
+	out := make([]userGroupPricingModels, 0, len(groupModels))
+	for groupID, models := range groupModels {
+		sort.SliceStable(models, func(i, j int) bool {
+			if models[i].Platform == models[j].Platform {
+				return models[i].Name < models[j].Name
+			}
+			return models[i].Platform < models[j].Platform
+		})
+		out = append(out, userGroupPricingModels{GroupID: groupID, Models: models})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].GroupID < out[j].GroupID })
 
 	response.Success(c, out)
 }
@@ -280,14 +359,16 @@ func toUserPricing(p *service.ChannelModelPricing) *userSupportedModelPricing {
 		billingMode = string(service.BillingModeToken)
 	}
 	return &userSupportedModelPricing{
-		BillingMode:      billingMode,
-		InputPrice:       p.InputPrice,
-		OutputPrice:      p.OutputPrice,
-		CacheWritePrice:  p.CacheWritePrice,
-		CacheReadPrice:   p.CacheReadPrice,
-		ImageInputPrice:  p.ImageInputPrice,
-		ImageOutputPrice: p.ImageOutputPrice,
-		PerRequestPrice:  p.PerRequestPrice,
-		Intervals:        intervals,
+		BillingMode:         billingMode,
+		InputPrice:          p.InputPrice,
+		OutputPrice:         p.OutputPrice,
+		CacheWritePrice:     p.CacheWritePrice,
+		CacheReadPrice:      p.CacheReadPrice,
+		ImageInputPrice:     p.ImageInputPrice,
+		ImageOutputPrice:    p.ImageOutputPrice,
+		PerRequestPrice:     p.PerRequestPrice,
+		Intervals:           intervals,
+		ReferenceMultiplier: p.ReferenceMultiplier,
+		ReferenceSource:     p.ReferenceSource,
 	}
 }

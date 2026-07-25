@@ -95,11 +95,13 @@ type Config struct {
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
+	CodexRadar              CodexRadarConfig              `mapstructure:"codex_radar"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	ModelTracing            ModelTracingConfig            `mapstructure:"model_tracing"`
+	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
 }
 
 // ModelTracingConfig 模型请求 OTEL/Langfuse 追踪配置（默认关闭）。
@@ -168,6 +170,16 @@ type GeminiTierQuotaConfig struct {
 	CooldownMinutes *int   `mapstructure:"cooldown_minutes" json:"cooldown_minutes"`
 }
 
+// CodexRadarConfig controls the server-side Codex Radar model IQ proxy.
+// API tokens are read only by the backend and are never exposed to clients.
+type CodexRadarConfig struct {
+	Enabled  bool          `mapstructure:"enabled"`
+	BaseURL  string        `mapstructure:"base_url"`
+	APIToken string        `mapstructure:"api_token"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
+}
+
 type UpdateConfig struct {
 	// ProxyURL 用于访问 GitHub 的代理地址
 	// 支持 http/https/socks5/socks5h 协议
@@ -192,6 +204,21 @@ type IdempotencyConfig struct {
 	CleanupIntervalSeconds int `mapstructure:"cleanup_interval_seconds"`
 	// CleanupBatchSize 每次清理的最大记录数。
 	CleanupBatchSize int `mapstructure:"cleanup_batch_size"`
+}
+
+// QuotaRecoveryConfig controls the Hermes account-level quota reconciliation
+// runner in both standard and simple run modes. It is disabled by default
+// because checks call upstream APIs with real credentials. Hermes is supported
+// only in single-application-process deployments: its PostgreSQL advisory lock
+// prevents duplicate runners but cannot invalidate runtime blocks across
+// application processes.
+type QuotaRecoveryConfig struct {
+	Enabled         bool `mapstructure:"enabled"`
+	IntervalSeconds int  `mapstructure:"interval_seconds"`
+	BatchSize       int  `mapstructure:"batch_size"` // Database page size; a cycle scans all pages.
+	Concurrency     int  `mapstructure:"concurrency"`
+	TimeoutSeconds  int  `mapstructure:"timeout_seconds"`
+	JitterSeconds   int  `mapstructure:"jitter_seconds"`
 }
 
 type BatchImageConfig struct {
@@ -931,6 +958,8 @@ type GatewayConfig struct {
 	OpenAIScheduler GatewayOpenAISchedulerConfig `mapstructure:"openai_scheduler"`
 	// OpenAIHTTP2: OpenAI HTTP 上游协议策略（默认启用 HTTP/2，可按代理能力回退 HTTP/1.1）
 	OpenAIHTTP2 GatewayOpenAIHTTP2Config `mapstructure:"openai_http2"`
+	// OpenAIProxyStreamCircuit: Responses SSE 代理断流熔断策略。
+	OpenAIProxyStreamCircuit GatewayOpenAIProxyStreamCircuitConfig `mapstructure:"openai_proxy_stream_circuit"`
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
 	ImageConcurrency ImageConcurrencyConfig `mapstructure:"image_concurrency"`
 
@@ -1024,6 +1053,17 @@ type GatewayOpenAIHTTP2Config struct {
 	FallbackWindowSeconds int `mapstructure:"fallback_window_seconds"`
 	// FallbackTTLSeconds: 触发后回退 HTTP/1.1 的持续时间（秒）
 	FallbackTTLSeconds int `mapstructure:"fallback_ttl_seconds"`
+}
+
+// GatewayOpenAIProxyStreamCircuitConfig controls the bounded, in-process
+// proxy-ID circuit used for incomplete OpenAI Responses SSE streams.
+type GatewayOpenAIProxyStreamCircuitConfig struct {
+	// FailureThreshold: 统计窗口内多少次断流后隔离代理。
+	FailureThreshold int `mapstructure:"failure_threshold"`
+	// WindowSeconds: 断流统计窗口（秒）。
+	WindowSeconds int `mapstructure:"window_seconds"`
+	// TTLSeconds: 代理隔离持续时间（秒）。
+	TTLSeconds int `mapstructure:"ttl_seconds"`
 }
 
 // UserMessageQueueConfig 用户消息串行队列配置
@@ -1655,6 +1695,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
 	}
+	if err := viper.BindEnv("codex_radar.api_token", "CODEX_RADAR_API_TOKEN"); err != nil {
+		return nil, fmt.Errorf("bind CODEX_RADAR_API_TOKEN: %w", err)
+	}
 
 	// 默认值
 	setDefaults()
@@ -2054,6 +2097,13 @@ func setDefaults() {
 	viper.SetDefault("batch_image.vertex_batch_prediction_base_url", "")
 	viper.SetDefault("batch_image.vertex_gcs_base_url", "")
 
+	// Codex Radar model IQ proxy
+	viper.SetDefault("codex_radar.enabled", false)
+	viper.SetDefault("codex_radar.base_url", "https://codexradar.com/api/v1/current")
+	viper.SetDefault("codex_radar.api_token", "")
+	viper.SetDefault("codex_radar.timeout", 15*time.Second)
+	viper.SetDefault("codex_radar.cache_ttl", 5*time.Minute)
+
 	// Image storage (async image task result offload to S3-compatible object storage)
 	viper.SetDefault("image_storage.enabled", false)
 	viper.SetDefault("image_storage.region", "auto")
@@ -2175,6 +2225,14 @@ func setDefaults() {
 	viper.SetDefault("idempotency.cleanup_interval_seconds", 60)
 	viper.SetDefault("idempotency.cleanup_batch_size", 500)
 
+	// Hermes account quota recovery. Opt-in because checks contact upstream.
+	viper.SetDefault("quota_recovery.enabled", false)
+	viper.SetDefault("quota_recovery.interval_seconds", 86400)
+	viper.SetDefault("quota_recovery.batch_size", 50)
+	viper.SetDefault("quota_recovery.concurrency", 3)
+	viper.SetDefault("quota_recovery.timeout_seconds", 25)
+	viper.SetDefault("quota_recovery.jitter_seconds", 10)
+
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
@@ -2253,6 +2311,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_http2.fallback_error_threshold", 2)
 	viper.SetDefault("gateway.openai_http2.fallback_window_seconds", 60)
 	viper.SetDefault("gateway.openai_http2.fallback_ttl_seconds", 600)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.failure_threshold", 2)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.window_seconds", 60)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.ttl_seconds", 600)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
 	viper.SetDefault("gateway.image_concurrency.overflow_mode", ImageConcurrencyOverflowModeReject)
@@ -3014,6 +3075,26 @@ func (c *Config) Validate() error {
 	if c.Idempotency.CleanupBatchSize <= 0 {
 		return fmt.Errorf("idempotency.cleanup_batch_size must be positive")
 	}
+	if c.QuotaRecovery.Enabled {
+		if c.Database.MaxOpenConns < 2 {
+			return fmt.Errorf("quota_recovery requires database.max_open_conns >= 2")
+		}
+		if c.QuotaRecovery.IntervalSeconds <= 0 {
+			return fmt.Errorf("quota_recovery.interval_seconds must be positive")
+		}
+		if c.QuotaRecovery.BatchSize <= 0 {
+			return fmt.Errorf("quota_recovery.batch_size must be positive")
+		}
+		if c.QuotaRecovery.Concurrency <= 0 {
+			return fmt.Errorf("quota_recovery.concurrency must be positive")
+		}
+		if c.QuotaRecovery.TimeoutSeconds <= 0 {
+			return fmt.Errorf("quota_recovery.timeout_seconds must be positive")
+		}
+		if c.QuotaRecovery.JitterSeconds < 0 {
+			return fmt.Errorf("quota_recovery.jitter_seconds must be non-negative")
+		}
+	}
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
 	}
@@ -3247,6 +3328,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIHTTP2.FallbackTTLSeconds < 0 {
 		return fmt.Errorf("gateway.openai_http2.fallback_ttl_seconds must be non-negative")
+	}
+	if c.Gateway.OpenAIProxyStreamCircuit.FailureThreshold < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.failure_threshold must be non-negative")
+	}
+	if c.Gateway.OpenAIProxyStreamCircuit.WindowSeconds < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.window_seconds must be non-negative")
+	}
+	if c.Gateway.OpenAIProxyStreamCircuit.TTLSeconds < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.ttl_seconds must be non-negative")
 	}
 	weights := c.Gateway.OpenAIWS.SchedulerScoreWeights
 	for _, weight := range []float64{

@@ -249,26 +249,45 @@ type UsageInfo struct {
 type ClaudeUsageWindow struct {
 	Utilization float64 `json:"utilization"`
 	ResetsAt    string  `json:"resets_at"`
+
+	decodedFromJSON    bool
+	utilizationPresent bool
+}
+
+func (w *ClaudeUsageWindow) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Utilization *float64 `json:"utilization"`
+		ResetsAt    *string  `json:"resets_at"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*w = ClaudeUsageWindow{decodedFromJSON: true}
+	if decoded.Utilization != nil {
+		w.Utilization = *decoded.Utilization
+		w.utilizationPresent = true
+	}
+	if decoded.ResetsAt != nil {
+		w.ResetsAt = *decoded.ResetsAt
+	}
+	return nil
+}
+
+func (w *ClaudeUsageWindow) hasQuotaRecoveryUtilization() bool {
+	return w != nil && (!w.decodedFromJSON || w.utilizationPresent)
 }
 
 // ClaudeUsageResponse Anthropic API返回的usage结构
 type ClaudeUsageResponse struct {
-	FiveHour struct {
-		Utilization float64 `json:"utilization"`
-		ResetsAt    string  `json:"resets_at"`
-	} `json:"five_hour"`
-	SevenDay struct {
-		Utilization float64 `json:"utilization"`
-		ResetsAt    string  `json:"resets_at"`
-	} `json:"seven_day"`
-	SevenDaySonnet struct {
-		Utilization float64 `json:"utilization"`
-		ResetsAt    string  `json:"resets_at"`
-	} `json:"seven_day_sonnet"`
+	FiveHour ClaudeUsageWindow `json:"five_hour"`
+	SevenDay ClaudeUsageWindow `json:"seven_day"`
+	// Sonnet 专属 7d 窗口。nil 表示上游未提供该可选窗口；非 nil 的空对象
+	// 必须保留下来，避免调用方把损坏数据误当成“未提供”。
+	SevenDaySonnet *ClaudeUsageWindow `json:"seven_day_sonnet"`
 	// Fable 专属 7d 窗口（对应响应头 7d_oi，claim 名为 seven_day_overage_included，
 	// 见 anthropic-ratelimit-unified-representative-claim 头）。上游 usage API
-	// 若不下发该字段，GetUsage 会用被动采样数据回填。
-	SevenDayOverageIncluded ClaudeUsageWindow `json:"seven_day_overage_included"`
+	// 若不下发该字段，GetUsage 会用被动采样数据回填。nil 与空对象语义不同。
+	SevenDayOverageIncluded *ClaudeUsageWindow `json:"seven_day_overage_included"`
 }
 
 // ClaudeUsageFetchOptions 包含获取 Claude 用量数据所需的所有选项
@@ -1521,23 +1540,23 @@ func (s *AccountUsageService) buildUsageInfo(resp *ClaudeUsageResponse, updatedA
 	}
 
 	// 7天Sonnet窗口
-	if resp.SevenDaySonnet.ResetsAt != "" {
-		if sonnetReset, err := parseTime(resp.SevenDaySonnet.ResetsAt); err == nil {
+	if sonnet := resp.SevenDaySonnet; sonnet != nil && sonnet.ResetsAt != "" {
+		if sonnetReset, err := parseTime(sonnet.ResetsAt); err == nil {
 			info.SevenDaySonnet = &UsageProgress{
-				Utilization:      resp.SevenDaySonnet.Utilization,
+				Utilization:      sonnet.Utilization,
 				ResetsAt:         &sonnetReset,
 				RemainingSeconds: int(time.Until(sonnetReset).Seconds()),
 			}
 		} else {
-			log.Printf("Failed to parse SevenDaySonnet.ResetsAt: %s, error: %v", resp.SevenDaySonnet.ResetsAt, err)
+			log.Printf("Failed to parse SevenDaySonnet.ResetsAt: %s, error: %v", sonnet.ResetsAt, err)
 			info.SevenDaySonnet = &UsageProgress{
-				Utilization: resp.SevenDaySonnet.Utilization,
+				Utilization: sonnet.Utilization,
 			}
 		}
 	}
 
 	// 7天Fable窗口（响应头 7d_oi 对应的窗口）
-	if fable := resp.SevenDayOverageIncluded; fable.ResetsAt != "" {
+	if fable := resp.SevenDayOverageIncluded; fable != nil && fable.ResetsAt != "" {
 		if fableReset, err := parseTime(fable.ResetsAt); err == nil {
 			info.SevenDayFable = &UsageProgress{
 				Utilization:      fable.Utilization,

@@ -77,8 +77,22 @@ func (r *contentModerationTestSettingRepo) Delete(ctx context.Context, key strin
 }
 
 type contentModerationTestRepo struct {
-	mu   sync.Mutex
-	logs []ContentModerationLog
+	mu                sync.Mutex
+	logs              []ContentModerationLog
+	existingAPIKeyIDs map[int64]bool
+}
+
+func (r *contentModerationTestRepo) ExistingAPIKeyIDs(ctx context.Context, apiKeyIDs []int64) ([]int64, error) {
+	if r.existingAPIKeyIDs == nil {
+		return append([]int64(nil), apiKeyIDs...), nil
+	}
+	ids := make([]int64, 0, len(apiKeyIDs))
+	for _, apiKeyID := range apiKeyIDs {
+		if r.existingAPIKeyIDs[apiKeyID] {
+			ids = append(ids, apiKeyID)
+		}
+	}
+	return ids, nil
 }
 
 func (r *contentModerationTestRepo) CreateLog(ctx context.Context, log *ContentModerationLog) error {
@@ -99,7 +113,8 @@ func (r *contentModerationTestRepo) CountFlaggedByUserSince(ctx context.Context,
 	defer r.mu.Unlock()
 	count := 0
 	for _, log := range r.logs {
-		if log.UserID == nil || *log.UserID != userID || !log.Flagged || log.Action == ContentModerationActionHashBlock {
+		if log.UserID == nil || *log.UserID != userID || !log.Flagged ||
+			log.Action == ContentModerationActionHashBlock || log.Action == ContentModerationActionTrustedObserve {
 			continue
 		}
 		if excludeCyberPolicy && log.Action == ContentModerationActionCyberPolicy {
@@ -439,6 +454,268 @@ func TestMatchBlockedKeyword_CaseInsensitiveSubstring(t *testing.T) {
 
 	_, hit = matchBlockedKeyword("anything", nil)
 	require.False(t, hit)
+}
+
+func TestNormalizeContentModerationTrustedAPIKeys(t *testing.T) {
+	expiresAt := time.Date(2026, 8, 20, 8, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	out := normalizeContentModerationTrustedAPIKeys([]ContentModerationTrustedAPIKey{
+		{
+			APIKeyID:  42,
+			Models:    []string{" gpt-5.6-sol ", "GPT-5.6-SOL", "gpt-5.4"},
+			Endpoints: []string{" /v1/responses ", "/V1/RESPONSES"},
+			ExpiresAt: &expiresAt,
+			Reason:    " trusted maintenance ",
+		},
+		{APIKeyID: 42, Reason: "duplicate"},
+		{APIKeyID: 0, Reason: "invalid"},
+	})
+
+	require.Len(t, out, 1)
+	require.Equal(t, int64(42), out[0].APIKeyID)
+	require.Equal(t, []string{"gpt-5.6-sol", "gpt-5.4"}, out[0].Models)
+	require.Equal(t, []string{"/v1/responses"}, out[0].Endpoints)
+	require.Equal(t, "trusted maintenance", out[0].Reason)
+	require.Equal(t, expiresAt.UTC(), *out[0].ExpiresAt)
+}
+
+func TestParseContentModerationConfig_DisablesInvalidPersistedTrustedScope(t *testing.T) {
+	cfg, err := parseContentModerationConfig(`{
+		"enabled": true,
+		"mode": "pre_block",
+		"trusted_api_keys": [{
+			"api_key_id": 42,
+			"models": [" "],
+			"reason": "maintenance"
+		}]
+	}`)
+
+	require.NoError(t, err)
+	require.True(t, cfg.Enabled)
+	require.Equal(t, ContentModerationModePreBlock, cfg.Mode)
+	require.Empty(t, cfg.TrustedAPIKeys, "invalid persisted scope must fail closed without disabling moderation")
+}
+
+func TestParseContentModerationConfig_IsolatesMalformedPersistedTrustedAPIKeys(t *testing.T) {
+	tests := []struct {
+		name           string
+		trustedAPIKeys string
+	}{
+		{name: "wrong shape", trustedAPIKeys: `"trusted_api_keys": {"api_key_id": 42}`},
+		{name: "unknown scope field", trustedAPIKeys: `"trusted_api_keys": [{"api_key_id": 42, "model": "gpt-5.6-sol", "reason": "maintenance"}]`},
+		{name: "case variant", trustedAPIKeys: `"TRUSTED_API_KEYS": {"api_key_id": 42}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseContentModerationConfig(fmt.Sprintf(`{
+				"enabled": true,
+				"mode": "pre_block",
+				"blocked_keywords": ["keep-blocking"],
+				%s
+			}`, tt.trustedAPIKeys))
+
+			require.NoError(t, err)
+			require.True(t, cfg.Enabled)
+			require.Equal(t, ContentModerationModePreBlock, cfg.Mode)
+			require.Equal(t, []string{"keep-blocking"}, cfg.BlockedKeywords)
+			require.Empty(t, cfg.TrustedAPIKeys, "malformed persisted whitelist must fail closed without invalidating other moderation settings")
+		})
+	}
+}
+
+func TestParseContentModerationConfig_KeepsValidPersistedTrustedAPIKeys(t *testing.T) {
+	cfg, err := parseContentModerationConfig(`{
+		"trusted_api_keys": [{
+			"api_key_id": 42,
+			"models": [" gpt-5.6-sol "],
+			"reason": " maintenance "
+		}]
+	}`)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.TrustedAPIKeys, 1)
+	require.Equal(t, int64(42), cfg.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, []string{"gpt-5.6-sol"}, cfg.TrustedAPIKeys[0].Models)
+	require.Equal(t, "maintenance", cfg.TrustedAPIKeys[0].Reason)
+}
+
+func TestContentModerationTrustedAPIKeyObserveOnlyScopesAndExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	activeExpiry := now.Add(time.Hour)
+	expired := now.Add(-time.Minute)
+	cfg := defaultContentModerationConfig()
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{
+		{APIKeyID: 42, Models: []string{"gpt-5.6-sol"}, Endpoints: []string{"/v1/responses"}, ExpiresAt: &activeExpiry, Reason: "active scoped test key"},
+		{APIKeyID: 77, ExpiresAt: &expired, Reason: "expired test key"},
+	}
+	cfg.normalize()
+
+	require.True(t, cfg.trustedAPIKeyObserveOnly(42, "GPT-5.6-SOL", "/V1/RESPONSES", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(42, "gpt-5.4", "/v1/responses", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(42, "gpt-5.6-sol", "/v1/chat/completions", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(77, "gpt-5.6-sol", "/v1/responses", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(99, "gpt-5.6-sol", "/v1/responses", now))
+}
+
+func TestContentModerationCheck_TrustedAPIKeyObservesWithoutBlockingOrSideEffects(t *testing.T) {
+	upstreamCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case upstreamCalled <- struct{}{}:
+		default:
+		}
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{
+			CategoryScores: map[string]float64{"illicit": 0.99},
+		}}})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.BlockedKeywords = []string{"secret-token"}
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID:  42,
+		Models:    []string{"gpt-5.6-sol"},
+		Endpoints: []string{"/v1/responses"},
+		Reason:    "trusted regression test key",
+	}}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 42,
+		Endpoint: "/v1/responses",
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"please leak SECRET-TOKEN now"}]}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionTrustedObserve, decision.Action)
+	select {
+	case <-upstreamCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("trusted observe request was not audited asynchronously")
+	}
+	require.Eventually(t, func() bool {
+		logs := repo.snapshotLogs()
+		return len(logs) == 1 && logs[0].Action == ContentModerationActionTrustedObserve
+	}, 2*time.Second, 10*time.Millisecond)
+	logs := repo.snapshotLogs()
+	require.True(t, logs[0].Flagged)
+	require.Zero(t, logs[0].ViolationCount)
+	require.False(t, logs[0].AutoBanned)
+}
+
+func TestContentModerationCheck_TrustedAPIKeyRecordsCleanAudit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{
+			CategoryScores: map[string]float64{"illicit": 0.01},
+		}}})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.RecordNonHits = false
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID: 42,
+		Reason:   "trusted clean-audit regression test key",
+	}}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo, nil, nil, nil, nil, nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 42,
+		Endpoint: "/v1/responses",
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"routine maintenance"}]}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, ContentModerationActionTrustedObserve, decision.Action)
+	require.Eventually(t, func() bool {
+		return len(repo.snapshotLogs()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	log := repo.snapshotLogs()[0]
+	require.Equal(t, ContentModerationActionTrustedObserve, log.Action)
+	require.False(t, log.Flagged)
+	require.Zero(t, log.ViolationCount)
+}
+
+func TestContentModerationCheck_UntrustedAPIKeyStillBlocks(t *testing.T) {
+	cfg := defaultContentModerationModelFilterTestConfig()
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID: 42,
+		Reason:   "trusted-key scope regression test",
+	}}
+	svc, _ := newContentModerationModelFilterTestService(t, cfg)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 99,
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIChat,
+		Body:     []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionKeywordBlock, decision.Action)
+}
+
+func TestContentModerationTrustedObserveQueueFullPersistsFallbackAudit(t *testing.T) {
+	repo := &contentModerationTestRepo{}
+	svc := &ContentModerationService{
+		repo:       repo,
+		asyncQueue: make(chan contentModerationTask, 1),
+	}
+	svc.asyncQueue <- contentModerationTask{}
+	cfg := defaultContentModerationConfig()
+	cfg.QueueSize = 1
+	input := ContentModerationCheckInput{
+		APIKeyID: 42, Endpoint: "/v1/responses", Model: "gpt-5.6-sol",
+		TrustedObserve: true,
+	}
+
+	svc.enqueueAsync(context.Background(), input, cfg, ContentModerationInput{Text: "maintenance request"}, "hash")
+
+	logs := repo.snapshotLogs()
+	require.Len(t, logs, 1)
+	require.Equal(t, ContentModerationActionTrustedObserve, logs[0].Action)
+	require.False(t, logs[0].Flagged)
+	require.Contains(t, logs[0].Error, "queue full")
 }
 
 func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T) {
@@ -859,6 +1136,91 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	require.Equal(t, 0.72, saved.Thresholds["sexual"])
 	require.Equal(t, 1.0, saved.Thresholds["harassment"])
 	require.NotContains(t, saved.Thresholds, "unknown")
+}
+
+func TestContentModerationUpdateConfig_SavesTrustedAPIKeys(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	repo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: string(rawCfg),
+	}}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+
+	view, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		TrustedAPIKeys: &[]ContentModerationTrustedAPIKey{{
+			APIKeyID:  42,
+			Models:    []string{"gpt-5.6-sol"},
+			Endpoints: []string{"/v1/responses"},
+			ExpiresAt: &expiresAt,
+			Reason:    "administrator maintenance",
+		}},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(42), view.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, "administrator maintenance", view.TrustedAPIKeys[0].Reason)
+	var saved ContentModerationConfig
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyContentModerationConfig]), &saved))
+	require.Equal(t, int64(42), saved.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, expiresAt, *saved.TrustedAPIKeys[0].ExpiresAt)
+}
+
+func TestContentModerationUpdateConfig_RejectsMissingTrustedAPIKey(t *testing.T) {
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
+	moderationRepo := &contentModerationTestRepo{existingAPIKeyIDs: map[int64]bool{42: true}}
+	svc := NewContentModerationService(settingRepo, moderationRepo, nil, nil, nil, nil, nil)
+
+	_, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		TrustedAPIKeys: &[]ContentModerationTrustedAPIKey{{
+			APIKeyID: 99,
+			Reason:   "administrator maintenance",
+		}},
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "不存在或已删除")
+}
+
+func TestContentModerationUpdateConfig_RejectsUnsafeTrustedAPIKeyInput(t *testing.T) {
+	zeroExpiry := time.Time{}
+	tooManyEntries := make([]ContentModerationTrustedAPIKey, maxContentModerationTrustedAPIKeys+1)
+	for index := range tooManyEntries {
+		tooManyEntries[index] = ContentModerationTrustedAPIKey{APIKeyID: int64(index + 1), Reason: "maintenance"}
+	}
+	tooManyModels := make([]string, maxContentModerationTrustedScopeItems+1)
+	for index := range tooManyModels {
+		tooManyModels[index] = fmt.Sprintf("model-%d", index)
+	}
+
+	tests := []struct {
+		name    string
+		entries []ContentModerationTrustedAPIKey
+	}{
+		{name: "too many entries", entries: tooManyEntries},
+		{name: "non-positive key id", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 0, Reason: "maintenance"}}},
+		{name: "duplicate key id", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "one"}, {APIKeyID: 42, Reason: "two"}}},
+		{name: "blank reason", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: " "}}},
+		{name: "long reason", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: strings.Repeat("a", maxContentModerationTrustedReasonRunes+1)}}},
+		{name: "zero expiry", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", ExpiresAt: &zeroExpiry}}},
+		{name: "too many models", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: tooManyModels}}},
+		{name: "blank model widens scope", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: []string{" "}}}},
+		{name: "duplicate model", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: []string{"gpt-5", "GPT-5"}}}},
+		{name: "long endpoint", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Endpoints: []string{strings.Repeat("/", maxContentModerationTrustedScopeRunes+1)}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
+			svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil)
+
+			_, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{TrustedAPIKeys: &tt.entries})
+
+			require.Error(t, err)
+			require.Empty(t, settingRepo.values[SettingKeyContentModerationConfig])
+		})
+	}
 }
 
 func TestExtractContentModerationInput_AnthropicImageSourceOnlyParticipatesInMemory(t *testing.T) {

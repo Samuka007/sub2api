@@ -4,6 +4,7 @@ import enAdminAccounts from '../locales/en/admin/accounts'
 import enAdminChannels from '../locales/en/admin/channels'
 import enAdminOps from '../locales/en/admin/ops'
 import enAdminOverview from '../locales/en/admin/overview'
+import enAdminPlusQuotaAutomation from '../locales/en/admin/plusQuotaAutomation'
 import enAdminResources from '../locales/en/admin/resources'
 import enAdminSettings from '../locales/en/admin/settings'
 import enCommon from '../locales/en/common'
@@ -14,6 +15,7 @@ import zhAdminAccounts from '../locales/zh/admin/accounts'
 import zhAdminChannels from '../locales/zh/admin/channels'
 import zhAdminOps from '../locales/zh/admin/ops'
 import zhAdminOverview from '../locales/zh/admin/overview'
+import zhAdminPlusQuotaAutomation from '../locales/zh/admin/plusQuotaAutomation'
 import zhAdminResources from '../locales/zh/admin/resources'
 import zhAdminSettings from '../locales/zh/admin/settings'
 import zhCommon from '../locales/zh/common'
@@ -51,6 +53,7 @@ const admins: Record<string, Modules> = {
     overview: zhAdminOverview,
     channels: zhAdminChannels,
     accounts: zhAdminAccounts,
+    plusQuotaAutomation: zhAdminPlusQuotaAutomation,
     resources: zhAdminResources,
     ops: zhAdminOps,
     settings: zhAdminSettings
@@ -59,6 +62,7 @@ const admins: Record<string, Modules> = {
     overview: enAdminOverview,
     channels: enAdminChannels,
     accounts: enAdminAccounts,
+    plusQuotaAutomation: enAdminPlusQuotaAutomation,
     resources: enAdminResources,
     ops: enAdminOps,
     settings: enAdminSettings

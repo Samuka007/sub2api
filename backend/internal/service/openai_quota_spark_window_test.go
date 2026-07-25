@@ -197,6 +197,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	resetCalls := 0
 	registerCalls := 0
 	var assertions []string
+	var redeemRequestIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		if strings.Contains(r.URL.Path, "/task/register") {
@@ -206,6 +207,9 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 		}
 		resetCalls++
 		assertions = append(assertions, r.Header.Get("authorization"))
+		var body map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		redeemRequestIDs = append(redeemRequestIDs, body["redeem_request_id"])
 		require.Equal(t, "account-reset-recovery", r.Header.Get("chatgpt-account-id"))
 		if resetCalls == 1 {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -223,7 +227,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
 	svc.agentIdentityWS = invalidator
 
-	result, err := svc.ResetCredit(context.Background(), account.ID)
+	result, err := svc.ResetCreditWithRequestID(context.Background(), account.ID, "stable-reset-request-id")
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
 	require.Equal(t, 2, result.WindowsReset)
@@ -233,6 +237,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	require.True(t, strings.HasPrefix(assertions[0], "AgentAssertion "))
 	require.True(t, strings.HasPrefix(assertions[1], "AgentAssertion "))
 	require.NotEqual(t, assertions[0], assertions[1])
+	require.Equal(t, []string{"stable-reset-request-id", "stable-reset-request-id"}, redeemRequestIDs)
 	require.Equal(t, "task-reset-new", account.GetCredential("task_id"))
 	require.Equal(t, []int64{account.ID}, invalidator.accountIDs)
 }
@@ -584,6 +589,45 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	require.Equal(t, 1, usage.RateLimitResetCredits.AvailableCount)
 	require.Equal(t, 1, detailCalls)
 	require.Empty(t, usage.RateLimitResetCredits.Credits)
+}
+
+func TestQueryUsageStrictSurfacesResetCreditDetails401(t *testing.T) {
+	ctx := context.Background()
+	account := &Account{
+		ID:       100,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"chatgpt_account_id": "org-parent123",
+		},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
+		OpenAITokenCacheKey(account): "fake-token",
+	}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{})
+		case "/backend-api/wham/rate-limit-reset-credits":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	usage, err := svc.QueryUsageStrict(ctx, 100)
+	require.Nil(t, usage)
+	require.Error(t, err)
+	require.Equal(t, http.StatusUnauthorized, infraerrors.Code(err))
+	require.Equal(t, "OPENAI_QUOTA_RESET_CREDITS_UPSTREAM_ERROR", infraerrors.Reason(err))
 }
 
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：

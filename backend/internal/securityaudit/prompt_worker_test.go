@@ -289,6 +289,19 @@ func TestEnqueuerStagingPayloadPublishProtocolAndFailureCleanup(t *testing.T) {
 	})
 }
 
+func TestEnqueuerObserveOnlyQueuesAuditWhileBlockingModeIsActive(t *testing.T) {
+	cfg := asyncConfig()
+	cfg.BlockingEnabled = true
+	trace := []string{}
+	repo := &fakeJobRepository{trace: &trace, createJob: &Job{ID: 45}}
+	payload := &fakePayloadStore{trace: &trace, values: map[int64]string{}}
+	enqueuer := NewEnqueuer(&fakeConfigStore{cfg: cfg, active: true}, repo, payload)
+
+	require.NoError(t, enqueuer.EnqueueObserveOnly(context.Background(), asyncRequest()))
+	require.Equal(t, []string{"create_staging", "payload_set", "publish_queued"}, trace)
+	require.Equal(t, "payload canary text", payload.values[45])
+}
+
 func TestEnqueuerSkipsOffOutOfScopeAndNoText(t *testing.T) {
 	tests := []struct {
 		name string

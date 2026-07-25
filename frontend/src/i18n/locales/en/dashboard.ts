@@ -778,6 +778,59 @@ export default {
     }
   },
 
+  modelIq: {
+    title: 'GPT Model IQ Ranking',
+    description: 'Compare the latest benchmark scores, reliability, time, and cost across GPT model configurations.',
+    updatedAt: 'Data generated at {time}',
+    autoRefreshNote: 'The server updates hourly. Manual refresh checks upstream; repeats within 30 seconds reuse the latest result.',
+    refresh: 'Refresh',
+    refreshing: 'Refreshing...',
+    loading: 'Loading the latest ranking...',
+    staleTitle: 'Ranking data may be outdated',
+    staleRefreshFailed: 'The latest refresh failed. The last successful ranking remains visible.',
+    staleSource: 'The upstream ranking service is temporarily unavailable. The last successful snapshot remains visible.',
+    errorTitle: 'Unable to load the ranking',
+    retry: 'Try again',
+    emptyTitle: 'No ranking data',
+    emptyDescription: 'No model comparisons are available from the benchmark source yet.',
+    tableLabel: 'GPT model IQ ranking',
+    columns: {
+      rank: 'Rank',
+      model: 'Model',
+      effort: 'Reasoning',
+      score: 'IQ Score',
+      status: 'Status',
+      passRate: 'Pass Rate',
+      trend: '7-Day Trend',
+      duration: 'Duration',
+      cost: 'Cost',
+      date: 'Test Date',
+    },
+    status: {
+      green: 'High',
+      yellow: 'Medium',
+      red: 'Low',
+      unknown: 'Unknown',
+    },
+    effort: {
+      low: 'Low',
+      medium: 'Medium',
+      high: 'High',
+      xhigh: 'X-High',
+      max: 'Max',
+    },
+    period: {
+      am: 'AM',
+      pm: 'PM',
+    },
+    errors: {
+      unauthorized: 'Ranking data authorization is unavailable. Please contact an administrator.',
+      rateLimited: 'The ranking service is busy. Please try again later.',
+      network: 'The ranking service could not be reached. Check your connection and try again.',
+      loadFailed: 'The ranking service is temporarily unavailable. Please try again.',
+    },
+  },
+
   // Empty States
   empty: {
     noData: 'No data found'

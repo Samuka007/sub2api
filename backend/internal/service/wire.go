@@ -170,6 +170,15 @@ func ProvideAccountUsageService(
 	return service
 }
 
+// ProvideQuotaRecoveryChecker binds the concrete read-only quota services to
+// the provider-neutral Hermes checker interfaces.
+func ProvideQuotaRecoveryChecker(
+	openAIQuotaService *OpenAIQuotaService,
+	accountUsageService *AccountUsageService,
+) *QuotaRecoveryChecker {
+	return NewQuotaRecoveryChecker(openAIQuotaService, accountUsageService)
+}
+
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
@@ -270,6 +279,13 @@ func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *Timing
 // ProvideAccountExpiryService creates and starts AccountExpiryService.
 func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpiryService {
 	svc := NewAccountExpiryService(accountRepo, time.Minute)
+	svc.Start()
+	return svc
+}
+
+// ProvideModelIQService creates and starts the hourly Model IQ cache refresh job.
+func ProvideModelIQService(cfg *config.Config) *ModelIQService {
+	svc := NewModelIQService(cfg)
 	svc.Start()
 	return svc
 }
@@ -681,6 +697,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAPIKeyAuthCacheInvalidator,
 	ProvideAuthCacheInvalidationWorker,
 	NewGroupService,
+	NewCompositeRouteResolver,
 	NewAccountService,
 	NewProxyService,
 	NewRedeemService,
@@ -691,6 +708,7 @@ var ProviderSet = wire.NewSet(
 	NewBillingService,
 	ProvideBillingCacheService,
 	NewAnnouncementService,
+	ProvideModelIQService,
 	NewAdminService,
 	NewGatewayService,
 	NewOpenAIGatewayService,
@@ -718,19 +736,24 @@ var ProviderSet = wire.NewSet(
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,
+	ProvidePlusQuotaAutomationService,
 	ProvideGrokQuotaService,
 	ProvideClaudeTokenProvider,
 	NewAntigravityGatewayService,
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
+	ProvideQuotaRecoveryChecker,
+	ProvideQuotaRecoveryService,
 	ProvideAccountTestService,
 	ProvideUpstreamBillingProbeService,
+	ProvideOllamaCloudUsageService,
 	ProvideSettingService,
 	NewDataManagementService,
 	ProvideBackupService,
 	ProvideOpsSystemLogSink,
 	ProvideOpsService,
 	ProvideOpsIngressRejectAggregator,
+	NewModelRadarService,
 	ProvideAuditLogService,
 	ProvideOpsMetricsCollector,
 	ProvideOpsAggregationService,

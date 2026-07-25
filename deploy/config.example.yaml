@@ -401,6 +401,11 @@ gateway:
     fallback_error_threshold: 2
     fallback_window_seconds: 60
     fallback_ttl_seconds: 600
+  # OpenAI Responses SSE 代理断流熔断；按 proxy_id 跨账号隔离，仅影响下一次调度。
+  openai_proxy_stream_circuit:
+    failure_threshold: 2
+    window_seconds: 60
+    ttl_seconds: 600
   # HTTP upstream connection pool settings (HTTP/2 + multi-proxy scenario defaults)
   # HTTP 上游连接池配置（HTTP/2 + 多代理场景默认值）
   # Max idle connections across all hosts
@@ -862,6 +867,30 @@ idempotency:
   cleanup_interval_seconds: 60
   # 每轮清理最大删除条数
   cleanup_batch_size: 500
+
+# =============================================================================
+# Hermes Account Quota Recovery (restart required)
+# 账号额度提前恢复（需重启）
+# =============================================================================
+quota_recovery:
+  # Supported with top-level run_mode: "standard" or "simple". Until
+  # runtime-block invalidation is distributed, Hermes is limited to a single
+  # application service process; do not enable it in multi-instance deployments.
+  # Also requires database.max_open_conns >= 2; one connection holds the
+  # database-wide PostgreSQL advisory lock for the lifetime of this runner.
+  # Connect directly to PostgreSQL or use PgBouncer session pooling. Transaction
+  # and statement pooling are incompatible with this session advisory lock.
+  # If the pinned lock connection is lost, Hermes stops fail-closed and logs
+  # restart_required=true; restart this service after PostgreSQL recovers.
+  enabled: false
+  # Each cycle scans every currently rate-limited active/schedulable account.
+  interval_seconds: 86400
+  # Database page size; this is not a per-cycle account limit.
+  batch_size: 50
+  concurrency: 3
+  timeout_seconds: 25
+  # Random per-account delay to avoid synchronized upstream requests.
+  jitter_seconds: 10
 
 # =============================================================================
 # Concurrency Wait Configuration

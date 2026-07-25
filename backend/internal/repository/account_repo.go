@@ -51,6 +51,8 @@ type accountRepository struct {
 	schedulerCache service.SchedulerCache
 }
 
+var _ service.QuotaRecoveryAccountRepository = (*accountRepository)(nil)
+
 var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_primary_",
 	"codex_secondary_",
@@ -58,12 +60,16 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_7d_",
 	"passive_usage_",
 	"upstream_billing_probe",
+	"ollama_cloud_usage",
 }
 
 var schedulerNeutralExtraKeys = map[string]struct{}{
-	"codex_usage_updated_at":     {},
-	"grok_billing_snapshot":      {},
-	"session_window_utilization": {},
+	"codex_usage_updated_at":              {},
+	"grok_billing_snapshot":               {},
+	"session_window_utilization":          {},
+	service.PlusQuotaAnomalyExtraKey:      {},
+	service.PlusQuotaLastResetExtraKey:    {},
+	service.PlusQuotaResetAttemptExtraKey: {},
 }
 
 const postgresParameterBatchSize = 50000
@@ -556,8 +562,22 @@ func lockAndMergeAccountProbeExtra(ctx context.Context, client *dbent.Client, ac
 			AND type = $3
 			AND credentials = $4::jsonb
 			AND proxy_id IS NOT DISTINCT FROM $5,
+			COALESCE(
+				platform IN ('openai', 'anthropic')
+				AND $2 IN ('openai', 'anthropic')
+				AND type = 'apikey'
+				AND $3 = 'apikey'
+				AND credentials -> 'api_key' IS NOT DISTINCT FROM $4::jsonb -> 'api_key'
+				AND `+ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'")+`
+				AND `+ollamaCloudBaseURLMatchesSQL("$4::jsonb ->> 'base_url'")+`,
+				false
+			),
+			proxy_id IS NOT DISTINCT FROM $5,
 			extra -> 'upstream_billing_probe_enabled',
-			extra -> 'upstream_billing_probe'
+			extra -> 'upstream_billing_probe',
+			extra -> 'ollama_cloud_usage_session',
+			extra -> 'ollama_cloud_usage_auto_refresh',
+			extra -> 'ollama_cloud_usage_snapshot'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -574,11 +594,25 @@ func lockAndMergeAccountProbeExtra(ctx context.Context, client *dbent.Client, ac
 	}
 
 	var (
-		identityUnchanged bool
-		currentEnabled    []byte
-		currentSnapshot   []byte
+		identityUnchanged            bool
+		ollamaGroupIdentityUnchanged bool
+		ollamaProxyIdentityUnchanged bool
+		currentEnabled               []byte
+		currentSnapshot              []byte
+		currentOllamaSession         []byte
+		currentOllamaAutoRefresh     []byte
+		currentOllamaSnapshot        []byte
 	)
-	if err := rows.Scan(&identityUnchanged, &currentEnabled, &currentSnapshot); err != nil {
+	if err := rows.Scan(
+		&identityUnchanged,
+		&ollamaGroupIdentityUnchanged,
+		&ollamaProxyIdentityUnchanged,
+		&currentEnabled,
+		&currentSnapshot,
+		&currentOllamaSession,
+		&currentOllamaAutoRefresh,
+		&currentOllamaSnapshot,
+	); err != nil {
 		return nil, err
 	}
 	if err := rows.Err(); err != nil {
@@ -586,32 +620,69 @@ func lockAndMergeAccountProbeExtra(ctx context.Context, client *dbent.Client, ac
 	}
 
 	extra := copyJSONMap(normalizeJSONMap(account.Extra))
-	delete(extra, service.UpstreamBillingProbeEnabledExtraKey)
-	delete(extra, service.UpstreamBillingProbeExtraKey)
+	for _, key := range []string{
+		service.UpstreamBillingProbeEnabledExtraKey,
+		service.UpstreamBillingProbeExtraKey,
+		service.OllamaCloudUsageSessionExtraKey,
+		service.OllamaCloudUsageAutoRefreshExtraKey,
+		service.OllamaCloudUsageSnapshotExtraKey,
+	} {
+		delete(extra, key)
+	}
 	probeExplicitlyDisabled := false
 	probeAccount := account.Platform == service.PlatformOpenAI && account.Type == service.AccountTypeAPIKey
 	if probeAccount && explicitProbeEnabled != nil {
 		extra[service.UpstreamBillingProbeEnabledExtraKey] = *explicitProbeEnabled
 		probeExplicitlyDisabled = !*explicitProbeEnabled
-	} else if probeAccount && len(currentEnabled) > 0 && string(currentEnabled) != "null" {
-		var enabled any
-		if err := json.Unmarshal(currentEnabled, &enabled); err != nil {
+	} else if probeAccount {
+		if enabled, ok, err := decodeAccountExtraJSON(currentEnabled); err != nil {
 			return nil, err
+		} else if ok {
+			extra[service.UpstreamBillingProbeEnabledExtraKey] = enabled
+			if value, isBool := enabled.(bool); isBool && !value {
+				probeExplicitlyDisabled = true
+			}
 		}
-		extra[service.UpstreamBillingProbeEnabledExtraKey] = enabled
-		if value, ok := enabled.(bool); ok && !value {
-			probeExplicitlyDisabled = true
+	}
+	if identityUnchanged && !probeExplicitlyDisabled {
+		if snapshot, ok, err := decodeAccountExtraJSON(currentSnapshot); err != nil {
+			return nil, err
+		} else if ok {
+			extra[service.UpstreamBillingProbeExtraKey] = snapshot
 		}
 	}
-	if !identityUnchanged || probeExplicitlyDisabled || len(currentSnapshot) == 0 || string(currentSnapshot) == "null" {
-		return extra, nil
+
+	if service.IsOllamaCloudUsageAccount(account) && ollamaGroupIdentityUnchanged {
+		for key, raw := range map[string][]byte{
+			service.OllamaCloudUsageSessionExtraKey:     currentOllamaSession,
+			service.OllamaCloudUsageAutoRefreshExtraKey: currentOllamaAutoRefresh,
+		} {
+			if value, ok, err := decodeAccountExtraJSON(raw); err != nil {
+				return nil, err
+			} else if ok {
+				extra[key] = value
+			}
+		}
+		if ollamaProxyIdentityUnchanged {
+			if snapshot, ok, err := decodeAccountExtraJSON(currentOllamaSnapshot); err != nil {
+				return nil, err
+			} else if ok {
+				extra[service.OllamaCloudUsageSnapshotExtraKey] = snapshot
+			}
+		}
 	}
-	var snapshot any
-	if err := json.Unmarshal(currentSnapshot, &snapshot); err != nil {
-		return nil, err
-	}
-	extra[service.UpstreamBillingProbeExtraKey] = snapshot
 	return extra, nil
+}
+
+func decodeAccountExtraJSON(raw []byte) (any, bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, false, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false, err
+	}
+	return value, true, nil
 }
 
 func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
@@ -642,6 +713,25 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 		SET
 			credentials = $1::jsonb,
 			extra = CASE
+				-- 凭证整体未变化 ⇒ Ollama 组身份必然未变化；顶层 DISTINCT 守卫防止
+				-- 非 Ollama 账号的无变化持久化误清 openai 探测快照或重写 NULL extra。
+				WHEN platform IN ('openai', 'anthropic')
+					AND type = 'apikey'
+					AND credentials IS DISTINCT FROM $1::jsonb
+					AND (
+						credentials -> 'api_key' IS DISTINCT FROM $1::jsonb -> 'api_key'
+						OR NOT (
+							`+ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'")+`
+							AND `+ollamaCloudBaseURLMatchesSQL("$1::jsonb ->> 'base_url'")+`
+						)
+					)
+				THEN (CASE
+						WHEN platform = 'openai' THEN COALESCE(extra, '{}'::jsonb) - 'upstream_billing_probe'
+						ELSE COALESCE(extra, '{}'::jsonb)
+					END)
+					- 'ollama_cloud_usage_session'
+					- 'ollama_cloud_usage_auto_refresh'
+					- 'ollama_cloud_usage_snapshot'
 				WHEN platform = 'openai'
 					AND type = 'apikey'
 					AND credentials IS DISTINCT FROM $1::jsonb
@@ -1965,6 +2055,138 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 	return r.accountsToService(ctx, accounts)
 }
 
+func quotaRecoveryCandidatePredicates(now time.Time) []dbpredicate.Account {
+	return []dbpredicate.Account{
+		dbaccount.DeletedAtIsNil(),
+		dbaccount.TypeEQ(service.AccountTypeOAuth),
+		dbaccount.PlatformIn(service.PlatformOpenAI, service.PlatformAnthropic),
+		dbaccount.StatusEQ(service.StatusActive),
+		dbaccount.SchedulableEQ(true),
+		dbaccount.RateLimitedAtNotNil(),
+		dbaccount.RateLimitResetAtGT(now),
+	}
+}
+
+// QuotaRecoveryCandidateUpperBound fixes the largest candidate ID visible at
+// cycle start so a continuous stream of newly inserted accounts cannot make a
+// single keyset scan chase the tail forever.
+func (r *accountRepository) QuotaRecoveryCandidateUpperBound(ctx context.Context, now time.Time) (int64, error) {
+	id, err := r.client.Account.Query().
+		Where(quotaRecoveryCandidatePredicates(now)...).
+		Order(dbent.Desc(dbaccount.FieldID)).
+		FirstID(ctx)
+	if dbent.IsNotFound(err) {
+		return 0, nil
+	}
+	return id, err
+}
+
+// ListQuotaRecoveryCandidates returns one deterministic, cycle-bounded keyset
+// page. Callers advance afterID to the largest ID returned until a short page is
+// reached; throughID remains fixed for the whole cycle.
+func (r *accountRepository) ListQuotaRecoveryCandidates(ctx context.Context, now time.Time, afterID, throughID int64, limit int) ([]service.Account, error) {
+	if limit <= 0 || throughID <= 0 || afterID >= throughID {
+		return []service.Account{}, nil
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+	predicates := quotaRecoveryCandidatePredicates(now)
+	predicates = append(predicates,
+		dbaccount.IDGT(afterID),
+		dbaccount.IDLTE(throughID),
+	)
+	accounts, err := r.client.Account.Query().
+		Where(predicates...).
+		Order(dbent.Asc(dbaccount.FieldID)).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.accountsToService(ctx, accounts)
+}
+
+// ClearRateLimitIfUnchanged clears only the account-level rate-limit generation
+// and account version observed by a recovery probe. The version guard prevents
+// an old provider response from clearing a limit after credentials or identity
+// changed. The conditional mutation and scheduler outbox event are one statement
+// so neither can commit without the other.
+func (r *accountRepository) ClearRateLimitIfUnchanged(
+	ctx context.Context,
+	observation service.QuotaRecoveryObservation,
+) (bool, error) {
+	if r == nil || r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH credential_owner AS MATERIALIZED (
+			SELECT owner.id
+			FROM accounts AS owner
+			WHERE owner.id = $5
+				AND owner.id <> $1
+				AND owner.deleted_at IS NULL
+				AND owner.updated_at = $6
+				AND owner.platform = 'openai'
+				AND owner.type = 'oauth'
+				AND owner.parent_account_id IS NULL
+			FOR SHARE
+		),
+		recovery_target AS MATERIALIZED (
+			SELECT $1::bigint AS account_id, $5::bigint AS credential_owner_id
+			WHERE $5 = $1
+			UNION ALL
+			SELECT $1::bigint, credential_owner.id
+			FROM credential_owner
+		),
+		updated AS (
+			UPDATE accounts AS a
+			SET rate_limited_at = NULL,
+				rate_limit_reset_at = NULL,
+				updated_at = NOW()
+				FROM recovery_target AS target
+				WHERE a.id = target.account_id
+					AND a.deleted_at IS NULL
+					AND a.status = 'active'
+					AND a.schedulable = TRUE
+					AND a.type = 'oauth'
+					AND a.platform IN ('openai', 'anthropic')
+					AND a.rate_limited_at = $2
+					AND a.rate_limit_reset_at = $3
+					AND a.updated_at = $4
+					AND (
+						(target.credential_owner_id = a.id AND a.parent_account_id IS NULL)
+						OR a.parent_account_id = target.credential_owner_id
+					)
+				RETURNING a.id
+			)
+			INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+			SELECT $7, updated.id, NULL, NULL FROM updated
+		`,
+		observation.AccountID,
+		observation.RateLimitedAt,
+		observation.RateLimitResetAt,
+		observation.AccountUpdatedAt,
+		observation.CredentialOwnerID,
+		observation.CredentialOwnerUpdatedAt,
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if updated == 0 {
+		return false, nil
+	}
+	// Keep the immediate cache refresh inside the caller's deadline. The atomic
+	// outbox row remains the durable fallback when that best-effort refresh times out.
+	r.syncSchedulerAccountSnapshot(ctx, observation.AccountID)
+	return true, nil
+}
+
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
 	_, err := r.client.Account.Update().
@@ -2605,6 +2827,11 @@ func upstreamBillingProbeSnapshotClearRequested(extra map[string]any) bool {
 	return ok && value == nil
 }
 
+func ollamaCloudUsageSnapshotClearRequested(extra map[string]any) bool {
+	value, ok := extra[service.OllamaCloudUsageSnapshotExtraKey]
+	return ok && value == nil
+}
+
 func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -2614,6 +2841,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	args := make([]any, 0, 8)
 
 	idx := 1
+	ollamaProxyIdentityChanged := ""
 	if updates.Name != nil {
 		setClauses = append(setClauses, "name = $"+itoa(idx))
 		args = append(args, *updates.Name)
@@ -2623,8 +2851,11 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		// 0 表示清除代理（前端发送 0 而不是 null 来表达清除意图）
 		if *updates.ProxyID == 0 {
 			setClauses = append(setClauses, "proxy_id = NULL")
+			ollamaProxyIdentityChanged = "proxy_id IS NOT NULL"
 		} else {
-			setClauses = append(setClauses, "proxy_id = $"+itoa(idx))
+			proxyPlaceholder := "$" + itoa(idx)
+			setClauses = append(setClauses, "proxy_id = "+proxyPlaceholder)
+			ollamaProxyIdentityChanged = "proxy_id IS DISTINCT FROM " + proxyPlaceholder
 			args = append(args, *updates.ProxyID)
 			idx++
 		}
@@ -2670,27 +2901,68 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		updates.Extra[service.UpstreamBillingProbeEnabledExtraKey] = *updates.ProbeEnabled
 	}
 	// JSONB 需要合并而非覆盖，使用 raw SQL 保持旧行为。
+	credentialPlaceholder := ""
 	if len(updates.Credentials) > 0 {
 		payload, err := json.Marshal(updates.Credentials)
 		if err != nil {
 			return 0, err
 		}
-		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || $"+itoa(idx)+"::jsonb")
+		credentialPlaceholder = "$" + itoa(idx)
+		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || "+credentialPlaceholder+"::jsonb")
 		args = append(args, payload)
 		idx++
 	}
-	if len(updates.Extra) > 0 {
-		payload, err := json.Marshal(updates.Extra)
-		if err != nil {
-			return 0, err
+
+	ollamaGroupIdentityChanges := make([]string, 0, 2)
+	if _, ok := updates.Credentials["api_key"]; ok {
+		ollamaGroupIdentityChanges = append(ollamaGroupIdentityChanges, "credentials -> 'api_key' IS DISTINCT FROM "+credentialPlaceholder+"::jsonb -> 'api_key'")
+	}
+	if _, ok := updates.Credentials["base_url"]; ok {
+		ollamaGroupIdentityChanges = append(ollamaGroupIdentityChanges,
+			"NOT ("+ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'")+
+				" AND "+ollamaCloudBaseURLMatchesSQL(credentialPlaceholder+"::jsonb ->> 'base_url'")+")")
+	}
+
+	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" {
+		extraExpression := "COALESCE(extra, '{}'::jsonb)"
+		if len(updates.Extra) > 0 {
+			payload, err := json.Marshal(updates.Extra)
+			if err != nil {
+				return 0, err
+			}
+			extraExpression += " || $" + itoa(idx) + "::jsonb"
+			args = append(args, payload)
+			idx++
+			if upstreamBillingProbeExplicitlyDisabled(updates.Extra) || upstreamBillingProbeSnapshotClearRequested(updates.Extra) {
+				extraExpression = "(" + extraExpression + ") - 'upstream_billing_probe'"
+			}
+			if ollamaCloudUsageSnapshotClearRequested(updates.Extra) {
+				extraExpression = "(" + extraExpression + ") - 'ollama_cloud_usage_snapshot'"
+			}
 		}
-		extraExpression := "COALESCE(extra, '{}'::jsonb) || $" + itoa(idx) + "::jsonb"
-		if upstreamBillingProbeExplicitlyDisabled(updates.Extra) || upstreamBillingProbeSnapshotClearRequested(updates.Extra) {
-			extraExpression = "(" + extraExpression + ") - 'upstream_billing_probe'"
+		eligibleAccount := "platform IN ('openai', 'anthropic') AND type = 'apikey'"
+		groupIdentityChanged := ""
+		if len(ollamaGroupIdentityChanges) > 0 {
+			groupIdentityChanged = "(" + eligibleAccount + " AND (" + joinClauses(ollamaGroupIdentityChanges, " OR ") + "))"
+		}
+		snapshotIdentityChanged := groupIdentityChanged
+		if ollamaProxyIdentityChanged != "" {
+			proxyChanged := "(" + eligibleAccount + " AND " + ollamaProxyIdentityChanged + ")"
+			if snapshotIdentityChanged == "" {
+				snapshotIdentityChanged = proxyChanged
+			} else {
+				snapshotIdentityChanged = "(" + snapshotIdentityChanged + " OR " + proxyChanged + ")"
+			}
+		}
+		if groupIdentityChanged != "" {
+			extraExpression = "CASE" +
+				" WHEN " + groupIdentityChanged + " THEN (" + extraExpression + ") - 'ollama_cloud_usage_session' - 'ollama_cloud_usage_auto_refresh' - 'ollama_cloud_usage_snapshot'" +
+				" WHEN " + snapshotIdentityChanged + " THEN (" + extraExpression + ") - 'ollama_cloud_usage_snapshot'" +
+				" ELSE " + extraExpression + " END"
+		} else if snapshotIdentityChanged != "" {
+			extraExpression = "CASE WHEN " + snapshotIdentityChanged + " THEN (" + extraExpression + ") - 'ollama_cloud_usage_snapshot' ELSE " + extraExpression + " END"
 		}
 		setClauses = append(setClauses, "extra = "+extraExpression)
-		args = append(args, payload)
-		idx++
 	}
 
 	if len(setClauses) == 0 {

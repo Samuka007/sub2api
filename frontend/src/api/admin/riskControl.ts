@@ -9,6 +9,14 @@ export interface ContentModerationModelFilter {
   models: string[]
 }
 
+export interface ContentModerationTrustedAPIKey {
+  api_key_id: number
+  models?: string[]
+  endpoints?: string[]
+  expires_at?: string
+  reason: string
+}
+
 export interface ContentModerationConfig {
   enabled: boolean
   mode: ModerationMode
@@ -40,6 +48,7 @@ export interface ContentModerationConfig {
   blocked_keywords: string[]
   keyword_blocking_mode: KeywordBlockingMode
   model_filter: ContentModerationModelFilter
+  trusted_api_keys: ContentModerationTrustedAPIKey[]
   cyber_policy_exclude_from_ban_count: boolean
 }
 
@@ -116,6 +125,7 @@ export interface UpdateContentModerationConfig {
   blocked_keywords?: string[]
   keyword_blocking_mode?: KeywordBlockingMode
   model_filter?: ContentModerationModelFilter
+  trusted_api_keys?: ContentModerationTrustedAPIKey[]
   cyber_policy_exclude_from_ban_count?: boolean
 }
 

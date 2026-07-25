@@ -43,6 +43,9 @@ export interface UserSupportedModelPricing {
   image_output_price: number | null
   per_request_price: number | null
   intervals: UserPricingInterval[]
+  /** Display-only multiplier relative to official pricing. */
+  reference_multiplier?: number | null
+  reference_source?: string
 }
 
 export interface UserSupportedModel {
@@ -69,6 +72,11 @@ export interface UserAvailableChannel {
 }
 
 /** 列出当前用户可见的「可用渠道」（与 /groups/available 保持一致，返回平数组）。 */
+export interface UserGroupPricingModels {
+  group_id: number
+  models: UserSupportedModel[]
+}
+
 export async function getAvailable(options?: { signal?: AbortSignal }): Promise<UserAvailableChannel[]> {
   const { data } = await apiClient.get<UserAvailableChannel[]>('/channels/available', {
     signal: options?.signal
@@ -76,6 +84,13 @@ export async function getAvailable(options?: { signal?: AbortSignal }): Promise<
   return data
 }
 
-export const userChannelsAPI = { getAvailable }
+export async function getGroupPricing(options?: { signal?: AbortSignal }): Promise<UserGroupPricingModels[]> {
+  const { data } = await apiClient.get<UserGroupPricingModels[]>('/channels/group-pricing', {
+    signal: options?.signal
+  })
+  return data
+}
+
+export const userChannelsAPI = { getAvailable, getGroupPricing }
 
 export default userChannelsAPI

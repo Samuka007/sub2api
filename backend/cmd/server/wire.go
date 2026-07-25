@@ -132,6 +132,10 @@ func provideCleanup(
 	channelMonitorRunner *service.ChannelMonitorRunner,
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
+	quotaRecovery *service.QuotaRecoveryService,
+	plusQuotaAutomation *service.PlusQuotaAutomationService,
+	modelIQ *service.ModelIQService,
+	ollamaCloudUsage *service.OllamaCloudUsageService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
 ) func() {
@@ -349,6 +353,30 @@ func provideCleanup(
 			{"UpstreamBillingProbeService", func() error {
 				if upstreamBillingProbe != nil {
 					upstreamBillingProbe.Stop()
+				}
+				return nil
+			}},
+			{"QuotaRecoveryService", func() error {
+				if quotaRecovery != nil {
+					quotaRecovery.Stop()
+				}
+				return nil
+			}},
+			{"PlusQuotaAutomationService", func() error {
+				if plusQuotaAutomation != nil {
+					plusQuotaAutomation.Stop()
+				}
+				return nil
+			}},
+			{"ModelIQService", func() error {
+				if modelIQ != nil {
+					modelIQ.Stop()
+				}
+				return nil
+			}},
+			{"OllamaCloudUsageService", func() error {
+				if ollamaCloudUsage != nil {
+					ollamaCloudUsage.Stop()
 				}
 				return nil
 			}},

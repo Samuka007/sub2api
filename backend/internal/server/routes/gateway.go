@@ -22,22 +22,30 @@ func RegisterGatewayRoutes(
 	opsService *service.OpsService,
 	settingService *service.SettingService,
 	cfg *config.Config,
-	modelTraceManagers ...*modeltrace.Manager,
+	routeDependencies ...any,
 ) {
+	var modelTrace *modeltrace.Manager
+	var compositeResolver *service.CompositeRouteResolver
+	for _, dependency := range routeDependencies {
+		switch value := dependency.(type) {
+		case *modeltrace.Manager:
+			modelTrace = value
+		case *service.CompositeRouteResolver:
+			compositeResolver = value
+		}
+	}
 	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
 	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
 	endpointNorm := handler.InboundEndpointMiddleware()
-	var modelTrace *modeltrace.Manager
-	if len(modelTraceManagers) > 0 {
-		modelTrace = modelTraceManagers[0]
-	}
 	if h != nil && h.OpenAIGateway != nil {
 		h.OpenAIGateway.SetModelTraceManager(modelTrace)
 	}
 	modelTraceCandidate := modelTrace.CandidateMiddleware()
 	modelTraceDeferred := modelTrace.DeferredCandidateMiddleware()
+	compositeTarget := compositeTargetPlatformMiddleware(compositeResolver)
+	compositeGeminiTarget := compositeGeminiTargetPlatformMiddleware(compositeResolver)
 
 	// 未分组 Key 拦截中间件（按协议格式区分错误响应）
 	requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
@@ -197,25 +205,25 @@ func RegisterGatewayRoutes(
 		gateway := r.Group("/v1", clientRequestID, opsErrorLogger, modelTraceCandidate)
 
 		// Model execution candidates.
-		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, messagesHandler)
-		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-		gateway.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
-		gateway.POST("/chat/completions", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, chatCompletionsHandler)
-		gateway.POST("/embeddings", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, embeddingsHandler)
-		gateway.POST("/images/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
-		gateway.POST("/images/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
-		gateway.POST("/images/generations/async", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
-		gateway.POST("/images/edits/async", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
-		gateway.POST("/images/batches", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.BatchImage.Submit)
-		gateway.POST("/videos/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoGenerationHandler)
-		gateway.POST("/videos/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoEditHandler)
-		gateway.POST("/videos/extensions", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoExtensionHandler)
+		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, messagesHandler)
+		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		gateway.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+		gateway.POST("/chat/completions", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, chatCompletionsHandler)
+		gateway.POST("/embeddings", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, embeddingsHandler)
+		gateway.POST("/images/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, imagesHandler)
+		gateway.POST("/images/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, imagesHandler)
+		gateway.POST("/images/generations/async", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
+		gateway.POST("/images/edits/async", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
+		gateway.POST("/images/batches", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.BatchImage.Submit)
+		gateway.POST("/videos/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
+		gateway.POST("/videos/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoEditHandler)
+		gateway.POST("/videos/extensions", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoExtensionHandler)
 	}
-	r.POST("/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, countTokensHandler)
+	r.POST("/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, countTokensHandler)
 	{
 		// Control-plane routes retain their previous middleware order and never install Candidate.
-		gateway := r.Group("/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic)
+		gateway := r.Group("/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic)
 		gateway.GET("/models", modelsHandler)
 		gateway.GET("/usage", h.Gateway.Usage)
 		gateway.GET("/responses", responsesWebSocketHandler)
@@ -235,45 +243,45 @@ func RegisterGatewayRoutes(
 
 	// Gemini native API compatibility layer.
 	{
-		gemini := r.Group("/v1beta", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, googleAPIKeyAuth, requireGroupGoogle)
+		gemini := r.Group("/v1beta", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, googleAPIKeyAuth, compositeGeminiTarget, requireGroupGoogle)
 		// Gin treats ":" as a param marker, but Gemini uses "{model}:{action}" in the same segment.
 		gemini.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 	{
-		gemini := r.Group("/v1beta", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, googleAPIKeyAuth, requireGroupGoogle)
+		gemini := r.Group("/v1beta", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, googleAPIKeyAuth, compositeGeminiTarget, requireGroupGoogle)
 		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
 		gemini.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
 	}
 
 	// Root aliases: candidates install Candidate before the applicable body limit and auth chain.
-	r.POST("/responses", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-	r.POST("/responses/*subpath", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-	r.POST("/alpha/search", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
-	r.POST("/chat/completions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, chatCompletionsHandler)
-	r.POST("/embeddings", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, embeddingsHandler)
-	r.POST("/images/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
-	r.POST("/images/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
-	r.POST("/images/generations/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
-	r.POST("/images/edits/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
-	r.POST("/videos/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoGenerationHandler)
-	r.POST("/videos/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoEditHandler)
-	r.POST("/videos/extensions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoExtensionHandler)
-	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesWebSocketHandler)
-	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, modelsHandler)
-	r.POST("/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, countTokensHandler)
-	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Get)
-	r.GET("/videos/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoStatusHandler)
-	r.GET("/videos/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoContentHandler)
+	r.POST("/responses", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+	r.POST("/responses/*subpath", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+	r.POST("/alpha/search", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+	r.POST("/chat/completions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, chatCompletionsHandler)
+	r.POST("/embeddings", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, embeddingsHandler)
+	r.POST("/images/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, imagesHandler)
+	r.POST("/images/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, imagesHandler)
+	r.POST("/images/generations/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
+	r.POST("/images/edits/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
+	r.POST("/videos/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
+	r.POST("/videos/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoEditHandler)
+	r.POST("/videos/extensions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoExtensionHandler)
+	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesWebSocketHandler)
+	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, modelsHandler)
+	r.POST("/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, countTokensHandler)
+	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Get)
+	r.GET("/videos/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoStatusHandler)
+	r.GET("/videos/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoContentHandler)
 
 	// Codex direct aliases.
 	{
 		codexDirect := r.Group("/backend-api/codex", clientRequestID, opsErrorLogger, modelTraceCandidate)
-		codexDirect.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
-		codexDirect.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+		codexDirect.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		codexDirect.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	}
 	{
-		codexDirect := r.Group("/backend-api/codex", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic)
+		codexDirect := r.Group("/backend-api/codex", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic)
 		codexDirect.GET("/responses", responsesWebSocketHandler)
 		codexDirect.GET("/models", h.OpenAIGateway.CodexModels)
 	}
@@ -311,6 +319,11 @@ func getGroupPlatform(c *gin.Context) string {
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil {
 		return ""
+	}
+	if apiKey.Group.Platform == service.PlatformComposite {
+		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
+			return platform
+		}
 	}
 	return apiKey.Group.Platform
 }

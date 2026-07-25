@@ -61,6 +61,23 @@ func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	require.Equal(t, 16384, cfg.APIKeyAuth.InvalidAbuse.Capacity)
 }
 
+func TestLoadCodexRadarConfigFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("CODEX_RADAR_ENABLED", "true")
+	t.Setenv("CODEX_RADAR_BASE_URL", "https://example.test/api/current")
+	t.Setenv("CODEX_RADAR_API_TOKEN", "environment-token")
+	t.Setenv("CODEX_RADAR_TIMEOUT", "9s")
+	t.Setenv("CODEX_RADAR_CACHE_TTL", "7m")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.CodexRadar.Enabled)
+	require.Equal(t, "https://example.test/api/current", cfg.CodexRadar.BaseURL)
+	require.Equal(t, "environment-token", cfg.CodexRadar.APIToken)
+	require.Equal(t, 9*time.Second, cfg.CodexRadar.Timeout)
+	require.Equal(t, 7*time.Minute, cfg.CodexRadar.CacheTTL)
+}
+
 func TestNormalizeForwardedClientIPHeaders(t *testing.T) {
 	headers, err := NormalizeForwardedClientIPHeaders([]string{
 		" x-cdn-client-ip ",
@@ -497,6 +514,22 @@ func TestLoadDefaultOpenAIHTTP2Enabled(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, cfg.Gateway.OpenAIHTTP2.Enabled)
 	require.True(t, cfg.Gateway.OpenAIHTTP2.AllowProxyFallbackToHTTP1)
+	require.Equal(t, 2, cfg.Gateway.OpenAIProxyStreamCircuit.FailureThreshold)
+	require.Equal(t, 60, cfg.Gateway.OpenAIProxyStreamCircuit.WindowSeconds)
+	require.Equal(t, 600, cfg.Gateway.OpenAIProxyStreamCircuit.TTLSeconds)
+}
+
+func TestLoadOpenAIProxyStreamCircuitFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_FAILURE_THRESHOLD", "3")
+	t.Setenv("GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_WINDOW_SECONDS", "90")
+	t.Setenv("GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_TTL_SECONDS", "420")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 3, cfg.Gateway.OpenAIProxyStreamCircuit.FailureThreshold)
+	require.Equal(t, 90, cfg.Gateway.OpenAIProxyStreamCircuit.WindowSeconds)
+	require.Equal(t, 420, cfg.Gateway.OpenAIProxyStreamCircuit.TTLSeconds)
 }
 
 func TestLoadOpenAIHTTP2DisabledFromEnv(t *testing.T) {
@@ -1743,6 +1776,21 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway openai http2 fallback ttl",
 			mutate:  func(c *Config) { c.Gateway.OpenAIHTTP2.FallbackTTLSeconds = -1 },
 			wantErr: "gateway.openai_http2.fallback_ttl_seconds",
+		},
+		{
+			name:    "gateway openai proxy stream circuit threshold",
+			mutate:  func(c *Config) { c.Gateway.OpenAIProxyStreamCircuit.FailureThreshold = -1 },
+			wantErr: "gateway.openai_proxy_stream_circuit.failure_threshold",
+		},
+		{
+			name:    "gateway openai proxy stream circuit window",
+			mutate:  func(c *Config) { c.Gateway.OpenAIProxyStreamCircuit.WindowSeconds = -1 },
+			wantErr: "gateway.openai_proxy_stream_circuit.window_seconds",
+		},
+		{
+			name:    "gateway openai proxy stream circuit ttl",
+			mutate:  func(c *Config) { c.Gateway.OpenAIProxyStreamCircuit.TTLSeconds = -1 },
+			wantErr: "gateway.openai_proxy_stream_circuit.ttl_seconds",
 		},
 		{
 			name:    "gateway stream data interval range",

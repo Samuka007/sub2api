@@ -238,6 +238,11 @@ docker compose down -v
 | `ADMIN_EMAIL` | No | `admin@sub2api.local` | Admin email |
 | `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
+| `CODEX_RADAR_ENABLED` | No | `false` | Enable the Model IQ page and Codex Radar proxy. |
+| `CODEX_RADAR_BASE_URL` | No | `https://codexradar.com/api/v1/current` | HTTPS endpoint used by Model IQ. |
+| `CODEX_RADAR_API_TOKEN` | When enabled | *(empty)* | Runtime-only Codex Radar token. Never commit it. |
+| `CODEX_RADAR_TIMEOUT` | No | `15s` | Upstream request timeout. |
+| `CODEX_RADAR_CACHE_TTL` | No | `5m` | In-process Model IQ snapshot cache duration. |
 | `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_CLIENT_SECRET` | No | *(builtin)* | Google OAuth client secret (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
@@ -245,6 +250,10 @@ docker compose down -v
 | `GEMINI_QUOTA_POLICY` | No | *(empty)* | JSON overrides for Gemini local quota simulation (Code Assist only). |
 
 See `.env.example` for all available options.
+
+To enable Model IQ with Docker Compose, set `CODEX_RADAR_ENABLED=true` and
+`CODEX_RADAR_API_TOKEN` in the Git-ignored `deploy/.env` file. Keep that file
+readable only by the deployment account (for example, `chmod 600 deploy/.env`).
 
 > **Note:** The `docker-deploy.sh` script automatically generates `JWT_SECRET`, `TOTP_ENCRYPTION_KEY`, and `POSTGRES_PASSWORD` for you.
 

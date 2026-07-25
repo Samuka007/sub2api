@@ -139,6 +139,42 @@ func (s *PromptService) Enqueue(_ context.Context, req Request) error {
 	return nil
 }
 
+func (s *PromptService) Observe(ctx context.Context, req Request) error {
+	mode := s.EffectiveMode()
+	if mode == ModeAsync {
+		return s.Enqueue(ctx, req)
+	}
+	if s == nil || mode != ModeBlocking || s.enqueuer == nil {
+		return nil
+	}
+	select {
+	case s.enqueueSlots <- struct{}{}:
+	default:
+		if s.metrics != nil {
+			s.metrics.IncDropped()
+		}
+		LogWarn(EventEnqueueDropped, map[string]any{"request_id": req.RequestID, "status": "dropped", "error_code": "local_observe_busy"})
+		return nil
+	}
+	s.lifecycleMu.Lock()
+	background := s.background
+	s.lifecycleMu.Unlock()
+	if background == nil {
+		<-s.enqueueSlots
+		return errors.New("prompt audit service not started")
+	}
+	requestCopy := req.Clone()
+	s.enqueueWG.Add(1)
+	go func() {
+		defer s.enqueueWG.Done()
+		defer func() { <-s.enqueueSlots }()
+		observeCtx, cancel := context.WithTimeout(background, 2*time.Second)
+		defer cancel()
+		_ = s.enqueuer.EnqueueObserveOnly(observeCtx, requestCopy)
+	}()
+	return nil
+}
+
 func (s *PromptService) Evaluate(ctx context.Context, req Request) (*PromptDecision, error) {
 	if s == nil || s.config == nil || s.evaluator == nil {
 		return nil, &GuardError{Code: ErrorCodeUnavailable}

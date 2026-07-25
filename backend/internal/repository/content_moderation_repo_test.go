@@ -21,14 +21,14 @@ func TestBuildContentModerationLogWhere_BlockedIncludesAllBlockActions(t *testin
 	require.NotContains(t, sql, "l.action = 'block'")
 }
 
-func TestContentModerationRepositoryCountFlaggedByUserSince_ExcludesHashBlock(t *testing.T) {
+func TestContentModerationRepositoryCountFlaggedByUserSince_ExcludesNonViolationActions(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	repo := NewContentModerationRepository(db)
 	since := time.Now().Add(-time.Hour)
-	mock.ExpectQuery(regexp.QuoteMeta("AND action <> 'hash_block'")).
+	mock.ExpectQuery("(?s)"+regexp.QuoteMeta("AND action <> 'hash_block'")+".*"+regexp.QuoteMeta("AND action <> 'trusted_observe'")).
 		WithArgs(int64(1001), since, false).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 
@@ -36,6 +36,23 @@ func TestContentModerationRepositoryCountFlaggedByUserSince_ExcludesHashBlock(t 
 
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestContentModerationRepositoryExistingAPIKeyIDsOnlyReturnsActiveRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	repo := NewContentModerationRepository(db)
+	mock.ExpectQuery("(?s)" + regexp.QuoteMeta("FROM api_keys") + ".*" + regexp.QuoteMeta("deleted_at IS NULL")).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(42)))
+
+	ids, err := repo.ExistingAPIKeyIDs(context.Background(), []int64{42, 99})
+
+	require.NoError(t, err)
+	require.Equal(t, []int64{42}, ids)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
