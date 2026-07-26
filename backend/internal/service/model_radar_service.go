@@ -234,15 +234,26 @@ func parseModelRadarHTML(body []byte) (*ModelRadarSnapshot, error) {
 
 	quota := parseModelRadarSection(doc, "quota-radar")
 	fast := parseModelRadarSection(doc, "fast-radar")
+	qualityRoot := findElementByClass(doc, "model-iq")
 	quality := parseModelRadarSection(doc, "model-iq")
-	if quota == nil || fast == nil || quality == nil {
+	if quality == nil {
+		// The source renamed the static quality section to model-ratings. Its
+		// detailed IQ cards are loaded client-side, so the section may exist
+		// without cards in the HTML response.
+		qualityRoot = findElementByClass(doc, "model-ratings")
+		quality = parseModelRadarSection(doc, "model-ratings")
+	}
+	if quota == nil || fast == nil {
 		return nil, errors.New("source page does not contain the expected radar sections")
+	}
+	if quality == nil {
+		quality = &ModelRadarSection{Title: "模型质量"}
 	}
 
 	quota.Table = extractFirstTable(findElementByClass(doc, "quota-radar"))
 	fast.Table = extractFirstTable(findElementByClass(doc, "fast-radar"))
-	quality.Cards = extractQualityCards(findElementByClass(doc, "model-iq"))
-	if len(quality.Cards) == 0 {
+	quality.Cards = extractQualityCards(qualityRoot)
+	if qualityRoot != nil && hasClass(qualityRoot, "model-iq") && len(quality.Cards) == 0 {
 		return nil, errors.New("source page does not contain model quality cards")
 	}
 

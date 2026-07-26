@@ -10,9 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -42,6 +45,7 @@ type OpenAIGatewayHandler struct {
 	imageLimiter               *imageConcurrencyLimiter
 	maxAccountSwitches         int
 	cfg                        *config.Config
+	modelTraceManager          atomic.Pointer[modeltrace.Manager]
 }
 
 type grokMediaEligibilityProber interface {
@@ -115,16 +119,20 @@ func usageRecordContext(parent context.Context, base context.Context) context.Co
 	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
 		base = context.WithValue(base, ctxkey.RequestID, strings.TrimSpace(requestID))
 	}
-	return base
+	return recording.Propagate(parent, base)
 }
 
-func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) service.UsageRecordTask {
+func wrapDetachedUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) (service.UsageRecordTask, func()) {
 	if task == nil {
-		return nil
+		return nil, func() {}
 	}
+	detached, release := recording.Detach(parent, usageRecordContext(parent, context.Background()))
+	var releaseOnce sync.Once
+	finalize := func() { releaseOnce.Do(release) }
 	return func(ctx context.Context) {
-		task(usageRecordContext(parent, ctx))
-	}
+		defer finalize()
+		task(usageRecordContext(detached, ctx))
+	}, finalize
 }
 
 func openAICompatibleRequestPlatform(ctx context.Context, apiKey *service.APIKey) string {
@@ -196,6 +204,15 @@ func NewOpenAIGatewayHandler(
 	}
 }
 
+// SetModelTraceManager installs the process manager used when a WebSocket turn
+// begins. Calling it between turns affects only subsequent response.create frames.
+func (h *OpenAIGatewayHandler) SetModelTraceManager(manager *modeltrace.Manager) {
+	if h == nil {
+		return
+	}
+	h.modelTraceManager.Store(manager)
+}
+
 // Responses handles OpenAI Responses API endpoint
 // POST /openai/v1/responses
 func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
@@ -246,6 +263,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	modelTraceCtx := c.Request.Context()
 
 	setOpsRequestContext(c, "", false)
 	sessionHashBody := body
@@ -640,7 +658,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
 		cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(modelTraceCtx, result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -873,6 +891,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	modelTraceCtx := c.Request.Context()
 
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
@@ -1150,7 +1169,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 
 		cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(modelTraceCtx, result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -1410,6 +1429,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
 		return
 	}
+	traceTurns := newOpenAIWSTraceTurns(h, c, apiKey, subject)
+	defer traceTurns.finishOpen()
 
 	reqLog := requestLogger(
 		c,
@@ -1501,7 +1522,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid JSON payload")
 		return
 	}
+	if !isOpenAIWSResponseCreateFrame(firstMessage) {
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "first websocket message must be response.create")
+		return
+	}
+
 	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
+	traceTurns.start(1, firstMessage, reqModel)
 	if reqModel == "" {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
 		return
@@ -1802,6 +1829,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if model == "" {
 					model = reqModel
 				}
+				traceTurns.start(turn, payload, model)
 				currentTurnModel = model
 				requestPayloadHash = service.HashUsageRequestPayload(payload)
 				currentTurnTrustedObserve = h.isContentModerationTrustedAPIKey(c.Request.Context(), apiKey, model, GetInboundEndpoint(c))
@@ -1824,6 +1852,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if cyberBlockedThisConn && !currentTurnTrustedObserve {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
+				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
+					Provider:      string(account.Platform),
+					Operation:     "responses_websocket",
+					ClientModel:   currentTurnModel,
+					UpstreamModel: account.GetMappedModel(currentTurnModel),
+					AccountID:     account.ID,
+				})
 				if turn == 1 {
 					return nil
 				}
@@ -1852,9 +1887,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 				currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
+				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
+					Provider:      string(account.Platform),
+					Operation:     "responses_websocket",
+					ClientModel:   currentTurnModel,
+					UpstreamModel: account.GetMappedModel(currentTurnModel),
+					AccountID:     account.ID,
+				})
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				turnTraceCtx := traceTurns.context(turn)
+				defer traceTurns.finish(turn, result, turnErr)
 				hooksMu.Lock()
 				defer hooksMu.Unlock()
 				// F1: cyber 标记按 turn 生命周期清理——defer 保证任意早返回路径都执行；
@@ -1899,7 +1943,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 				channelUsageFields := clientRequestedUsageFields(c, channelMappingWS, turnModel, turnResult.UpstreamModel)
-				h.submitOpenAIUsageRecordTask(ctx, turnResult, func(taskCtx context.Context) {
+				h.submitOpenAIUsageRecordTask(turnTraceCtx, turnResult, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             turnResult,
 						APIKey:             apiKey,
@@ -1923,6 +1967,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						)
 					}
 				})
+			},
+			AfterClientWrite: func(turn int, payload []byte, writeErr error) {
+				traceTurns.observeClientWrite(turn, payload, writeErr)
+			},
+			ContextForTurn: func(turn int) context.Context {
+				return traceTurns.context(turn)
 			},
 		}
 
@@ -2113,9 +2163,11 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 	if task == nil {
 		return
 	}
-	task = wrapUsageRecordTaskContext(parent, task)
+	task, finalize := wrapDetachedUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
-		h.usageRecordWorkerPool.Submit(task)
+		if mode := h.usageRecordWorkerPool.Submit(task); mode == service.UsageRecordSubmitModeDropped {
+			finalize()
+		}
 		return
 	}
 	// 回退路径：worker 池未注入时同步执行，避免退回到无界 goroutine 模式。
@@ -2144,7 +2196,7 @@ func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Con
 	if task == nil {
 		return
 	}
-	task = wrapUsageRecordTaskContext(parent, task)
+	task, _ = wrapDetachedUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDropped {
 			return

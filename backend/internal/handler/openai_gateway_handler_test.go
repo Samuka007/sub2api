@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -1540,11 +1542,13 @@ type openAIResponsesWSUsageLogCase struct {
 	firstPayload   string
 	userAgent      *string
 	channelMapping map[string]string
+	traceManager   *modeltrace.Manager
 }
 
 type openAIResponsesWSUsageLogResult struct {
 	log                  *service.UsageLog
 	upstreamFirstPayload []byte
+	traceContinuation    recording.TraceContinuation
 }
 
 type openAIWSUsageHandlerAccountRepoStub struct {
@@ -1642,12 +1646,17 @@ func (s *openAIWSFailoverHandlerAccountRepoStub) SetRateLimited(ctx context.Cont
 
 type openAIWSUsageHandlerUsageLogRepoStub struct {
 	service.UsageLogRepository
-	created chan *service.UsageLog
+	created            chan *service.UsageLog
+	traceContinuations chan recording.TraceContinuation
 }
 
 func (s *openAIWSUsageHandlerUsageLogRepoStub) Create(ctx context.Context, log *service.UsageLog) (bool, error) {
 	if s.created != nil {
 		s.created <- log
+	}
+	if s.traceContinuations != nil {
+		continuation, _ := recording.ContinuationFromContext(ctx)
+		s.traceContinuations <- continuation
 	}
 	return true, nil
 }
@@ -2243,7 +2252,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 
 	accountRepo := &openAIWSUsageHandlerAccountRepoStub{account: account}
 	usageRepo := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 1)}
-
+	if tc.traceManager != nil {
+		usageRepo.traceContinuations = make(chan recording.TraceContinuation, 1)
+	}
 	var channelSvc *service.ChannelService
 	if len(tc.channelMapping) > 0 {
 		channelSvc = service.NewChannelService(&openAIWSUsageHandlerChannelRepoStub{
@@ -2297,6 +2308,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		billingCacheService: billingCacheSvc,
 		apiKeyService:       &service.APIKeyService{},
 		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
+	}
+	if tc.traceManager != nil {
+		h.SetModelTraceManager(tc.traceManager)
 	}
 
 	apiKey := &service.APIKey{
@@ -2364,7 +2378,17 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		t.Fatal("等待上游 WebSocket 结束超时")
 	}
 
+	var traceContinuation recording.TraceContinuation
+	if usageRepo.traceContinuations != nil {
+		select {
+		case traceContinuation = <-usageRepo.traceContinuations:
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待 WebSocket usage trace context 超时")
+		}
+	}
+
 	return openAIResponsesWSUsageLogResult{
+		traceContinuation:    traceContinuation,
 		log:                  usageLog,
 		upstreamFirstPayload: upstreamFirstPayload,
 	}

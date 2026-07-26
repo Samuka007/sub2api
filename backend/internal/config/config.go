@@ -4,9 +4,11 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -99,7 +101,20 @@ type Config struct {
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	ModelTracing            ModelTracingConfig            `mapstructure:"model_tracing"`
 	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
+}
+
+// ModelTracingConfig 模型请求 OTEL/Langfuse 追踪配置（默认关闭）。
+type ModelTracingConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	Endpoint            string `mapstructure:"endpoint"`
+	PublicKey           string `mapstructure:"public_key"`
+	SecretKey           string `mapstructure:"secret_key"`
+	PromptMaxBytes      int    `mapstructure:"prompt_max_bytes"`
+	ResponseMaxBytes    int    `mapstructure:"response_max_bytes"`
+	MediaMaxBytes       int    `mapstructure:"media_max_bytes"`
+	CaptureMediaContent bool   `mapstructure:"capture_media_content"`
 }
 
 type LogConfig struct {
@@ -1729,6 +1744,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Server.Mode = "debug"
 	}
 	cfg.Server.FrontendURL = strings.TrimSpace(cfg.Server.FrontendURL)
+	normalizeModelTracingConfig(&cfg.ModelTracing)
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
 	cfg.LinuxDo.ClientID = strings.TrimSpace(cfg.LinuxDo.ClientID)
 	cfg.LinuxDo.ClientSecret = strings.TrimSpace(cfg.LinuxDo.ClientSecret)
@@ -2401,6 +2417,8 @@ func setDefaults() {
 	// Subscription Maintenance (bounded queue + worker pool)
 	viper.SetDefault("subscription_maintenance.worker_count", 2)
 	viper.SetDefault("subscription_maintenance.queue_size", 1024)
+
+	setModelTracingDefaults()
 
 	setEnvReachableDefaults()
 }
@@ -3646,4 +3664,84 @@ func warnIfInsecureURL(field, raw string) {
 	if strings.EqualFold(u.Scheme, "http") {
 		slog.Warn("url uses http scheme; use https in production to avoid token leakage", "field", field)
 	}
+}
+
+func setModelTracingDefaults() {
+	viper.SetDefault("model_tracing.enabled", false)
+	viper.SetDefault("model_tracing.endpoint", "")
+	viper.SetDefault("model_tracing.public_key", "")
+	viper.SetDefault("model_tracing.secret_key", "")
+	viper.SetDefault("model_tracing.prompt_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.response_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.media_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.capture_media_content", false)
+}
+
+// normalizeModelTracingConfig applies safe capture defaults and degrades an invalid
+// deployment target to disabled. Runtime updates use the stricter modeltrace validator.
+func normalizeModelTracingConfig(value *ModelTracingConfig) {
+	if value == nil {
+		return
+	}
+	value.Endpoint = strings.TrimSpace(value.Endpoint)
+	value.PublicKey = strings.TrimSpace(value.PublicKey)
+	value.SecretKey = strings.TrimSpace(value.SecretKey)
+	if value.PromptMaxBytes <= 0 {
+		value.PromptMaxBytes = 1 << 20
+	}
+	if value.ResponseMaxBytes <= 0 {
+		value.ResponseMaxBytes = 1 << 20
+	}
+	if value.MediaMaxBytes <= 0 {
+		value.MediaMaxBytes = 1 << 20
+	}
+	if !value.Enabled {
+		return
+	}
+	if value.PublicKey == "" || value.SecretKey == "" || ValidateModelTracingEndpoint(value.Endpoint) != nil {
+		value.Enabled = false
+		slog.Warn("invalid model_tracing deployment config; tracing disabled")
+	}
+}
+
+// ValidateModelTracingEndpoint accepts HTTPS targets and loopback-only HTTP
+// targets. Credentials and URL suffix components are forbidden because the
+// endpoint is used as an OTLP transport authority and base path.
+func ValidateModelTracingEndpoint(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("endpoint is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("endpoint host is empty")
+	}
+	if u.User != nil {
+		return errors.New("endpoint must not include userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("endpoint must not include a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("endpoint must not include a fragment")
+	}
+	host := u.Hostname()
+	if strings.EqualFold(u.Scheme, "http") && !isModelTracingLoopbackHost(host) {
+		return fmt.Errorf("http endpoint must be loopback, got %q", host)
+	}
+	return nil
+}
+
+func isModelTracingLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

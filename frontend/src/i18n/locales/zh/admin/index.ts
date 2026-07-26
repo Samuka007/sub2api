@@ -6,6 +6,7 @@ import ops from './ops'
 import settings from './settings'
 import audit from './audit'
 import promptAudit from './promptAudit'
+import modelTracing from './modelTracing'
 import plusQuotaAutomation from './plusQuotaAutomation'
 
 export default {
@@ -17,5 +18,6 @@ export default {
   ...settings,
   ...audit,
   ...promptAudit,
+  ...modelTracing,
   ...plusQuotaAutomation,
 }

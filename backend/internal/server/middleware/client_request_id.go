@@ -36,6 +36,21 @@ func ClientRequestID() gin.HandlerFunc {
 			return
 		}
 
+		if v := strings.TrimSpace(c.GetHeader(clientRequestIDHeader)); v != "" {
+			var valid bool
+			v, valid = normalizeCorrelationID(v)
+			if !valid {
+				v = uuid.New().String()
+			}
+			c.Header(clientRequestIDHeader, v)
+			ctx := context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, v)
+			requestLogger := logger.FromContext(ctx).With(zap.String("client_request_id", v))
+			ctx = logger.IntoContext(ctx, requestLogger)
+			c.Request = c.Request.WithContext(ctx)
+			c.Next()
+			return
+		}
+
 		id := uuid.New().String()
 		c.Header(clientRequestIDHeader, id)
 		ctx := context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, id)
