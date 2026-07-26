@@ -135,3 +135,9 @@
 - RED：`cd backend && go test ./internal/config -run TestLoadDisablesModelTracingForUnsafeEndpointComponents -count=1`，三个 userinfo/query/fragment case 均因 tracing 未关闭而失败。
 - GREEN：同一命令退出 0；`cd backend && go test ./internal/modeltrace/... -run TestModelTraceEndpointTransport -count=1` 退出 0。
 - 本次不增加网络 probe，不读取 Langfuse Public API，不记录任何真实或本地测试凭据。
+
+## 2026-07-26 — 发布质量门禁格式修复
+
+- `backend/internal/modeltrace/tests/config_manager_test.go` 仅执行 `gofmt`，修复 Code Quality 的格式门禁；模型追踪生产行为、测试断言和配置契约均未改变。
+- 验证：`gofmt -l backend/internal/modeltrace/tests/config_manager_test.go` 无输出；完整 `make test-unit` 与 golangci-lint `v2.9.0` 退出 0。
+- 本次不新增或记录任何模型追踪凭据、endpoint 或运行时配置。

@@ -314,15 +314,15 @@ func TestModelTraceConfigAdminAPIRejectsEndpointCredentialsQueriesAndFragments(t
 func TestModelTraceConfigPublicReadDoesNotEchoInvalidStoredEndpoint(t *testing.T) {
 	const invalidEndpoint = "https://user:credential-canary@langfuse.example.test/api/public/otel?token=query-canary#fragment-canary"
 	raw, err := json.Marshal(modeltrace.RuntimeConfig{
-		Configured:          true,
-		Enabled:             true,
-		Endpoint:            invalidEndpoint,
-		PublicKey:           "runtime-public",
-		SecretKeyEncrypted:  "enc:runtime-secret",
-		PromptMaxBytes:      100,
-		ResponseMaxBytes:    200,
-		MediaMaxBytes:       300,
-		ConfigVersion:       4,
+		Configured:         true,
+		Enabled:            true,
+		Endpoint:           invalidEndpoint,
+		PublicKey:          "runtime-public",
+		SecretKeyEncrypted: "enc:runtime-secret",
+		PromptMaxBytes:     100,
+		ResponseMaxBytes:   200,
+		MediaMaxBytes:      300,
+		ConfigVersion:      4,
 	})
 	require.NoError(t, err)
 	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{value: string(raw)}, modelTracePrefixEncryptor{}, true)

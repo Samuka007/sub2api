@@ -1255,7 +1255,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		relayErr,
 		relayExit.WroteDownstream,
 	)
-	if clientDisconnected.Load() {
+	var requestedClientCloseErr *OpenAIWSClientCloseError
+	if clientDisconnected.Load() && relayExit.Stage == "read_client" && !errors.As(relayErr, &requestedClientCloseErr) {
 		turnErr = ErrOpenAIWSClientDisconnected
 	}
 	turnNo := int(currentTurn.Load())
