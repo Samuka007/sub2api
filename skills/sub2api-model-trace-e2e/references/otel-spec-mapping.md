@@ -1,15 +1,6 @@
 # OTEL Spec 映射与 503 设计依据
 
-## OpenSpec 来源
-
-完整规格在仓库 `openspec/changes/add-model-request-otel-tracing/`：
-- `proposal.md` — 变更动机与范围
-- `design.md` — 14 个设计决策，含 `internal/modeltrace`、根 Trace + Generation、fail-open、endpoint 校验和 Langfuse 属性映射
-- `specs/model-request-tracing/spec.md` — 模型请求追踪能力需求
-- `specs/langfuse-otel-export/spec.md` — Langfuse OTLP 导出能力需求
-- `tasks.md` — 真源中只有 1.1 / 2.1 / 2.2 已勾选；3.1 及以后仍未勾选。本 reference 只记录 e2e harness 已覆盖的行为，不代替或推断 OpenSpec task 完成状态。
-
-## 本 e2e 验证的 spec 映射
+## 本 e2e 验证的行为契约映射
 
 | Spec Requirement | Scenario | e2e 验证点 |
 |---|---|---|
@@ -47,30 +38,18 @@
 3. **覆盖边界**：无账号 503、故障转移 429→200、非流式协议转换、真实 SSE 正常完成和真实 queue/worker 异步续接都在同一隔离环境可复现。
 4. **不等价声明**：本地 fixture 证明网关、异步 worker 与 Langfuse 链路，不证明任一外部厂商服务当前可用，也不证明生产网络、证书或配额。
 
-## 当前 e2e harness 对 OpenSpec tasks 的覆盖
+## 当前 e2e harness 覆盖边界
 
-下表是脚本行为覆盖，不修改 `tasks.md` checkbox，也不等于完整 task 已完成。
+完整 smoke 已覆盖匿名/未知/控制面零 Trace、已识别 503/401 单根 Trace、Chat Completions→Anthropic 故障转移、内容截断与 secret canary、正常 SSE、运行中配置快照、500/慢 exporter fail-open，以及真实 Gemini Batch queue/worker。
 
-| Task | 当前真实 smoke 覆盖 | 仍未由本脚本覆盖 |
-|---|---|---|
-| 3.1 | 匿名/未知/控制面 0 Trace；已识别无账号 503 和 disabled 401 各单根 Trace | 全部受限 Key、协议校验和控制面矩阵 |
-| 4.1 | Chat Completions→Anthropic；确定性 429→200 与所有尝试均失败；每个真实 attempt 的账号、状态、父子和安全 output | 更多协议转换组合 |
-| 5.1 | 小上限截断、默认媒体 descriptor、系统 secret/media canary 零命中；部署默认 1 MiB 可观察且接近上限 Prompt 真正落 Langfuse | 原始媒体 opt-in 及更多媒体类型 |
-| 6.1 | 正常 SSE 的客户端帧、真实 Generation 层级和 `completed` 终态；真实慢/500 exporter fail-open | 客户端断连和上游中途错误仍未由真实 Langfuse 黑盒覆盖，因此不得标为完整 6.1 验收 |
-| 9.1 | 真实 Gemini Batch API 提交、queue/worker、配置上限 200 item 成败终态；API 与 Langfuse 的 item ID 精确唯一集合、持久化 continuation fingerprint 匹配，并在同一 Trace 根下生成 200 个直系 GENERATION；默认媒体 canary 零泄露 | 异步图片入口、fingerprint 错配/目标切换/关闭、item 重试和任务取消；因此不得标为完整 9.1 验收 |
+以下场景仍需由聚焦 Go 测试或全规模验收补充，不能由单次真实 Langfuse smoke 替代：
 
-## 尚未由本 e2e 完整验收的 OpenSpec tasks / 场景
-
-| Task | 缺口 |
-|---|---|
-| 6.1 | 正常 SSE、慢 exporter 与 exporter 500 有真实 smoke；客户端断连、上游部分失败仍缺真实 Langfuse 黑盒 |
-| 6.2 | Responses WebSocket 多回合、断连和回合间配置切换未在本脚本执行 |
-| 7.1 | 本脚本未逐字段比对最终 Usage Log、token/cost；未知 Usage 不伪造由完整后端测试保护 |
-| 7.2 | 当前 smoke 验证显式同 session 归组及 `prompt_cache_key` 排除；完整 allowlist 和跨协议矩阵未执行 |
-| 8.1 | 全同步协议/入口矩阵未执行 |
-| 9.1 | 已在真实 queue/worker 验证配置上限 200 item 的精确唯一身份集合；异步图片、fingerprint 错配与 OTel Link、目标切换/关闭、进程重启、item 重试和取消仍缺 |
-| 10.1 | 已真实验证进行中请求采用旧配置完成、关闭后新请求不追踪、500/慢 exporter fail-open；目标切换和进程崩溃隔离未由黑盒脚本执行 |
-| 11.1 | `run_full_e2e.sh` 执行全后端/前端测试、相关 race、production build、200-item 黑盒与本机 benchmark；benchmark 只记录当前基线，不证明生产性能或跨机器阈值 |
+- 客户端断连、上游部分失败和 Responses WebSocket 多回合/配置切换；
+- Usage Log 与 token/cost 逐字段比对，以及完整 Session allowlist；
+- 全同步协议/入口矩阵；
+- 异步 fingerprint 错配、目标切换、关闭、重试与取消；
+- 目标切换、序列化失败和进程崩溃的完整 fail-open 对照；
+- `run_full_e2e.sh` 的全后端/前端测试、race、production build、200-item 黑盒和本机 benchmark。
 
 ## 与 sub2api 仓库规约的关系
 

@@ -51,8 +51,7 @@ func TestExtractConversationDelta_fromResponsesSSE(t *testing.T) {
 		"event: response.completed\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"a1\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi there\"}]}]}}\n\n")
 	normalized := modeltrace.NormalizeConversationOutput(sse)
-	events, compact := modeltrace.ExtractConversationDelta("sess", "turn", []byte(input), normalized, nil)
-	require.False(t, compact)
+	events := modeltrace.ExtractConversationDelta("sess", "turn", []byte(input), normalized)
 	require.Len(t, events, 2)
 	require.Equal(t, "chat.user", events[0].Name)
 	require.Equal(t, "u1", events[0].MessageID)

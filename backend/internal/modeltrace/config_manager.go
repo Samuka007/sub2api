@@ -451,7 +451,7 @@ func normalizeConfig(value config.ModelTracingConfig) (config.ModelTracingConfig
 		value.Endpoint = sanitizeEndpointForDisplay(value.Endpoint)
 		return value, true
 	}
-	if ValidateEndpoint(value.Endpoint) != nil || value.PublicKey == "" || value.SecretKey == "" {
+	if config.ValidateModelTracingEndpoint(value.Endpoint) != nil || value.PublicKey == "" || value.SecretKey == "" {
 		return config.ModelTracingConfig{}, false
 	}
 	return value, true

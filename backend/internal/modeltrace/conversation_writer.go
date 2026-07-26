@@ -82,8 +82,7 @@ func (j conversationTrackJob) run() {
 	defer j.generation.Release()
 	ctx, cancel := context.WithTimeout(j.parent, conversationTrackTimeout)
 	defer cancel()
-	cfg := j.generation.Config()
-	recordConversationTrack(ctx, j.tracer, cfg.Endpoint, cfg.PublicKey, cfg.SecretKey, j.sessionID, j.input, j.output, j.headers)
+	recordConversationTrack(ctx, j.tracer, j.sessionID, j.input, j.output, j.headers)
 }
 
 func boundedConversationPayload(payload []byte) []byte {
@@ -149,9 +148,9 @@ func WriteConversationEvents(ctx context.Context, tracer trace.Tracer, events []
 	}
 }
 
-// recordConversationTrack loads existing IDs, extracts deltas, and writes chat.*.
-// Failures never propagate to the request path.
-func recordConversationTrack(ctx context.Context, tracer trace.Tracer, cfgEndpoint, publicKey, secretKey, sessionID string, input, output []byte, headers http.Header) {
+// recordConversationTrack extracts only the current request and response and
+// writes append-only chat.* events. It never reads persisted Langfuse history.
+func recordConversationTrack(ctx context.Context, tracer trace.Tracer, sessionID string, input, output []byte, headers http.Header) {
 	if sessionID == "" || tracer == nil {
 		return
 	}
@@ -160,47 +159,21 @@ func recordConversationTrack(ctx context.Context, tracer trace.Tracer, cfgEndpoi
 		turnID = MessageIDFromProtocolOrHash("", append([]byte(`{"generated_turn":true,"session_id":`), []byte(sessionID)...))[:16]
 	}
 
-	existing := map[string]string{}
-	readOK := false
-	if reader := langfuseReaderForTracing(cfgEndpoint, publicKey, secretKey); reader != nil {
-		ids, err := reader.ListChatMessageIDs(ctx, sessionID)
-		if err != nil {
-			slog.Warn("modeltrace conversation read-back failed; writing all parsed chat items",
-				"error", err.Error(),
-			)
-		} else {
-			existing = ids
-			readOK = true
-		}
-	} else {
-		slog.Warn("modeltrace conversation read-back unavailable; writing all parsed chat items")
-	}
-
-	var existingForDelta map[string]string
-	if readOK {
-		existingForDelta = existing
-	}
-
 	normalizedOutput := NormalizeConversationOutput(output)
-	events, compact := ExtractConversationDelta(sessionID, turnID, input, normalizedOutput, existingForDelta)
-	if !compact && IsCodexCompactionRequest(input, headers) {
+	events := ExtractConversationDelta(sessionID, turnID, input, normalizedOutput)
+	if IsCodexCompactionRequest(input, headers) {
 		events = prependCompactEvent(sessionID, turnID, events)
 	}
-	events = prependForkEvent(sessionID, turnID, input, headers, events, existing, readOK)
+	events = prependForkEvent(sessionID, turnID, input, headers, events)
 	WriteConversationEvents(ctx, tracer, events)
 }
 
-func prependForkEvent(sessionID, turnID string, input []byte, headers http.Header, events []ChatEvent, existing map[string]string, readOK bool) []ChatEvent {
+func prependForkEvent(sessionID, turnID string, input []byte, headers http.Header, events []ChatEvent) []ChatEvent {
 	forkSession, forkMessage, forkTurn := ExtractForkAnnotation(input, headers)
 	if forkSession == "" || forkMessage == "" {
 		return events
 	}
 	forkMessageID := "fork:" + sessionID
-	if readOK {
-		if _, seen := existing[forkMessageID]; seen {
-			return events
-		}
-	}
 	forkEvent := ChatEvent{
 		Name:              "chat.fork",
 		MessageID:         forkMessageID,

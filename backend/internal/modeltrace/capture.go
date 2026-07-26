@@ -632,7 +632,7 @@ func scrubURLsInString(value string) string {
 // sanitizeTraceError scrubs an error message before it is written to an OTLP
 // span status or recorded as an exception event. Transport errors may embed
 // request URLs (including userinfo credentials), proxy-auth headers or
-// upstream response bodies; the OpenSpec tracing requirement mandates that
+// upstream response bodies; the model tracing security contract mandates that
 // authentication material never enters any Trace field, including errors.
 func sanitizeTraceError(msg string) string {
 	if msg == "" {

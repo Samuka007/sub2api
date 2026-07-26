@@ -104,3 +104,34 @@
 - Production black-box verification: a non-streaming Responses request for `gpt-5.6-sol` returned HTTP 200 with session `langfuse-verified-1784909184`; Langfuse returned trace `05cdf6a7860f257204c82ae2f697cd17` named `model.request` and four observations: root `model.request`, `upstream.attempt.1` GENERATION, `chat.user`, and `chat.assistant`.
 - The repository skill's isolated Colima smoke was not run on this Debian host because the required `colima` executable/profile is unavailable. The deployed production stack was verified directly instead.
 - Build note: the 4 GiB host could not run the frontend build while Langfuse was active. Stopping Langfuse temporarily and running the cached frontend builder with a 2560 MiB Node heap completed typecheck and Vite build; Langfuse was then restored before deployment verification.
+
+## 2026-07-26 — Task 7.3 移除请求期 Langfuse Public API 读取
+
+### 行为变更
+
+- 删除 `backend/internal/modeltrace/langfuse_reader.go` 及仅覆盖该 reader 的测试和测试导出钩子。
+- HTTP 模型请求与 Responses WebSocket 回合只解析当前捕获的 input/output，并把所有可解析 `chat.*` 事件追加到 OTLP；重复 `message_id` 不在运行时过滤。
+- 模型请求路径不再从 OTLP endpoint 派生 Langfuse Public API 地址，也不请求 `/api/public/traces` 或 `/api/public/observations`。运行时不再依赖 Langfuse 历史、Public API 可用性或读取凭据。
+- 仅客户端明确声明 `request_kind=compaction` 时追加 `chat.compact`；显式 fork 继续追加 `chat.fork`。远端历史不再用于推断压缩或抑制重复 fork marker。
+- `scripts/langfuse_session_export.py` 保持为唯一允许读取 Langfuse Public API 的会话工具；事件抵达后由离线导出按非空 `message_id` 保留最早事件。
+- Responses WebSocket `response.completed`/`response.done` JSON frame 现在归一化其 `response.output`，确保 WS 回合也能生成当前 assistant/tool 会话事件。
+
+### RED / GREEN 证据
+
+- RED：`cd backend && go test ./internal/modeltrace/... -run 'TestExtractConversationDelta_(appendsRepeatedHistory|doesNotInferCompactionFromRemoteHistory)|TestModelTraceConversationHTTPAppendsWithoutLangfusePublicAPIRead|TestModelTraceResponsesWSTurnAppendsWithoutLangfusePublicAPIRead' -count=1`；旧实现观察到 HTTP/WS 各 2 次 Public API GET，重复历史被过滤，并从远端历史推断 compaction。
+- GREEN：`cd backend && go test ./internal/modeltrace/... -run 'TestModelTraceConversation|TestModelTraceResponsesWSTurn' -count=1`，退出 0；fake OTLP server 对任何 Public API GET 返回 405，并断言计数为 0、HTTP/WS 的重复 `u1`/`a1` message ID 均各追加两次、显式 compact/fork span 和 fork metadata 保留。
+- 受影响模块：`cd backend && go test ./internal/modeltrace/... -count=1`，退出 0。
+- 离线导出：`python3 scripts/test_langfuse_session_export.py`，4 项测试通过，包含 earliest-event 去重。
+
+### 剩余验证边界
+
+- 真实本地 Langfuse `3.222.0` e2e smoke 在最终工作区执行两次；两次均完成配置闭环、身份边界、503/401 Trace、内容截断、Session、failover、all-attempts-fail、SSE、fail-open、Responses WebSocket 请求和 200-item batch 验证，但最终 ClickHouse 断言稳定失败：`Responses WebSocket disconnect terminal mismatch: status=0 errors=0 partial_output=1`。失败 Trace 的 `model.request` 实际终态为 `completed`、level 为 `DEFAULT`，未得到既有 e2e 期望的 `client_disconnected`；该失败位于 Task 7.3 会话事件断言之外，因此本次只能声明移除实时读取的目标回归已通过，不能宣称真实 Langfuse 全链路门禁通过。
+- 本记录不包含任何 Langfuse、模型供应商或本地测试凭据；凭据仍只从部署/运行时配置的安全取值位置加载。
+
+## 2026-07-26 — 统一部署与运行时 endpoint validator
+
+- 新增唯一公开校验入口 `config.ValidateModelTracingEndpoint`；部署配置规范化、运行时配置读取/更新和 exporter generation 构建均复用该函数。
+- 统一规则允许 HTTPS 与 `localhost`/字面量回环 IP 的 HTTP，拒绝远端明文 HTTP、userinfo、query、fragment、空 host 和非 HTTP(S) scheme；部署配置无效时退化为 disabled，运行时无效更新保持旧 generation。
+- RED：`cd backend && go test ./internal/config -run TestLoadDisablesModelTracingForUnsafeEndpointComponents -count=1`，三个 userinfo/query/fragment case 均因 tracing 未关闭而失败。
+- GREEN：同一命令退出 0；`cd backend && go test ./internal/modeltrace/... -run TestModelTraceEndpointTransport -count=1` 退出 0。
+- 本次不增加网络 probe，不读取 Langfuse Public API，不记录任何真实或本地测试凭据。

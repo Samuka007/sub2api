@@ -23,48 +23,14 @@ type ChatEvent struct {
 	ForkFromTurnID    string
 }
 
-// ExtractConversationDelta parses Responses-style input/output into chat events.
-// existing maps message_id -> observation name from Langfuse. nil means read-back
-// failed (write all, no compact). Compact is set only when a previously persisted
-// user/assistant/tool id is absent from this turn's input — markers like
-// chat.fork / chat.compact must not trigger compact.
-func ExtractConversationDelta(sessionID, turnID string, input, output []byte, existing map[string]string) ([]ChatEvent, bool) {
+// ExtractConversationDelta parses current Responses-style input/output into
+// append-only chat events. Repeated message IDs are intentionally preserved;
+// offline export owns transcript deduplication.
+func ExtractConversationDelta(sessionID, turnID string, input, output []byte) []ChatEvent {
 	inputItems := conversationItemsFromPayload(input, true)
 	outputItems := conversationItemsFromPayload(output, false)
 
-	inputIDs := make(map[string]struct{}, len(inputItems))
-	for _, item := range inputItems {
-		if item.messageID != "" {
-			inputIDs[item.messageID] = struct{}{}
-		}
-	}
-
-	compact := false
-	for id, name := range existing {
-		if !isConversationContentEvent(name) {
-			continue
-		}
-		if _, ok := inputIDs[id]; !ok {
-			compact = true
-			break
-		}
-	}
-
 	var events []ChatEvent
-	if compact {
-		canonical, _ := json.Marshal(map[string]string{
-			"type":       "compact",
-			"session_id": sessionID,
-			"turn_id":    turnID,
-		})
-		events = append(events, ChatEvent{
-			Name:      "chat.compact",
-			MessageID: MessageIDFromProtocolOrHash("", canonical),
-			TurnID:    turnID,
-			SessionID: sessionID,
-		})
-	}
-
 	var parent string
 	seq := 0
 	appendItem := func(item conversationItem) {
@@ -74,12 +40,8 @@ func ExtractConversationDelta(sessionID, turnID string, input, output []byte, ex
 		if item.eventName == "chat.system" && strings.TrimSpace(item.content) == "" {
 			return
 		}
-		if existing != nil {
-			if _, seen := existing[item.messageID]; seen {
-				parent = item.messageID
-				return
-			}
-		}
+		// Do not consult persisted history here. Every request appends the current
+		// event, including message IDs repeated by clients carrying full context.
 		event := ChatEvent{
 			Name:            item.eventName,
 			MessageID:       item.messageID,
@@ -102,7 +64,7 @@ func ExtractConversationDelta(sessionID, turnID string, input, output []byte, ex
 	for _, item := range outputItems {
 		appendItem(item)
 	}
-	return events, compact
+	return events
 }
 
 type conversationItem struct {
@@ -287,13 +249,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func isConversationContentEvent(name string) bool {
-	switch strings.TrimSpace(name) {
-	case "chat.user", "chat.assistant", "chat.system", "chat.tool_call", "chat.tool_result":
-		return true
-	default:
-		return false
-	}
 }

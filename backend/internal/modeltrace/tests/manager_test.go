@@ -33,20 +33,22 @@ const (
 type fakeOTLPServer struct {
 	server *httptest.Server
 
-	mu       sync.Mutex
-	requests []*collectortracepb.ExportTraceServiceRequest
-	errors   []string
+	mu             sync.Mutex
+	requests       []*collectortracepb.ExportTraceServiceRequest
+	errors         []string
+	publicAPIReads int
 }
 
 func newFakeOTLPServer(t *testing.T) *fakeOTLPServer {
 	t.Helper()
 	fake := &fakeOTLPServer{}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Conversation-track read-back uses Langfuse Public API on the same host.
+		// Production model requests must use this server for OTLP writes only.
 		if r.Method == http.MethodGet && (r.URL.Path == "/api/public/traces" || r.URL.Path == "/api/public/observations") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"data":[],"meta":{"totalPages":1}}`))
+			fake.mu.Lock()
+			fake.publicAPIReads++
+			fake.mu.Unlock()
+			http.Error(w, "Langfuse Public API reads are forbidden", http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -439,6 +441,12 @@ func TestModelTraceDisabledWithoutTarget(t *testing.T) {
 }
 
 func int64Pointer(value int64) *int64 { return &value }
+
+func (f *fakeOTLPServer) publicAPIReadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.publicAPIReads
+}
 
 func exportedSpans(requests []*collectortracepb.ExportTraceServiceRequest) []*tracepb.Span {
 	var spans []*tracepb.Span

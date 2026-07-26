@@ -3,148 +3,118 @@ package modeltrace_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
-
+	servermiddleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-type blockingConversationReadbackServer struct {
-	server       *httptest.Server
-	readStarted  chan struct{}
-	readFinished chan struct{}
-	release      chan struct{}
-	releaseOnce  sync.Once
-}
-
-func newBlockingConversationReadbackServer(t *testing.T) *blockingConversationReadbackServer {
-	t.Helper()
-	blocker := &blockingConversationReadbackServer{
-		readStarted:  make(chan struct{}, 1),
-		readFinished: make(chan struct{}, 1),
-		release:      make(chan struct{}),
-	}
-	blocker.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/public/traces" {
-			select {
-			case blocker.readStarted <- struct{}{}:
-			default:
-			}
-			select {
-			case <-blocker.release:
-			case <-r.Context().Done():
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[],"meta":{"totalPages":1}}`))
-			select {
-			case blocker.readFinished <- struct{}{}:
-			default:
-			}
-			return
-		}
-
-		// The trace exporter only needs a successful OTLP response; an empty
-		// ExportTraceServiceResponse is valid protobuf.
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(func() {
-		blocker.unblock()
-		blocker.server.Close()
-	})
-	return blocker
-}
-
-func (b *blockingConversationReadbackServer) unblock() {
-	b.releaseOnce.Do(func() { close(b.release) })
-}
-
-func (b *blockingConversationReadbackServer) waitForRead(t *testing.T) {
-	t.Helper()
-	select {
-	case <-b.readStarted:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("blocking Langfuse read-back did not start")
-	}
-}
-
-func (b *blockingConversationReadbackServer) waitForReadFinish(t *testing.T) {
-	t.Helper()
-	select {
-	case <-b.readFinished:
-	case <-time.After(time.Second):
-		t.Fatal("released Langfuse read-back did not finish")
-	}
-}
-
-func newConversationReadbackTestManager(t *testing.T, endpoint string) *modeltrace.Manager {
-	t.Helper()
-	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
-		Enabled: true, Endpoint: endpoint + "/api/public/otel", PublicKey: testPublicKey, SecretKey: testSecretKey,
-		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
-	})
-	require.NoError(t, err)
-	return manager
-}
-
-func TestModelTraceHTTPFinishDoesNotWaitForBlockingConversationReadback(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	blocker := newBlockingConversationReadbackServer(t)
-	manager := newConversationReadbackTestManager(t, blocker.server.URL)
+func TestModelTraceConversationHTTPAppendsWithoutLangfusePublicAPIRead(t *testing.T) {
+	manager, fake := newUsageTestManager(t)
 	router := gin.New()
 	router.POST("/v1/responses", manager.CandidateMiddleware(), installUsageTestIdentity(), func(c *gin.Context) {
 		_, err := c.GetRawData()
 		require.NoError(t, err)
-		c.JSON(http.StatusOK, gin.H{"id": "resp_async_readback"})
+		c.JSON(http.StatusOK, gin.H{"output": []gin.H{{
+			"type": "message", "role": "assistant", "id": "a1",
+			"content": []gin.H{{"type": "output_text", "text": "hi"}},
+		}}})
 	})
 
-	finished := make(chan struct{})
-	go func() {
-		request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-test","session_id":"http-blocking-session"}`))
+	body := `{"model":"gpt-test","session_id":"append-http","input":[{"type":"message","role":"user","id":"u1","content":[{"type":"input_text","text":"hello"}]}]}`
+	for range 2 {
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
 		router.ServeHTTP(httptest.NewRecorder(), request)
-		close(finished)
-	}()
-	select {
-	case <-finished:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("HTTP response waited for blocking Langfuse read-back")
 	}
-
-	blocker.waitForRead(t)
-	blocker.unblock()
-	blocker.waitForReadFinish(t)
 	shutdownUsageTestManager(t, manager)
+
+	spans := exportedSpansFromFake(t, fake)
+	require.Zero(t, fake.publicAPIReadCount())
+	require.Equal(t, []string{"u1", "u1"}, messageIDsForSpans(t, spans, "chat.user"))
+	require.Equal(t, []string{"a1", "a1"}, messageIDsForSpans(t, spans, "chat.assistant"))
 }
 
-func TestModelTraceResponsesWSTurnEndDoesNotWaitForBlockingConversationReadback(t *testing.T) {
-	blocker := newBlockingConversationReadbackServer(t)
-	manager := newConversationReadbackTestManager(t, blocker.server.URL)
-	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
-		SessionID: "ws-blocking-session", TurnRequestID: "ws-turn", Path: "/v1/responses", Model: "gpt-test",
-	}, []byte(`{"type":"response.create","model":"gpt-test"}`))
-	require.NotNil(t, turn)
-	turn.ObserveClientWrite([]byte(`{"type":"response.completed","response":{"id":"resp_ws"}}`), nil)
-
-	finished := make(chan struct{})
-	go func() {
+func TestModelTraceResponsesWSTurnAppendsWithoutLangfusePublicAPIRead(t *testing.T) {
+	manager, fake := newWSTurnTestManager(t)
+	input := []byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","id":"u1","content":[{"type":"input_text","text":"hello"}]}]}`)
+	output := []byte(`{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","id":"a1","content":[{"type":"output_text","text":"hi"}]}]}}`)
+	for index := 1; index <= 2; index++ {
+		turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
+			Identity:  servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
+			SessionID: "append-ws", TurnRequestID: "turn", TurnIndex: index, Path: "/v1/responses", Model: "gpt-test",
+		}, input)
+		require.NotNil(t, turn)
+		turn.ObserveClientWrite(output, nil)
 		turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
-		close(finished)
-	}()
-	select {
-	case <-finished:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("Responses WebSocket turn waited for blocking Langfuse read-back")
 	}
+	shutdownWSTurnManager(t, manager)
 
-	blocker.waitForRead(t)
-	blocker.unblock()
-	blocker.waitForReadFinish(t)
+	spans := exportedSpansFromFake(t, fake)
+	require.Zero(t, fake.publicAPIReadCount())
+	require.Equal(t, []string{"u1", "u1"}, messageIDsForSpans(t, spans, "chat.user"))
+	require.Equal(t, []string{"a1", "a1"}, messageIDsForSpans(t, spans, "chat.assistant"))
+}
+
+func TestModelTraceConversationExplicitCompactionAndForkStayAppendOnly(t *testing.T) {
+	manager, fake := newUsageTestManager(t)
+	router := gin.New()
+	router.POST("/v1/responses", manager.CandidateMiddleware(), installUsageTestIdentity(), func(c *gin.Context) {
+		_, err := c.GetRawData()
+		require.NoError(t, err)
+		c.JSON(http.StatusOK, gin.H{"output": []gin.H{}})
+	})
+
+	body := `{"model":"gpt-test","session_id":"markers-http","fork_from_session_id":"parent-session","fork_from_message_id":"parent-message","client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"compaction\",\"turn_id\":\"turn-markers\"}"},"input":[{"type":"message","role":"user","id":"u-marker","content":[{"type":"input_text","text":"current"}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(httptest.NewRecorder(), request)
 	shutdownUsageTestManager(t, manager)
+
+	spans := exportedSpansFromFake(t, fake)
+	require.Zero(t, fake.publicAPIReadCount())
+	require.Equal(t, 1, countSpansNamed(spans, "chat.compact"))
+	require.Equal(t, 1, countSpansNamed(spans, "chat.fork"))
+	fork := spanNamed(t, spans, "chat.fork")
+	require.JSONEq(t, `{"session_id":"markers-http","turn_id":"turn-markers","message_id":"fork:markers-http","parent_message_id":"","seq":0,"fork_from_session_id":"parent-session","fork_from_message_id":"parent-message"}`,
+		stringAttribute(t, attributesByKey(fork.Attributes), "langfuse.observation.metadata"))
+}
+
+func exportedSpansFromFake(t *testing.T, fake *fakeOTLPServer) []*tracepb.Span {
+	t.Helper()
+	requests, errors := fake.snapshot()
+	require.Empty(t, errors)
+	return exportedSpans(requests)
+}
+
+func countSpansNamed(spans []*tracepb.Span, name string) int {
+	count := 0
+	for _, span := range spans {
+		if span.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func messageIDsForSpans(t *testing.T, spans []*tracepb.Span, name string) []string {
+	t.Helper()
+	ids := make([]string, 0)
+	for _, span := range spans {
+		if span.Name != name {
+			continue
+		}
+		var metadata map[string]any
+		require.NoError(t, json.Unmarshal([]byte(stringAttribute(t, attributesByKey(span.Attributes), "langfuse.observation.metadata")), &metadata))
+		messageID, ok := metadata["message_id"].(string)
+		require.True(t, ok)
+		ids = append(ids, messageID)
+	}
+	return ids
 }

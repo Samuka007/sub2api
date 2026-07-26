@@ -66,10 +66,6 @@ func TestingSanitizeTraceError(msg string) string {
 	return sanitizeTraceError(msg)
 }
 
-func TestingLangfusePublicBaseURL(endpoint string) string {
-	return langfusePublicBaseURL(endpoint)
-}
-
 type TestingEntryFacts struct {
 	Protocol    string
 	ClientModel string

@@ -38,12 +38,12 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				err := modeltrace.ValidateEndpoint(tt.endpoint)
+				err := config.ValidateModelTracingEndpoint(tt.endpoint)
 				if tt.wantError && err == nil {
-					t.Fatalf("modeltrace.ValidateEndpoint(%q) succeeded, want rejection", tt.endpoint)
+					t.Fatalf("config.ValidateModelTracingEndpoint(%q) succeeded, want rejection", tt.endpoint)
 				}
 				if !tt.wantError && err != nil {
-					t.Fatalf("modeltrace.ValidateEndpoint(%q) rejected a safe transport: %v", tt.endpoint, err)
+					t.Fatalf("config.ValidateModelTracingEndpoint(%q) rejected a safe transport: %v", tt.endpoint, err)
 				}
 			})
 		}

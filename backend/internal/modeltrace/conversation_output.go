@@ -20,6 +20,13 @@ func NormalizeConversationOutput(output []byte) []byte {
 	trimmed := bytes.TrimSpace(output)
 	if gjson.ValidBytes(trimmed) {
 		root := gjson.ParseBytes(trimmed)
+		if root.IsObject() {
+			if eventType := root.Get("type").String(); eventType == "response.completed" || eventType == "response.done" {
+				if normalized := wrapConversationOutput(root.Get("response.output")); len(normalized) > 0 {
+					return normalized
+				}
+			}
+		}
 		if root.IsObject() || root.IsArray() {
 			return trimmed
 		}
@@ -79,6 +86,17 @@ func conversationOutputFromSSE(payload []byte) []byte {
 		return nil
 	}
 	wrapped, err := json.Marshal(map[string]json.RawMessage{"output": output})
+	if err != nil {
+		return nil
+	}
+	return wrapped
+}
+
+func wrapConversationOutput(output gjson.Result) []byte {
+	if !output.Exists() || !output.IsArray() {
+		return nil
+	}
+	wrapped, err := json.Marshal(map[string]json.RawMessage{"output": json.RawMessage(output.Raw)})
 	if err != nil {
 		return nil
 	}

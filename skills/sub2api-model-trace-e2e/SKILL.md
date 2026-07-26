@@ -5,7 +5,7 @@ description: |
 
   触发条件（满足任一）：
   1. 用户要跑模型追踪端到端测试（如"跑一下 otel e2e""验证 langfuse 收到 trace""端到端 smoke"）。
-  2. 用户改了 backend/internal/modeltrace、OpenSpec add-model-request-otel-tracing 或网关 OTEL 相关代码后要验证。
+  2. 用户改了 `backend/internal/modeltrace` 或网关 OTEL 相关代码后要验证。
   3. 用户明确点名本 skill（如"用 sub2api-model-trace-e2e"）。
 
   不触发（留给对应流程）：
@@ -185,7 +185,7 @@ description: |
 | 场景 | 文件 |
 |------|------|
 | 端口、凭据、镜像版本、远端 Linux 构建/代理、Endpoint 校验、ClickHouse 表结构、踩坑速查 | `references/environment.md` |
-| OpenSpec 规格、failed trace 场景、503 产生原因、fail-open 设计依据 | `references/otel-spec-mapping.md` |
+| OTEL 行为映射、failed trace 场景、503 产生原因、fail-open 设计依据 | `references/otel-spec-mapping.md` |
 
 只在对应场景命中时读取；主 SOP 以本文件的核心规则与成功信号为最高优先级。
 

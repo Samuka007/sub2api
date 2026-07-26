@@ -4,6 +4,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -3697,28 +3698,50 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	if !value.Enabled {
 		return
 	}
-	if value.PublicKey == "" || value.SecretKey == "" || !validModelTracingEndpoint(value.Endpoint) {
+	if value.PublicKey == "" || value.SecretKey == "" || ValidateModelTracingEndpoint(value.Endpoint) != nil {
 		value.Enabled = false
 		slog.Warn("invalid model_tracing deployment config; tracing disabled")
 	}
 }
 
-func validModelTracingEndpoint(raw string) bool {
+// ValidateModelTracingEndpoint accepts HTTPS targets and loopback-only HTTP
+// targets. Credentials and URL suffix components are forbidden because the
+// endpoint is used as an OTLP transport authority and base path.
+func ValidateModelTracingEndpoint(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("endpoint is empty")
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return false
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
 	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("endpoint host is empty")
+	}
+	if u.User != nil {
+		return errors.New("endpoint must not include userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("endpoint must not include a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("endpoint must not include a fragment")
+	}
+	host := u.Hostname()
+	if strings.EqualFold(u.Scheme, "http") && !isModelTracingLoopbackHost(host) {
+		return fmt.Errorf("http endpoint must be loopback, got %q", host)
+	}
+	return nil
+}
+
+func isModelTracingLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
 		return true
-	case "http":
-		host := u.Hostname()
-		if strings.EqualFold(host, "localhost") {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
 	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

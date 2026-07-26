@@ -37,6 +37,28 @@ func TestLoadServerTimingConfig(t *testing.T) {
 	})
 }
 
+func TestLoadDisablesModelTracingForUnsafeEndpointComponents(t *testing.T) {
+	tests := []string{
+		"https://user:secret@langfuse.example.com/api/public/otel",
+		"https://langfuse.example.com/api/public/otel?token=secret",
+		"https://langfuse.example.com/api/public/otel#fragment",
+	}
+
+	for _, endpoint := range tests {
+		t.Run(endpoint, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			viper.Set("model_tracing.enabled", true)
+			viper.Set("model_tracing.endpoint", endpoint)
+			viper.Set("model_tracing.public_key", "public")
+			viper.Set("model_tracing.secret_key", "secret")
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.False(t, cfg.ModelTracing.Enabled)
+		})
+	}
+}
+
 func TestLoadRedisUsernameFromEnvironment(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("REDIS_USERNAME", "app-user")

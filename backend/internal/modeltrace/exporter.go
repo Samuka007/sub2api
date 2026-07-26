@@ -1,6 +1,5 @@
-// Package modeltrace provides OTEL trace export for model gateway requests to a
-// self-hosted Langfuse instance via OTLP/HTTP. It implements the
-// add-model-request-otel-tracing OpenSpec change.
+// Package modeltrace exports model gateway traces to self-hosted Langfuse via
+// OTLP/HTTP.
 package modeltrace
 
 import (
@@ -278,7 +277,7 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
 		return g, nil
 	}
-	if err := ValidateEndpoint(cfg.Endpoint); err != nil {
+	if err := config.ValidateModelTracingEndpoint(cfg.Endpoint); err != nil {
 		return nil, fmt.Errorf("modeltrace: invalid endpoint: %w", err)
 	}
 	if cfg.PublicKey == "" || cfg.SecretKey == "" {
@@ -405,46 +404,6 @@ func sanitizeEndpointForDisplay(raw string) string {
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
 	return parsed.String()
-}
-
-// ValidateEndpoint: HTTPS always allowed; HTTP only for loopback.
-func ValidateEndpoint(raw string) error {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return errors.New("endpoint is empty")
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
-	}
-	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
-		return fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
-	if u.Host == "" || u.Hostname() == "" {
-		return errors.New("endpoint host is empty")
-	}
-	if u.User != nil {
-		return errors.New("endpoint must not include userinfo")
-	}
-	if u.RawQuery != "" || u.ForceQuery {
-		return errors.New("endpoint must not include a query")
-	}
-	if u.Fragment != "" {
-		return errors.New("endpoint must not include a fragment")
-	}
-	host := u.Hostname()
-	if strings.EqualFold(u.Scheme, "http") && !isLoopbackHost(host) {
-		return fmt.Errorf("http endpoint must be loopback, got %q", host)
-	}
-	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func (m *Manager) Acquire() *GenerationSnapshot {
