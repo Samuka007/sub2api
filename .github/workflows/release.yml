@@ -1,48 +1,145 @@
 name: Release
+run-name: Release ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'release-*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v1.0.0)'
+        description: 'Annotated tag to release (e.g., release-1.0.0)'
         required: true
         type: string
       simple_release:
-        description: 'Simple release: only x86_64 GHCR image, skip other artifacts'
+        description: 'Simple release: only linux/amd64 GHCR image, without binary assets'
         required: false
         type: boolean
         default: false
-
-# 环境变量：合并 workflow_dispatch 输入和 repository variable
-# tag push 触发时读取 vars.SIMPLE_RELEASE，workflow_dispatch 时使用输入参数
-env:
-  SIMPLE_RELEASE: ${{ github.event.inputs.simple_release == 'true' || vars.SIMPLE_RELEASE == 'true' }}
+      sync_version_file:
+        description: 'Update VERSION on the default branch after a successful manual release'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
 jobs:
-  # Update VERSION file with tag version
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      version: ${{ steps.resolve.outputs.version }}
+      semantic_tag: ${{ steps.resolve.outputs.semantic_tag }}
+      tag_sha: ${{ steps.resolve.outputs.tag_sha }}
+      release_mode: ${{ steps.resolve.outputs.release_mode }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate release tag
+        id: resolve
+        env:
+          CANDIDATE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          SIMPLE_RELEASE_INPUT: ${{ inputs.simple_release }}
+          SIMPLE_RELEASE_VARIABLE: ${{ vars.SIMPLE_RELEASE }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+
+          TAG_NAME=$CANDIDATE_TAG
+          if [[ ! "$TAG_NAME" =~ ^release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid release tag: $TAG_NAME"
+            exit 1
+          fi
+          VERSION=${TAG_NAME#release-}
+
+          if [ "$(git cat-file -t "refs/tags/$TAG_NAME" 2>/dev/null || true)" != tag ]; then
+            echo "Release tag must exist and be annotated: $TAG_NAME"
+            exit 1
+          fi
+
+          git for-each-ref --format='%(contents:body)' "refs/tags/$TAG_NAME" > release-tag-message.md
+          if [ -z "$(tr -d '[:space:]' < release-tag-message.md)" ]; then
+            echo "Annotated release tag body must not be empty: $TAG_NAME"
+            exit 1
+          fi
+
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")
+          git merge-base --is-ancestor "$TAG_SHA" "origin/$DEFAULT_BRANCH"
+
+          CURRENT_VERSION=$(git show "origin/$DEFAULT_BRANCH:backend/cmd/server/VERSION" | tr -d '\r\n')
+          if [[ ! "$CURRENT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid VERSION on origin/$DEFAULT_BRANCH: $CURRENT_VERSION"
+            exit 1
+          fi
+
+          IFS=. read -r CANDIDATE_MAJOR CANDIDATE_MINOR CANDIDATE_PATCH <<< "$VERSION"
+          IFS=. read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH <<< "$CURRENT_VERSION"
+          if ! ((
+            10#$CANDIDATE_MAJOR > 10#$CURRENT_MAJOR ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR > 10#$CURRENT_MINOR) ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR == 10#$CURRENT_MINOR && 10#$CANDIDATE_PATCH > 10#$CURRENT_PATCH)
+          )); then
+            echo "Release version $VERSION must be greater than default-branch VERSION $CURRENT_VERSION"
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            if [ "$SIMPLE_RELEASE_INPUT" = true ]; then
+              RELEASE_MODE=simple
+            else
+              RELEASE_MODE=full
+            fi
+          elif [ "$SIMPLE_RELEASE_VARIABLE" = true ]; then
+            RELEASE_MODE=simple
+          else
+            RELEASE_MODE=full
+          fi
+
+          {
+            echo "tag_name=$TAG_NAME"
+            echo "version=$VERSION"
+            echo "semantic_tag=v$VERSION"
+            echo "tag_sha=$TAG_SHA"
+            echo "release_mode=$RELEASE_MODE"
+          } >> "$GITHUB_OUTPUT"
+
+  quality-gate:
+    needs: resolve-release
+    uses: ./.github/workflows/code-quality.yml
+    with:
+      ref: ${{ needs.resolve-release.outputs.tag_sha }}
+
   update-version:
+    needs: [resolve-release, quality-gate]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
+
+      - name: Verify immutable release commit
+        env:
+          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TAG_SHA"
 
       - name: Update VERSION file
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=${{ github.event.inputs.tag }}
-            VERSION=${VERSION#v}
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
-          echo "$VERSION" > backend/cmd/server/VERSION
-          echo "Updated VERSION file to: $VERSION"
+        env:
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: printf '%s\n' "$VERSION" > backend/cmd/server/VERSION
 
       - name: Upload VERSION artifact
         uses: actions/upload-artifact@v7
@@ -52,30 +149,36 @@ jobs:
           retention-days: 1
 
   build-frontend:
+    needs: [resolve-release, quality-gate]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
 
-      - name: Setup pnpm
+      - name: Verify immutable release commit
+        env:
+          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TAG_SHA"
+
+      - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 9.15.9
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          cache: 'pnpm'
+          node-version: '24'
+          cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: frontend
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
 
       - name: Build frontend
-        run: pnpm run build
-        working-directory: frontend
+        run: make build-frontend
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v7
@@ -85,14 +188,45 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [update-version, build-frontend]
+    needs: [resolve-release, quality-gate, update-version, build-frontend]
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
+
+      - name: Verify immutable release commit
+        env:
+          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TAG_SHA"
+
+      - name: Revalidate version against default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          CURRENT_VERSION=$(git show "origin/$DEFAULT_BRANCH:backend/cmd/server/VERSION" | tr -d '\r\n')
+          if [[ ! "$CURRENT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid VERSION on origin/$DEFAULT_BRANCH: $CURRENT_VERSION"
+            exit 1
+          fi
+          IFS=. read -r CANDIDATE_MAJOR CANDIDATE_MINOR CANDIDATE_PATCH <<< "$VERSION"
+          IFS=. read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH <<< "$CURRENT_VERSION"
+          if ! ((
+            10#$CANDIDATE_MAJOR > 10#$CURRENT_MAJOR ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR > 10#$CURRENT_MINOR) ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR == 10#$CURRENT_MINOR && 10#$CANDIDATE_PATCH > 10#$CURRENT_PATCH)
+          )); then
+            echo "Release version $VERSION must still be greater than default-branch VERSION $CURRENT_VERSION"
+            exit 1
+          fi
 
       - name: Download VERSION artifact
         uses: actions/download-artifact@v8
@@ -106,7 +240,7 @@ jobs:
           name: frontend-dist
           path: backend/internal/web/dist/
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -114,24 +248,20 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Verify Go version
-        run: |
-          go version | grep -q 'go1.26.5'
+        run: test "$(go env GOVERSION)" = "go1.26.5"
 
-      # Docker setup for GoReleaser
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to DockerHub
-        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@v3
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -140,141 +270,138 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fetch tags with annotations
+      - name: Prepare semantic tag for GoReleaser OSS
+        env:
+          SEMANTIC_TAG: ${{ needs.resolve-release.outputs.semantic_tag }}
+          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
         run: |
-          # 确保获取完整的 annotated tag 信息
-          git fetch --tags --force
-
-      - name: Get tag message
-        id: tag_message
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME=${{ github.event.inputs.tag }}
+          set -euo pipefail
+          if git rev-parse --verify --quiet "refs/tags/$SEMANTIC_TAG" >/dev/null; then
+            test "$(git rev-parse "refs/tags/$SEMANTIC_TAG^{commit}")" = "$TAG_SHA"
           else
-            TAG_NAME=${GITHUB_REF#refs/tags/}
+            git tag "$SEMANTIC_TAG" "$TAG_SHA"
           fi
-          echo "Processing tag: $TAG_NAME"
 
-          # 获取完整的 tag message（跳过第一行标题）
-          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$TAG_NAME")
+      - name: Read annotated tag body
+        env:
+          TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}
+        run: git for-each-ref --format='%(contents:body)' "refs/tags/$TAG_NAME" > release-tag-message.md
 
-          # 调试输出
-          echo "Tag message length: ${#TAG_MESSAGE}"
-          echo "Tag message preview:"
-          echo "$TAG_MESSAGE" | head -10
-
-          # 使用 EOF 分隔符处理多行内容
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo "$TAG_MESSAGE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Set lowercase owner for GHCR
+      - name: Set lowercase owner for registry
         id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: echo "owner=${REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Select GoReleaser configuration
+        id: release-config
+        env:
+          RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}
+        run: |
+          if [ "$RELEASE_MODE" = simple ]; then
+            echo 'path=.goreleaser.simple.yaml' >> "$GITHUB_OUTPUT"
+          else
+            echo 'path=.goreleaser.yaml' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
-          args: release --clean --skip=validate ${{ env.SIMPLE_RELEASE == 'true' && '--config=.goreleaser.simple.yaml' || '' }}
+          args: release --clean --skip=validate --config=${{ steps.release-config.outputs.path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_MESSAGE: ${{ steps.tag_message.outputs.message }}
+          GORELEASER_CURRENT_TAG: ${{ needs.resolve-release.outputs.semantic_tag }}
           GITHUB_REPO_OWNER: ${{ github.repository_owner }}
           GITHUB_REPO_OWNER_LOWER: ${{ steps.lowercase.outputs.owner }}
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
+          DOCKERHUB_USERNAME: ${{ env.DOCKERHUB_USERNAME || 'skip' }}
 
-      # Update DockerHub description
-      - name: Update DockerHub description
-        if: ${{ env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
-        uses: peter-evans/dockerhub-description@v5
+      - name: Generate release notes
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'Sub2API is an AI API gateway platform for distributing and managing subscription quotas.'
+            echo
+            cat release-tag-message.md
+            echo
+            echo 'Immutable GHCR image:'
+            echo '```bash'
+            echo "docker pull ghcr.io/alle-group/sub2api:$VERSION"
+            echo '```'
+            echo
+            if [ "$RELEASE_MODE" = full ]; then
+              echo 'Download platform archives from the assets below.'
+            else
+              echo 'Simple release: linux/amd64 GHCR image only; no binary attachments.'
+            fi
+          } > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}
+          TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE_MODE" = full ]; then
+            gh release create "$TAG_NAME" \
+              dist/*.tar.gz dist/*.zip dist/checksums.txt \
+              --verify-tag \
+              --title "Sub2API $VERSION" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG_NAME" \
+              --verify-tag \
+              --title "Sub2API $VERSION (Simple)" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Update Docker Hub description
+        if: needs.resolve-release.outputs.release_mode == 'full' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: peter-evans/dockerhub-description@v5
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ secrets.DOCKERHUB_USERNAME }}/sub2api
-          short-description: "Sub2API - AI API Gateway Platform"
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_USERNAME }}/sub2api
+          short-description: Sub2API - AI API Gateway Platform
           readme-filepath: ./deploy/DOCKER.md
 
-      # Send Telegram notification
-      - name: Send Telegram Notification
-        if: ${{ env.SIMPLE_RELEASE != 'true' }}
+      - name: Send Telegram notification
+        if: needs.resolve-release.outputs.release_mode == 'full'
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        continue-on-error: true
+          TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          # 检查必要的环境变量
+          set -euo pipefail
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Telegram credentials not configured, skipping notification"
+            echo 'Telegram credentials not configured, skipping notification'
             exit 0
           fi
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME=${{ github.event.inputs.tag }}
-          else
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-          fi
-          VERSION=${TAG_NAME#v}
-          REPO="${{ github.repository }}"
-          GHCR_IMAGE="ghcr.io/${REPO,,}"  # ${,,} converts to lowercase
-
-          # 获取 tag message 内容并转义 Markdown 特殊字符
-          TAG_MESSAGE='${{ steps.tag_message.outputs.message }}'
-          TAG_MESSAGE=$(echo "$TAG_MESSAGE" | sed 's/\([_*`\[]\)/\\\1/g')
-
-          # 限制消息长度（Telegram 消息限制 4096 字符，预留空间给头尾固定内容）
+          TAG_MESSAGE=$(cat release-tag-message.md)
           if [ ${#TAG_MESSAGE} -gt 3500 ]; then
             TAG_MESSAGE="${TAG_MESSAGE:0:3500}..."
           fi
-
-          # 构建消息内容
-          MESSAGE="🚀 *Sub2API 新版本发布！*"$'\n'$'\n'
-          MESSAGE+="📦 版本号: \`${VERSION}\`"$'\n'$'\n'
-
-          # 添加更新内容
-          if [ -n "$TAG_MESSAGE" ]; then
-            MESSAGE+="${TAG_MESSAGE}"$'\n'$'\n'
-          fi
-
-          MESSAGE+="🐳 *Docker 部署:*"$'\n'
-          MESSAGE+="\`\`\`bash"$'\n'
-          # 根据是否配置 DockerHub 动态生成
-          if [ -n "$DOCKERHUB_USERNAME" ]; then
-            DOCKER_IMAGE="${DOCKERHUB_USERNAME}/sub2api"
-            MESSAGE+="# Docker Hub"$'\n'
-            MESSAGE+="docker pull ${DOCKER_IMAGE}:${VERSION}"$'\n'
-            MESSAGE+="# GitHub Container Registry"$'\n'
-          fi
-          MESSAGE+="docker pull ${GHCR_IMAGE}:${VERSION}"$'\n'
-          MESSAGE+="\`\`\`"$'\n'$'\n'
-          MESSAGE+="🔗 *相关链接:*"$'\n'
-          MESSAGE+="• [GitHub Release](https://github.com/${REPO}/releases/tag/${TAG_NAME})"$'\n'
-          if [ -n "$DOCKERHUB_USERNAME" ]; then
-            MESSAGE+="• [Docker Hub](https://hub.docker.com/r/${DOCKER_IMAGE})"$'\n'
-          fi
-          MESSAGE+="• [GitHub Packages](https://github.com/${REPO}/pkgs/container/sub2api)"$'\n'$'\n'
-          MESSAGE+="#Sub2API #Release #${TAG_NAME//./_}"
-
-          # 发送消息
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg chat_id "${TELEGRAM_CHAT_ID}" \
-              --arg text "${MESSAGE}" \
-              '{
-                chat_id: $chat_id,
-                text: $text,
-                parse_mode: "Markdown",
-                disable_web_page_preview: true
-              }')"
+          MESSAGE=$(printf 'Sub2API release %s\n\n%s\n\nDocker:\ndocker pull ghcr.io/alle-group/sub2api:%s\n\nhttps://github.com/%s/releases/tag/%s' \
+            "$VERSION" "$TAG_MESSAGE" "$VERSION" "$REPOSITORY" "$TAG_NAME")
+          curl --fail --silent --show-error \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$MESSAGE" \
+              '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')"
 
   sync-version-file:
-    needs: [release]
-    if: ${{ needs.release.result == 'success' }}
+    needs: [resolve-release, release]
+    if: ${{ needs.release.result == 'success' && (github.event_name == 'push' || inputs.sync_version_file) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout default branch
@@ -283,24 +410,34 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Sync VERSION file to released tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=${{ github.event.inputs.tag }}
-            VERSION=${VERSION#v}
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
-
-          CURRENT_VERSION=$(tr -d '\r\n' < backend/cmd/server/VERSION || true)
+          set -euo pipefail
+          CURRENT_VERSION=$(tr -d '\r\n' < backend/cmd/server/VERSION)
           if [ "$CURRENT_VERSION" = "$VERSION" ]; then
             echo "VERSION file already matches $VERSION"
             exit 0
           fi
+          if [[ ! "$CURRENT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid VERSION on $DEFAULT_BRANCH: $CURRENT_VERSION"
+            exit 1
+          fi
+          IFS=. read -r CANDIDATE_MAJOR CANDIDATE_MINOR CANDIDATE_PATCH <<< "$VERSION"
+          IFS=. read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH <<< "$CURRENT_VERSION"
+          if ! ((
+            10#$CANDIDATE_MAJOR > 10#$CURRENT_MAJOR ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR > 10#$CURRENT_MINOR) ||
+            (10#$CANDIDATE_MAJOR == 10#$CURRENT_MAJOR && 10#$CANDIDATE_MINOR == 10#$CURRENT_MINOR && 10#$CANDIDATE_PATCH > 10#$CURRENT_PATCH)
+          )); then
+            echo "Refusing to change VERSION from $CURRENT_VERSION to $VERSION"
+            exit 1
+          fi
 
-          echo "$VERSION" > backend/cmd/server/VERSION
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$VERSION" > backend/cmd/server/VERSION
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add backend/cmd/server/VERSION
           git commit -m "chore: sync VERSION to ${VERSION} [skip ci]"
-          git push origin HEAD:${{ github.event.repository.default_branch }}
+          git push origin "HEAD:$DEFAULT_BRANCH"

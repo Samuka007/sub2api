@@ -55,7 +55,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 | Workflow | 触发条件 | 检查内容 |
 |----------|----------|----------|
 | **code-quality.yml** | PR 到 `main`、`main` push、每周一、手动、`workflow_call` | 分支策略、部署契约、后端测试/构建/lint、安全扫描、前端完整质量检查/构建/审计 |
-| **release.yml** | tag `v*`、手动 | 构建并发布二进制、镜像和 GitHub Release |
+| **release.yml** | annotated tag `release-MAJOR.MINOR.PATCH`、手动 | 先对 tag 固定提交复用 `Code Quality`，再构建并发布二进制、固定版本镜像和 GitHub Release |
 | **cla.yml** | PR 及 CLA 评论事件 | CLA 签署检查 |
 | **upstream-check.yml** | 每日定时、手动 | 检查上游新版本并维护提醒 Issue |
 
@@ -67,6 +67,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 - pnpm 版本必须是 **9.15.9**
 - govulncheck 版本必须是 **1.6.0**
 - 前端使用 `pnpm install --frozen-lockfile`，必须提交 `pnpm-lock.yaml`
+- 发布只接受无前导零的三段 `release-MAJOR.MINOR.PATCH` annotated tag；质量门禁检查 tag 的不可变 commit SHA，失败时不生成任何发布产物
 
 ### 本地测试命令
 

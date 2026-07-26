@@ -189,36 +189,33 @@ Pull Request 必须填写：
 内部 tag 格式：
 
 ```text
-company-v<官方版本>.<内部修订号>
+release-MAJOR.MINOR.PATCH
 ```
 
-例如：
-
-```text
-company-v0.1.161.1
-company-v0.1.161.2
-company-v0.1.162.1
-```
+版本必须是无前导零的三段数字，例如首个自动发布标签 `release-1.0.0`。`release-1.0`、`v1.0.0`、预发布版本和 lightweight tag 均不触发有效发布。
 
 发布步骤：
 
 1. 同步或功能 Pull Request 合入 `main`。
-2. 在 `main` 的待发布提交上创建内部 tag。
-3. 使用该 tag 构建不可变 Docker 镜像。
-4. 先记录当前生产镜像，再部署新镜像。
-5. 等待容器健康检查，并执行关键接口冒烟测试。
-6. 部署成功后记录 Git tag、commit、镜像名称和镜像摘要。
+2. 确认该 `origin/main` commit 的独立 `Code Quality` push run 全部适用 job 通过。
+3. 在同一 commit 上创建带非空正文的 annotated tag 并推送。
+4. Release workflow 对 tag 固定 SHA 再次执行同一质量门禁，然后构建 GitHub Release、平台归档和固定版本镜像。
+5. 先记录当前生产镜像，再部署新镜像。
+6. 等待容器健康检查，并执行关键接口冒烟测试。
+7. 部署成功后记录 Git tag、commit、镜像名称和镜像摘要。
 
 创建 tag：
 
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag -a company-v0.1.161.1 -m "4Sub2 release based on Sub2API v0.1.161"
-git push origin company-v0.1.161.1
+git tag -a release-1.0.0 \
+  -m 'release-1.0.0' \
+  -m 'First automated release using the unified Code Quality gate.'
+git push origin release-1.0.0
 ```
 
-生产环境不得使用 `latest`。部署命令必须指定类似 `sub2api:company-v0.1.161.1` 的固定镜像。
+生产环境不得使用 `latest`。部署命令必须指定固定镜像，例如 `ghcr.io/alle-group/sub2api:1.0.0`。
 
 回滚时只切回部署前记录的镜像，不回滚 PostgreSQL 或 Redis 数据卷。涉及不可逆数据库迁移的版本必须在发布前准备独立的数据恢复方案。
 
