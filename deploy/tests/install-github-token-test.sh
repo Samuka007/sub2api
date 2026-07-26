@@ -20,11 +20,20 @@ url = "https://example.com/collect"
 header = "X-Leaked-From-Curlrc: yes"
 EOF
 
+GITHUB_API_CURL_SOURCE="$TEMP_DIR/github-api-curl.sh"
+awk '
+    /^github_api_curl\(\) \{$/ { found = 1 }
+    found { print }
+    found && /^}$/ { exit }
+' "$ROOT_DIR/deploy/install.sh" > "$GITHUB_API_CURL_SOURCE"
+test "$(grep -c '^github_api_curl() {' "$GITHUB_API_CURL_SOURCE")" -eq 1
+/bin/bash -n "$GITHUB_API_CURL_SOURCE"
+
 run_api_curl() {
     CURL_ARGS_LOG="$1" HOME="$TEMP_DIR/home" PATH="$TEMP_DIR:$PATH" UPDATE_GITHUB_TOKEN="${2:-}" \
         GITHUB_TOKEN="github-fallback" GH_TOKEN="gh-fallback" \
-        bash -c "source \"\$1\"; github_api_curl -s \"\$2\"" bash \
-        "$ROOT_DIR/deploy/install.sh" "https://api.github.com/repos/Wei-Shaw/sub2api/releases/latest"
+        /bin/bash -c "source \"\$1\"; github_api_curl -s \"\$2\"" bash \
+        "$GITHUB_API_CURL_SOURCE" "https://api.github.com/repos/Wei-Shaw/sub2api/releases/latest"
 }
 
 run_api_curl "$TEMP_DIR/authenticated" "update-secret"
@@ -70,8 +79,8 @@ assert_unsafe_invocation_rejected() {
     shift
     rm -f "$TEMP_DIR/$name" "$TEMP_DIR/$name.stdin"
     if CURL_ARGS_LOG="$TEMP_DIR/$name" PATH="$TEMP_DIR:$PATH" UPDATE_GITHUB_TOKEN="update-secret" \
-        bash -c "source \"\$1\"; shift; github_api_curl \"\$@\"" bash \
-        "$ROOT_DIR/deploy/install.sh" "$@" 2>/dev/null; then
+        /bin/bash -c "source \"\$1\"; shift; github_api_curl \"\$@\"" bash \
+        "$GITHUB_API_CURL_SOURCE" "$@" 2>/dev/null; then
         echo "installer accepted unsafe curl invocation: $name" >&2
         exit 1
     fi
