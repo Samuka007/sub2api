@@ -515,7 +515,7 @@ go generate ./cmd/server
 - 前端依赖锁定安装、类型检查、ESLint 和完整测试通过。
 - 后端 unit、integration 测试和 `golangci-lint` 通过。
 - `make VERSION=0.1.164+company.1 build` 完整构建通过。
-- GitHub CI、Branch Policy 和 Security Scan 全部通过。
+- GitHub Code Quality 全部适用检查通过。
 - 生产镜像、数据库迁移、容器健康状态和关键公开接口均已核验。
 
 历史源码恢复过程与当时边界请查看 [`RECOVERY.md`](RECOVERY.md)；该文档不是当前完整基线。

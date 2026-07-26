@@ -1,12 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
-
-FRONTEND_CRITICAL_VITEST := \
-	src/views/auth/__tests__/LinuxDoCallbackView.spec.ts \
-	src/views/auth/__tests__/WechatCallbackView.spec.ts \
-	src/views/user/__tests__/PaymentView.spec.ts \
-	src/views/user/__tests__/PaymentResultView.spec.ts \
-	src/components/user/profile/__tests__/ProfileInfoCard.spec.ts \
-	src/views/admin/__tests__/SettingsView.spec.ts
+.PHONY: build build-backend build-frontend test test-backend test-frontend
 
 # 一键编译前后端
 build: build-backend build-frontend
@@ -28,7 +20,4 @@ test-backend:
 test-frontend:
 	@pnpm --dir frontend run lint:check
 	@pnpm --dir frontend run typecheck
-	@$(MAKE) test-frontend-critical
-
-test-frontend-critical:
-	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+	@pnpm --dir frontend run test:run

@@ -34,11 +34,18 @@
 ### 开发工具
 
 ```bash
-# golangci-lint v2.7
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7
+# Go 1.26.5
+go version
 
-# pnpm (前端包管理)
-npm install -g pnpm
+# golangci-lint 2.9
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9
+
+# Node.js 24 + pnpm 9.15.9
+node --version
+npm install -g pnpm@9.15.9
+
+# govulncheck 1.6.0
+go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 ```
 
 ## 三、CI/CD 流水线
@@ -47,29 +54,35 @@ npm install -g pnpm
 
 | Workflow | 触发条件 | 检查内容 |
 |----------|----------|----------|
-| **backend-ci.yml** | push, pull_request | 单元测试 + 集成测试 + golangci-lint v2.7 |
-| **security-scan.yml** | push, pull_request, 每周一 | govulncheck + gosec + pnpm audit |
-| **release.yml** | tag `v*` | 构建发布（PR 不触发） |
+| **code-quality.yml** | PR 到 `main`、`main` push、每周一、手动、`workflow_call` | 分支策略、部署契约、后端测试/构建/lint、安全扫描、前端完整质量检查/构建/审计 |
+| **release.yml** | tag `v*`、手动 | 构建并发布二进制、镜像和 GitHub Release |
+| **cla.yml** | PR 及 CLA 评论事件 | CLA 签署检查 |
+| **upstream-check.yml** | 每日定时、手动 | 检查上游新版本并维护提醒 Issue |
 
 ### CI 要求
 
-- Go 版本必须是 **1.25.7**
+- Go 版本必须是 **1.26.5**
+- golangci-lint 版本必须是 **2.9**
+- Node.js 版本必须是 **24**
+- pnpm 版本必须是 **9.15.9**
+- govulncheck 版本必须是 **1.6.0**
 - 前端使用 `pnpm install --frozen-lockfile`，必须提交 `pnpm-lock.yaml`
 
 ### 本地测试命令
 
 ```bash
-# 后端单元测试
-cd backend && go test -tags=unit ./...
+# 后端单元测试、集成测试、构建和 lint
+make -C backend test-unit
+make -C backend test-integration
+make -C backend build
+(cd backend && golangci-lint run ./...)
 
-# 后端集成测试
-cd backend && go test -tags=integration ./...
-
-# 代码质量检查
-cd backend && golangci-lint run ./...
-
-# 前端依赖安装（必须用 pnpm）
-cd frontend && pnpm install
+# 前端锁定安装、lint、类型检查、完整 Vitest 和生产构建
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend run lint:check
+pnpm --dir frontend run typecheck
+pnpm --dir frontend run test:run
+pnpm --dir frontend run build
 ```
 
 ## 四、常见坑点 & 解决方案

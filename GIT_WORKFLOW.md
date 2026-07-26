@@ -44,6 +44,9 @@ git fetch upstream --tags
 | `sync/<官方tag>` | 临时 | 上游升级，例如 `sync/v0.1.162` |
 | `docs/<说明>` | 临时 | 纯文档修改 |
 | `chore/<说明>` | 临时 | 工程、依赖和维护修改 |
+| `refactor/<说明>` | 临时 | 不改变行为的代码重构 |
+| `test/<说明>` | 临时 | 独立测试与测试基础设施修改 |
+| `otel/<说明>` | 临时 | OpenTelemetry 追踪功能；模型追踪使用 `otel/model-trace` |
 
 `dev_xq` 和 `dev_sh` 是迁移前的个人分支。新结构启用后应冻结，只保留归档，不再接收新提交。
 
@@ -68,7 +71,7 @@ git push -u origin feature/short-description
 
 - 一个 Pull Request 只解决一个问题。
 - 至少由另一位开发者审核。
-- CI 全部通过，所有讨论已解决。
+- `Code Quality` 全部适用 job 通过，所有讨论已解决。
 - 功能 Pull Request 使用 squash merge。
 - 合并后删除临时分支。
 
