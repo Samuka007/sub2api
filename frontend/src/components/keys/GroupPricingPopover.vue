@@ -39,7 +39,6 @@
                 <th class="pb-1.5 pr-2">{{ localText('\u8f93\u51fa', 'Output') }}</th>
                 <th class="pb-1.5 pr-2">{{ localText('\u7f13\u5b58\u8bfb', 'Cache read') }}</th>
                 <th class="pb-1.5 pr-2">{{ localText('\u7f13\u5b58\u5199', 'Cache write') }}</th>
-                <th class="w-14 pb-1.5 text-right">{{ localText('\u500d\u7387', 'Rate') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -62,9 +61,6 @@
                 </td>
                 <td class="py-1.5 pr-2 font-mono text-gray-700 dark:text-gray-300">
                   {{ priceFor(model, 'cacheWrite') }}
-                </td>
-                <td class="py-1.5 text-right font-mono text-gray-700 dark:text-gray-300">
-                  {{ multiplierFor(model) }}
                 </td>
               </tr>
             </tbody>
@@ -143,12 +139,6 @@ function priceFor(model: UserSupportedModel, kind: PriceKind): string {
 function formatPrice(value: number | null | undefined, scale: number, unit: string): string {
   if (value == null) return '-'
   return `${formatScaled(value, scale)} ${unit}`
-}
-
-function multiplierFor(model: UserSupportedModel): string {
-  const multiplier = model.pricing?.reference_multiplier
-  if (multiplier == null) return '-'
-  return `x${multiplier.toPrecision(10).replace(/\.?0+$/, '')}`
 }
 
 const show = ref(false)
