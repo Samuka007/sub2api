@@ -168,6 +168,34 @@ Langfuse 拒绝、超时、网络中断、导出队列饱和、序列化错误�
 - **THEN** 系统 MUST 隔离该错误并继续模型请求
 - **THEN** 错误 MUST NOT 作为模型 API 错误返回给客户端
 
+### Requirement: 会话事件记录不得依赖 Langfuse 历史
+
+对于带有显式 Session ID 的模型请求，系统 MUST 仅依据当前请求和当前响应构造 `chat.*` OTEL 观察，并以稳定 `message_id` 追加发送。模型请求和 WebSocket 回合处理 MUST NOT 调用 Langfuse Public API 查询 Trace、Observation 或历史 message ID，也 MUST NOT 基于远端历史跳过事件、判断缺失内容压缩或抑制 fork 标记。历史重复事件由离线导出在数据已抵达 Langfuse 后按 `message_id` 保留最早记录；离线导出查询失败 MUST 只使该次导出失败，不得影响模型请求。
+
+#### Scenario: 重复历史仍追加为会话事件
+
+- **WHEN** 同一显式 Session 的后续模型请求再次携带已在前一请求出现的消息
+- **THEN** 系统 MUST 为当前请求中可解析的消息继续生成对应 `chat.*` OTEL 观察
+- **THEN** 系统 MUST NOT 为确定消息是否已出现而查询 Langfuse Public API
+
+#### Scenario: 模型请求不读取 Langfuse Public API
+
+- **WHEN** 带有显式 Session ID 的 HTTP 模型请求或 WebSocket `response.create` 回合完成
+- **THEN** 系统 MUST NOT 向 Langfuse Public API 的 traces 或 observations 资源发起请求
+- **THEN** 模型请求的状态码、响应体、流式帧和上游调用次数 MUST 与关闭会话事件记录时的业务基线保持等价
+
+#### Scenario: 客户端显式声明上下文压缩
+
+- **WHEN** Codex 回合元数据显式声明 `request_kind=compaction`
+- **THEN** 系统 MUST 追加一个 `chat.compact` 观察
+- **THEN** 系统 MUST NOT 通过查询历史会话事件推断压缩
+
+#### Scenario: 离线导出重建去重 transcript
+
+- **WHEN** 运维人员在会话事件已抵达 Langfuse 后运行离线导出
+- **THEN** 导出工具 MAY 读取 Langfuse Public API 收集该 Session 的 `chat.*` 观察
+- **THEN** 导出结果 MUST 按非空 `message_id` 保留最早事件，并保留原始事件存储中的重复记录
+
 ### Requirement: Langfuse 中的 Trace 字段必须可筛选并保持标准映射
 
 系统 SHALL 使用 Langfuse 可识别的 OTEL 属性表达 Trace 名称、user ID、Session ID、模型输入输出、模型名称、用量、成本、完成开始时间和请求元数据。需要在 Langfuse 中筛选或聚合的 Trace 级身份属性 MUST 在相关观察中保持一致。

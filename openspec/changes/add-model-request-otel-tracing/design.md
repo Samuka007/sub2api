@@ -257,8 +257,19 @@ Usage 只从上游解析和最终 Usage Log 的同一事实对象映射；未知
 新增独立的 Langfuse Session extractor，不复用 `OpenAIGatewayService.ExtractSessionID`，因为后者会把 `prompt_cache_key` 当作上游缓存/粘性调度信号。Langfuse extractor 仅接受语义明确的 `session_id`、`conversation_id`、仅适用于 Grok 身份的 `x-grok-conv-id`，以及协议结构化 metadata 中明确命名且可正确解析的 `session_id`（例如已解析的 `metadata.user_id.session_id`）。明确排除 `prompt_cache_key`、`GenerateSessionHash`、粘性路由 hash、内容 fallback 和为上游伪装而生成的 session 值，避免缓存或调度实现把无关请求误归组。
 
 原始 session ID 不是认证凭据，但可能包含用户信息；按用户已确认的“不脱敏”边界发送到自部署 Langfuse。
+### 13. 会话事件只追加 OTLP，不读取 Langfuse 历史
 
-### 13. fail-open 在每个边界独立成立
+对具有显式 Session ID 的 HTTP 请求和 WebSocket 回合，会话事件构造器只解析当前捕获的 input/output，并为可解析项生成稳定 `message_id` 的 `chat.*` Span。它不创建 Langfuse Public API reader，不从 OTLP endpoint 派生 Public API 地址，也不在请求期读取已持久化的 Trace 或 Observation。
+
+后续请求重复携带历史内容时，系统仍追加具有相同 `message_id` 的事件；这是离线去重的输入，不是运行时错误。`chat.fork` 同样允许重复追加。Codex 元数据显式声明 `request_kind=compaction` 时仍写入 `chat.compact`，但不再以“远端历史存在而当前 input 缺失”推断压缩。
+
+`scripts/langfuse_session_export.py` 是唯一允许读取 Langfuse Public API 的会话工具，且只能在会话事件已经送达 Langfuse 后由离线运维流程运行。它按 `message_id` 保留最早事件；其读取失败只影响该次导出，不得回传到模型请求。当前易失的应用内会话事件队列和 OTLP exporter 队列仍遵守既有 fail-open、可能丢失的边界，本 change 不新增持久队列或补送承诺。
+
+
+### 14. fail-open 在每个边界独立成立
+SWAP 274.=274:
+### 15. 测试按可观察垂直路径组织
+
 
 所有 Recorder 方法不得向业务调用方返回会改变流程的错误。内部错误处理：
 
