@@ -23,3 +23,8 @@ redis_data/
 4sub-prod-images-*.tar.gz
 sub2api-*.tar
 sub2api-*.tar.gz
+
+langfuse/backups/
+langfuse/reverse-tunnel.log
+langfuse/.reverse-tunnel.pid
+langfuse/.ssh-tunnel/
