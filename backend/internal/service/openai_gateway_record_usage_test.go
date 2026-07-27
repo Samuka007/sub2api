@@ -1054,6 +1054,20 @@ func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesUsesResponseIDBeforeGen
 	require.Equal(t, "resp_payload_turn_456", got)
 }
 
+func TestResolveOpenAIUsageBillingRequestID_NonResponsesNormalizesCallerIDWithoutCaching(t *testing.T) {
+	callerID := strings.Repeat("c", usageBillingRequestIDMaxLength)
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, callerID)
+	result := &OpenAIForwardResult{RequestID: "upstream-chat-456"}
+
+	first := resolveOpenAIUsageBillingRequestID(ctx, "/v1/chat/completions", result)
+	second := resolveOpenAIUsageBillingRequestID(context.Background(), "/v1/chat/completions", result)
+
+	require.Equal(t, normalizeUsageBillingRequestID("client:"+callerID), first)
+	require.True(t, strings.HasPrefix(first, "sha256:"), first)
+	require.LessOrEqual(t, len(first), usageBillingRequestIDMaxLength)
+	require.Equal(t, "upstream-chat-456", second)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_HTTPResponsesUsesDistinctBillingIDsForTurnsInSameThread(t *testing.T) {
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
 	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)

@@ -218,20 +218,13 @@ type OpenAIUsage struct {
 	ImageOutputTokens        int `json:"image_output_tokens,omitempty"`
 }
 
-type openAIBillingRequestIDState struct {
-	once  sync.Once
-	value string
-}
-
-var openAIBillingRequestIDStateMu sync.Mutex
-
 // OpenAIForwardResult represents the result of forwarding
 type OpenAIForwardResult struct {
 	RequestID  string
 	ResponseID string
 	Usage      OpenAIUsage
 
-	billingRequestIDState *openAIBillingRequestIDState
+	billingRequestIDState *usageBillingRequestIDState
 	Model                 string // 原始模型（用于响应和日志显示）
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
@@ -278,13 +271,8 @@ type OpenAIForwardResult struct {
 	wsReplayInputExists bool
 }
 
-func (r *OpenAIForwardResult) billingRequestIDStateForExecution() *openAIBillingRequestIDState {
-	openAIBillingRequestIDStateMu.Lock()
-	defer openAIBillingRequestIDStateMu.Unlock()
-	if r.billingRequestIDState == nil {
-		r.billingRequestIDState = &openAIBillingRequestIDState{}
-	}
-	return r.billingRequestIDState
+func (r *OpenAIForwardResult) billingRequestIDStateForExecution() *usageBillingRequestIDState {
+	return ensureUsageBillingRequestIDState(&r.billingRequestIDState)
 }
 
 // SucceededForScheduling reports whether this result is an upstream success

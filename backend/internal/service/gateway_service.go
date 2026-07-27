@@ -556,6 +556,8 @@ type ForwardResult struct {
 	ResponseID string
 	Usage      ClaudeUsage
 	Model      string
+
+	billingRequestIDState *usageBillingRequestIDState
 	// UpstreamModel is the actual upstream model after mapping.
 	// Prefer empty when it is identical to Model; persistence normalizes equal values away as no-op mappings.
 	UpstreamModel    string
@@ -573,6 +575,10 @@ type ForwardResult struct {
 	ImageOutputSizes   []string
 	ImageSizeSource    string
 	ImageSizeBreakdown map[string]int
+}
+
+func (r *ForwardResult) billingRequestIDStateForExecution() *usageBillingRequestIDState {
+	return ensureUsageBillingRequestIDState(&r.billingRequestIDState)
 }
 
 // GatewayFailureStage identifies which request stage failed. The zero value is

@@ -4,8 +4,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -115,23 +113,12 @@ func (s *OpenAIGatewayService) ResolveUserGroupRateMultiplier(ctx context.Contex
 	return resolver.Resolve(ctx, userID, groupID, groupDefaultMultiplier)
 }
 
-const openAIUsageRequestIDMaxLength = 64
-
-func normalizeOpenAIUsageRequestID(requestID string) string {
-	requestID = strings.TrimSpace(requestID)
-	if len(requestID) <= openAIUsageRequestIDMaxLength {
-		return requestID
-	}
-	digest := sha256.Sum256([]byte(requestID))
-	return "sha256:" + base64.RawURLEncoding.EncodeToString(digest[:])
-}
-
 // resolveOpenAIUsageBillingRequestID selects an idempotency key whose lifetime
 // matches one billable OpenAI execution.
 func resolveOpenAIUsageBillingRequestID(ctx context.Context, inboundEndpoint string, result *OpenAIForwardResult) string {
 	if result == nil {
 		if inboundEndpoint == openAIResponsesEndpoint || inboundEndpoint == openAIResponsesCompactEndpoint {
-			return "generated:" + generateRequestID()
+			return normalizeUsageBillingRequestID("generated:" + generateRequestID())
 		}
 		return resolveUsageBillingRequestID(ctx, "")
 	}
@@ -151,7 +138,7 @@ func resolveOpenAIUsageBillingRequestID(ctx context.Context, inboundEndpoint str
 			if requestID == "" {
 				requestID = "generated:" + generateRequestID()
 			}
-			state.value = normalizeOpenAIUsageRequestID(requestID)
+			state.value = normalizeUsageBillingRequestID(requestID)
 		})
 		return state.value
 	}
