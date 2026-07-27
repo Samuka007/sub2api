@@ -13,8 +13,10 @@ import (
 )
 
 type plusQuotaExportAccountRepoStub struct {
-	accounts []service.Account
-	err      error
+	accounts         []service.Account
+	err              error
+	deleteAnomalyErr error
+	deleteAnomalyIDs []int64
 }
 
 func (s *plusQuotaExportAccountRepoStub) GetByID(context.Context, int64) (*service.Account, error) {
@@ -39,6 +41,11 @@ func (s *plusQuotaExportAccountRepoStub) ListByGroup(context.Context, int64) ([]
 
 func (s *plusQuotaExportAccountRepoStub) UpdateExtra(context.Context, int64, map[string]any) error {
 	return nil
+}
+
+func (s *plusQuotaExportAccountRepoStub) DeleteOpenAIPlus401AnomalyAccount(_ context.Context, accountID int64) error {
+	s.deleteAnomalyIDs = append(s.deleteAnomalyIDs, accountID)
+	return s.deleteAnomalyErr
 }
 
 type plusQuotaExportClientStub struct{}
@@ -76,7 +83,38 @@ func plusQuotaExportRouter(repo *plusQuotaExportAccountRepoStub) *gin.Engine {
 	handler := NewPlusQuotaAutomationHandler(automationService)
 	router := gin.New()
 	router.GET("/api/v1/admin/openai/plus-quota-anomalies/export-notes", handler.ExportAnomalyNotes)
+	router.DELETE("/api/v1/admin/openai/plus-quota-anomalies/:accountId/account", handler.DeleteAnomalyAccount)
 	return router
+}
+
+func TestPlusQuotaAutomationDeleteAnomalyAccount(t *testing.T) {
+	tests := []struct {
+		name       string
+		accountID  string
+		deleteErr  error
+		wantStatus int
+		wantCalls  []int64
+	}{
+		{name: "success", accountID: "42", wantStatus: http.StatusOK, wantCalls: []int64{42}},
+		{name: "stale anomaly", accountID: "42", deleteErr: service.ErrPlusQuotaAnomalyDeleteConflict, wantStatus: http.StatusConflict, wantCalls: []int64{42}},
+		{name: "missing account", accountID: "42", deleteErr: service.ErrPlusQuotaAnomalyNotFound, wantStatus: http.StatusNotFound, wantCalls: []int64{42}},
+		{name: "invalid account ID", accountID: "invalid", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &plusQuotaExportAccountRepoStub{deleteAnomalyErr: tt.deleteErr}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				http.MethodDelete,
+				"/api/v1/admin/openai/plus-quota-anomalies/"+tt.accountID+"/account",
+				nil,
+			)
+			plusQuotaExportRouter(repo).ServeHTTP(recorder, request)
+
+			require.Equal(t, tt.wantStatus, recorder.Code)
+			require.Equal(t, tt.wantCalls, repo.deleteAnomalyIDs)
+		})
+	}
 }
 
 func TestPlusQuotaAutomationExportAnomalyNotes(t *testing.T) {

@@ -18,6 +18,8 @@ type plusQuotaAutomationRepoStub struct {
 	groupIDs          map[int64][]int64
 	getByIDErr        error
 	updateExtraErrors []error
+	deleteAnomalyErr  error
+	deleteAnomalyIDs  []int64
 }
 
 func (r *plusQuotaAutomationRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -81,6 +83,17 @@ func (r *plusQuotaAutomationRepoStub) UpdateExtra(_ context.Context, id int64, u
 	for key, value := range updates {
 		account.Extra[key] = value
 	}
+	return nil
+}
+
+func (r *plusQuotaAutomationRepoStub) DeleteOpenAIPlus401AnomalyAccount(_ context.Context, accountID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleteAnomalyIDs = append(r.deleteAnomalyIDs, accountID)
+	if r.deleteAnomalyErr != nil {
+		return r.deleteAnomalyErr
+	}
+	delete(r.accounts, accountID)
 	return nil
 }
 
@@ -423,6 +436,19 @@ func TestPlusQuotaAutomationResolveAnomalyPreservesRepositoryErrors(t *testing.T
 	repo.getByIDErr = ErrAccountNotFound
 	_, err = svc.ResolveAnomaly(context.Background(), account.ID)
 	require.ErrorIs(t, err, ErrPlusQuotaAnomalyNotFound)
+}
+
+func TestPlusQuotaAutomationDeleteAnomalyAccountDelegatesAtomicCheck(t *testing.T) {
+	account, usage := plusQuotaEligibleTestAccount(23)
+	svc, repo, _ := newPlusQuotaAutomationTestService(t, account, usage)
+
+	require.NoError(t, svc.DeleteAnomalyAccount(context.Background(), account.ID))
+	require.Equal(t, []int64{account.ID}, repo.deleteAnomalyIDs)
+
+	repo.deleteAnomalyErr = ErrPlusQuotaAnomalyDeleteConflict
+	err := svc.DeleteAnomalyAccount(context.Background(), account.ID)
+	require.ErrorIs(t, err, ErrPlusQuotaAnomalyDeleteConflict)
+	require.Equal(t, []int64{account.ID, account.ID}, repo.deleteAnomalyIDs)
 }
 
 func TestPlusQuotaAutomationCooldownPreventsRepeatedCreditConsumption(t *testing.T) {

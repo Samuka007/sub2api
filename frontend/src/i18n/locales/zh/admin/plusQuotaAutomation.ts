@@ -12,6 +12,8 @@ export default {
     actions: {
       runNow: '立即扫描',
       resolve: '标记已解决',
+      deleteAccount: '删除账号',
+      deletingAccount: '正在删除账号',
       exportNotes: '导出异常账号备注',
       exportingNotes: '正在导出'
     },
@@ -68,6 +70,10 @@ export default {
       title: '确认立即扫描',
       message: '扫描会在账号用量达到阈值且存在可用次数时自动消耗 1 次重置次数。确定继续吗？'
     },
+    deleteConfirm: {
+      title: '确认删除异常账号',
+      message: '将永久删除账号“{name}”（{email}，ID：{id}）。此操作无法撤销，确定继续吗？'
+    },
     messages: {
       loadOverviewFailed: '加载自动刷新状态失败',
       loadGroupsFailed: '加载 OpenAI 分组失败',
@@ -80,6 +86,9 @@ export default {
       runFailed: '启动扫描任务失败',
       resolved: '异常已标记为解决',
       resolveFailed: '解决异常失败',
+      accountDeleted: '账号“{name}”已删除',
+      deleteAccountFailed: '删除异常账号失败',
+      deleteAccountNoLongerEligible: '账号异常状态已变化，未执行删除，请刷新后重试',
       noAccountNotesToExport: '当前异常账号没有可导出的备注',
       accountNotesExported: '已导出 {count} 个异常账号的备注',
       exportAccountNotesFailed: '导出异常账号备注失败'

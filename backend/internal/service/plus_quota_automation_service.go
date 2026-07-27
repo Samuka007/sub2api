@@ -43,9 +43,14 @@ const (
 )
 
 var (
-	ErrPlusQuotaAutomationRunning = infraerrors.New(http.StatusConflict, "PLUS_QUOTA_AUTOMATION_RUNNING", "a Plus quota scan is already running")
-	ErrPlusQuotaGroupRequired     = infraerrors.New(http.StatusBadRequest, "PLUS_QUOTA_GROUP_REQUIRED", "an OpenAI group must be selected")
-	ErrPlusQuotaAnomalyNotFound   = infraerrors.New(http.StatusNotFound, "PLUS_QUOTA_ANOMALY_NOT_FOUND", "Plus quota anomaly not found")
+	ErrPlusQuotaAutomationRunning     = infraerrors.New(http.StatusConflict, "PLUS_QUOTA_AUTOMATION_RUNNING", "a Plus quota scan is already running")
+	ErrPlusQuotaGroupRequired         = infraerrors.New(http.StatusBadRequest, "PLUS_QUOTA_GROUP_REQUIRED", "an OpenAI group must be selected")
+	ErrPlusQuotaAnomalyNotFound       = infraerrors.New(http.StatusNotFound, "PLUS_QUOTA_ANOMALY_NOT_FOUND", "Plus quota anomaly not found")
+	ErrPlusQuotaAnomalyDeleteConflict = infraerrors.New(
+		http.StatusConflict,
+		"PLUS_QUOTA_ANOMALY_ACCOUNT_DELETE_CONFLICT",
+		"account is no longer an open Plus quota HTTP 401 anomaly",
+	)
 )
 
 type plusQuotaAutomationAccountRepository interface {
@@ -53,6 +58,7 @@ type plusQuotaAutomationAccountRepository interface {
 	ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
 	ListByGroup(ctx context.Context, groupID int64) ([]Account, error)
 	UpdateExtra(ctx context.Context, id int64, updates map[string]any) error
+	DeleteOpenAIPlus401AnomalyAccount(ctx context.Context, accountID int64) error
 }
 
 type plusQuotaAutomationClient interface {
@@ -184,7 +190,7 @@ func NewPlusQuotaAutomationService(
 }
 
 func ProvidePlusQuotaAutomationService(
-	accountRepo AccountRepository,
+	accountRepo AdminAccountRepository,
 	quota *OpenAIQuotaService,
 	settings SettingRepository,
 	db *sql.DB,
@@ -913,6 +919,17 @@ func plusQuotaAnomalyFromAccount(account *Account) (*PlusQuotaAnomaly, error) {
 	return &anomaly, nil
 }
 
+// IsOpenAIPlus401AnomalyAccount reports whether an account still satisfies the
+// destructive-action precondition. Repositories use it after locking the row.
+func IsOpenAIPlus401AnomalyAccount(account *Account) bool {
+	if account == nil || !account.IsOpenAIOAuth() {
+		return false
+	}
+	anomaly, err := plusQuotaAnomalyFromAccount(account)
+	return err == nil && anomaly != nil &&
+		anomaly.Status == PlusQuotaAnomalyStatusOpen && anomaly.HTTPStatus == http.StatusUnauthorized
+}
+
 func plusQuotaAccountEmail(account *Account) string {
 	if account == nil {
 		return ""
@@ -1095,6 +1112,10 @@ func (s *PlusQuotaAutomationService) ResolveAnomaly(ctx context.Context, account
 		anomaly.Email = email
 	}
 	return anomaly, nil
+}
+
+func (s *PlusQuotaAutomationService) DeleteAnomalyAccount(ctx context.Context, accountID int64) error {
+	return s.accountRepo.DeleteOpenAIPlus401AnomalyAccount(ctx, accountID)
 }
 
 func (s *PlusQuotaAutomationService) runLoop() {

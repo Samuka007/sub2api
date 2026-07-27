@@ -12,6 +12,8 @@ export default {
     actions: {
       runNow: 'Scan now',
       resolve: 'Mark resolved',
+      deleteAccount: 'Delete account',
+      deletingAccount: 'Deleting account',
       exportNotes: 'Export anomaly account notes',
       exportingNotes: 'Exporting'
     },
@@ -68,6 +70,10 @@ export default {
       title: 'Confirm scan',
       message: 'The scan automatically consumes one reset credit when an account reaches the configured threshold and has a credit available. Continue?'
     },
+    deleteConfirm: {
+      title: 'Delete anomaly account',
+      message: 'Permanently delete account "{name}" ({email}, ID: {id})? This action cannot be undone.'
+    },
     messages: {
       loadOverviewFailed: 'Failed to load automation status',
       loadGroupsFailed: 'Failed to load OpenAI groups',
@@ -80,6 +86,9 @@ export default {
       runFailed: 'Failed to start scan',
       resolved: 'Anomaly marked as resolved',
       resolveFailed: 'Failed to resolve anomaly',
+      accountDeleted: 'Account "{name}" deleted',
+      deleteAccountFailed: 'Failed to delete anomaly account',
+      deleteAccountNoLongerEligible: 'The anomaly status changed. The account was not deleted; refresh and try again.',
       noAccountNotesToExport: 'No anomaly accounts have notes to export',
       accountNotesExported: 'Exported notes for {count} anomaly accounts',
       exportAccountNotesFailed: 'Failed to export anomaly account notes'

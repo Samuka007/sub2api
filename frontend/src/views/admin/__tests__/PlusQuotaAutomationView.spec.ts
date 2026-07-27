@@ -13,6 +13,7 @@ const {
   listAnomalies,
   exportAnomalyNotes,
   resolveAnomaly,
+  deleteAccount,
   getGroups,
   showError,
   showSuccess,
@@ -24,6 +25,7 @@ const {
   listAnomalies: vi.fn(),
   exportAnomalyNotes: vi.fn(),
   resolveAnomaly: vi.fn(),
+  deleteAccount: vi.fn(),
   getGroups: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn(),
@@ -38,7 +40,8 @@ vi.mock('@/api/admin', () => ({
       runAutomation,
       listAnomalies,
       exportAnomalyNotes,
-      resolveAnomaly
+      resolveAnomaly,
+      deleteAnomalyAccount: deleteAccount
     },
     groups: {
       getAllIncludingInactive: getGroups
@@ -123,12 +126,23 @@ const ConfirmDialogStub = defineComponent({
     show: {
       type: Boolean,
       default: false
-    }
+    },
+    title: String,
+    message: String,
+    confirmText: String,
+    danger: Boolean
   },
   emits: ['confirm', 'cancel'],
   template: `
-    <button v-if="show" data-test="confirm-run" @click="$emit('confirm')">
-      confirm
+    <button
+      v-if="show"
+      data-test="confirm-dialog"
+      :data-title="title"
+      :data-message="message"
+      :data-danger="String(danger)"
+      @click="$emit('confirm')"
+    >
+      {{ confirmText }}
     </button>
   `
 })
@@ -175,6 +189,7 @@ describe('admin PlusQuotaAutomationView', () => {
     listAnomalies.mockReset()
     exportAnomalyNotes.mockReset()
     resolveAnomaly.mockReset()
+    deleteAccount.mockReset()
     getGroups.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
@@ -290,7 +305,7 @@ describe('admin PlusQuotaAutomationView', () => {
       wrapper,
       'admin.plusQuotaAutomation.actions.runNow'
     ).trigger('click')
-    await wrapper.get('[data-test="confirm-run"]').trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
     await flushPromises()
 
     expect(runAutomation).toHaveBeenCalledTimes(1)
@@ -318,7 +333,7 @@ describe('admin PlusQuotaAutomationView', () => {
     )
     expect(runButton.attributes('disabled')).toBeDefined()
     await runButton.trigger('click')
-    expect(wrapper.find('[data-test="confirm-run"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="confirm-dialog"]').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -610,6 +625,182 @@ describe('admin PlusQuotaAutomationView', () => {
       expect.objectContaining({ page: 1, page_size: 20 }),
       expect.any(Object)
     )
+
+    wrapper.unmount()
+  })
+
+  it('requires destructive confirmation, disables the row, and refreshes anomalies and counts after deletion', async () => {
+    const anomaly = {
+      account_id: 42,
+      account_name: 'plus-forty-two',
+      email: 'plus42@example.com',
+      group_id: 1,
+      stage: 'query',
+      http_status: 401,
+      first_detected_at: '2026-07-23T08:00:00Z',
+      last_detected_at: '2026-07-23T08:00:00Z',
+      count: 1,
+      status: 'open' as const,
+      last_error: 'unauthorized'
+    }
+    const deletion = deferred<{ message: string }>()
+    listAnomalies
+      .mockResolvedValueOnce({ items: [anomaly], total: 1, page: 1, page_size: 20 })
+      .mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 })
+    deleteAccount.mockReturnValueOnce(deletion.promise)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="delete-anomaly-account"]').trigger('click')
+    expect(deleteAccount).not.toHaveBeenCalled()
+
+    const confirmButton = wrapper.get('[data-test="confirm-dialog"]')
+    expect(confirmButton.attributes('data-title')).toBe(
+      'admin.plusQuotaAutomation.deleteConfirm.title'
+    )
+    expect(confirmButton.attributes('data-message')).toBe(
+      'admin.plusQuotaAutomation.deleteConfirm.message'
+    )
+    expect(confirmButton.attributes('data-danger')).toBe('true')
+
+    await confirmButton.trigger('click')
+    await flushPromises()
+
+    expect(deleteAccount).toHaveBeenCalledWith(42)
+    expect(wrapper.get('[data-test="delete-anomaly-account"]').attributes('disabled')).toBeDefined()
+    expect(
+      wrapper.get('button[title="admin.plusQuotaAutomation.actions.resolve"]').attributes('disabled')
+    ).toBeDefined()
+    expect(listAnomalies).toHaveBeenCalledTimes(1)
+    expect(getAutomation).toHaveBeenCalledTimes(1)
+
+    deletion.resolve({ message: 'ok' })
+    await flushPromises()
+
+    expect(showSuccess).toHaveBeenCalledWith(
+      'admin.plusQuotaAutomation.messages.accountDeleted'
+    )
+    expect(listAnomalies).toHaveBeenCalledTimes(2)
+    expect(getAutomation).toHaveBeenCalledTimes(2)
+
+    wrapper.unmount()
+  })
+
+  it('only shows account deletion for open HTTP 401 anomalies', async () => {
+    const eligible = {
+      account_id: 42,
+      account_name: 'eligible-plus-account',
+      email: 'eligible@example.com',
+      group_id: 1,
+      stage: 'query',
+      http_status: 401,
+      first_detected_at: '2026-07-23T08:00:00Z',
+      last_detected_at: '2026-07-23T08:00:00Z',
+      count: 1,
+      status: 'open' as const,
+      last_error: 'unauthorized'
+    }
+    listAnomalies.mockResolvedValueOnce({
+      items: [
+        eligible,
+        { ...eligible, account_id: 43, status: 'resolved' as const },
+        { ...eligible, account_id: 44, http_status: 403 }
+      ],
+      total: 3,
+      page: 1,
+      page_size: 20
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="delete-anomaly-account"]')).toHaveLength(1)
+
+    wrapper.unmount()
+  })
+
+  it('keeps the anomaly actionable and reports the API error when deletion fails', async () => {
+    const anomaly = {
+      account_id: 42,
+      account_name: 'plus-forty-two',
+      email: 'plus42@example.com',
+      group_id: 1,
+      stage: 'query',
+      http_status: 401,
+      first_detected_at: '2026-07-23T08:00:00Z',
+      last_detected_at: '2026-07-23T08:00:00Z',
+      count: 1,
+      status: 'open' as const,
+      last_error: 'unauthorized'
+    }
+    listAnomalies
+      .mockResolvedValueOnce({
+        items: [anomaly],
+        total: 1,
+        page: 1,
+        page_size: 20
+      })
+      .mockResolvedValueOnce({
+        items: [anomaly],
+        total: 1,
+        page: 1,
+        page_size: 20
+      })
+    deleteAccount.mockRejectedValueOnce({
+      response: { data: { detail: 'Cannot delete this account' } }
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="delete-anomaly-account"]').trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('Cannot delete this account')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(listAnomalies).toHaveBeenCalledTimes(2)
+    expect(getAutomation).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="delete-anomaly-account"]').attributes('disabled')).toBeUndefined()
+
+    wrapper.unmount()
+  })
+
+  it('warns and refreshes when the server rejects a stale anomaly deletion', async () => {
+    const anomaly = {
+      account_id: 42,
+      account_name: 'plus-forty-two',
+      email: 'plus42@example.com',
+      group_id: 1,
+      stage: 'query',
+      http_status: 401,
+      first_detected_at: '2026-07-23T08:00:00Z',
+      last_detected_at: '2026-07-23T08:00:00Z',
+      count: 1,
+      status: 'open' as const,
+      last_error: 'unauthorized'
+    }
+    listAnomalies
+      .mockResolvedValueOnce({ items: [anomaly], total: 1, page: 1, page_size: 20 })
+      .mockResolvedValueOnce({ items: [], total: 0, page: 1, page_size: 20 })
+    deleteAccount.mockRejectedValueOnce({
+      status: 409,
+      message: 'account is no longer an open Plus quota HTTP 401 anomaly'
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="delete-anomaly-account"]').trigger('click')
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteAccount).toHaveBeenCalledWith(42)
+    expect(showWarning).toHaveBeenCalledWith(
+      'admin.plusQuotaAutomation.messages.deleteAccountNoLongerEligible'
+    )
+    expect(listAnomalies).toHaveBeenCalledTimes(2)
 
     wrapper.unmount()
   })

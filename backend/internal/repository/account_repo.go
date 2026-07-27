@@ -80,8 +80,8 @@ func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache se
 	return newAccountRepositoryWithSQL(client, sqlDB, schedulerCache)
 }
 
-// NewAdminAccountRepository exposes the account repository's atomic duplication capability
-// as an explicit dependency of the admin service.
+// NewAdminAccountRepository exposes admin-only account write capabilities as
+// an explicit dependency of admin services.
 func NewAdminAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache service.SchedulerCache) service.AdminAccountRepository {
 	return newAccountRepositoryWithSQL(client, sqlDB, schedulerCache)
 }
@@ -192,28 +192,7 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 		txClient = r.client
 	}
 
-	if err := createAccountRecord(ctx, txClient, account); err != nil {
-		return err
-	}
-	groupIDs := make([]int64, 0, len(groups))
-	if len(groups) > 0 {
-		builders := make([]*dbent.AccountGroupCreate, 0, len(groups))
-		for i := range groups {
-			groups[i].AccountID = account.ID
-			groupIDs = append(groupIDs, groups[i].GroupID)
-			builders = append(builders, txClient.AccountGroup.Create().
-				SetAccountID(account.ID).
-				SetGroupID(groups[i].GroupID).
-				SetPriority(groups[i].Priority),
-			)
-		}
-		if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
-			return err
-		}
-	}
-	account.GroupIDs = groupIDs
-	account.AccountGroups = append([]service.AccountGroup(nil), groups...)
-	if err := enqueueSchedulerOutbox(ctx, txClient, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, buildSchedulerGroupPayload(groupIDs)); err != nil {
+	if err := createAccountWithGroups(ctx, txClient, account, groups); err != nil {
 		return err
 	}
 
@@ -223,6 +202,105 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 		}
 	}
 	return nil
+}
+
+// CreateSparkShadowWithGroups serializes shadow creation with parent deletion.
+// The parent lock also makes the one-parent/one-Spark-shadow check authoritative.
+func (r *accountRepository) CreateSparkShadowWithGroups(
+	ctx context.Context,
+	parentID int64,
+	shadow *service.Account,
+	groups []service.AccountGroup,
+) error {
+	if shadow == nil {
+		return service.ErrAccountNilInput
+	}
+	tx, err := r.client.Tx(ctx)
+	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+		return err
+	}
+
+	txClient := r.client
+	if tx != nil {
+		defer func() { _ = tx.Rollback() }()
+		txClient = tx.Client()
+	}
+
+	parent, err := txClient.Account.Query().
+		Where(dbaccount.IDEQ(parentID)).
+		ForUpdate().
+		Only(ctx)
+	if err != nil {
+		if dbent.IsNotFound(err) {
+			return service.ErrAccountNotFound
+		}
+		return err
+	}
+	parentAccount := accountEntityToService(parent)
+	if !parentAccount.IsOpenAIOAuth() {
+		return service.ErrSparkShadowInvalidParent
+	}
+	if parentAccount.IsCredentialShadow() {
+		return service.ErrSparkShadowParentIsShadow
+	}
+
+	exists, err := txClient.Account.Query().
+		Where(
+			dbaccount.ParentAccountIDEQ(parentID),
+			dbaccount.QuotaDimensionEQ(dbaccount.QuotaDimensionSpark),
+		).
+		Exist(ctx)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return service.ErrSparkShadowAlreadyExists
+	}
+
+	if err := createAccountWithGroups(ctx, txClient, shadow, groups); err != nil {
+		return err
+	}
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
+}
+
+func createAccountWithGroups(
+	ctx context.Context,
+	client *dbent.Client,
+	account *service.Account,
+	groups []service.AccountGroup,
+) error {
+	if err := createAccountRecord(ctx, client, account); err != nil {
+		return err
+	}
+	groupIDs := make([]int64, 0, len(groups))
+	if len(groups) > 0 {
+		builders := make([]*dbent.AccountGroupCreate, 0, len(groups))
+		for i := range groups {
+			groups[i].AccountID = account.ID
+			groupIDs = append(groupIDs, groups[i].GroupID)
+			builders = append(builders, client.AccountGroup.Create().
+				SetAccountID(account.ID).
+				SetGroupID(groups[i].GroupID).
+				SetPriority(groups[i].Priority),
+			)
+		}
+		if _, err := client.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
+			return err
+		}
+	}
+	account.GroupIDs = groupIDs
+	account.AccountGroups = append([]service.AccountGroup(nil), groups...)
+	return enqueueSchedulerOutbox(
+		ctx,
+		client,
+		service.SchedulerOutboxEventAccountChanged,
+		&account.ID,
+		nil,
+		buildSchedulerGroupPayload(groupIDs),
+	)
 }
 
 func (r *accountRepository) GetByID(ctx context.Context, id int64) (*service.Account, error) {
@@ -765,46 +843,134 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 	return nil
 }
 
+type deletedAccountState struct {
+	accountID int64
+	groupIDs  []int64
+}
+
 func (r *accountRepository) Delete(ctx context.Context, id int64) error {
-	groupIDs, err := r.loadAccountGroupIDs(ctx, id)
+	tx, txClient, err := r.beginAccountDeleteTransaction(ctx)
 	if err != nil {
 		return err
 	}
-	// 使用事务保证账号与关联分组的删除原子性
-	tx, err := r.client.Tx(ctx)
-	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
-		return err
-	}
-
-	var txClient *dbent.Client
-	if err == nil {
+	if tx != nil {
 		defer func() { _ = tx.Rollback() }()
-		txClient = tx.Client()
-	} else {
-		// 已处于外部事务中（ErrTxStarted），复用当前 client
-		txClient = r.client
 	}
 
-	if _, err := txClient.AccountGroup.Delete().Where(dbaccountgroup.AccountIDEQ(id)).Exec(ctx); err != nil {
+	deleted, err := deleteAccountRecord(ctx, txClient, id)
+	if err != nil {
 		return err
 	}
-	if _, err := txClient.ExecContext(ctx, "DELETE FROM scheduled_test_plans WHERE account_id = $1", id); err != nil {
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	r.afterAccountDelete(ctx, deleted)
+	return nil
+}
+
+// DeleteOpenAIPlus401AnomalyAccount atomically revalidates the destructive
+// action under a parent-row lock and deletes the parent with all Spark shadows.
+func (r *accountRepository) DeleteOpenAIPlus401AnomalyAccount(ctx context.Context, accountID int64) error {
+	tx, txClient, err := r.beginAccountDeleteTransaction(ctx)
+	if err != nil {
 		return err
 	}
-	if _, err := txClient.Account.Delete().Where(dbaccount.IDEQ(id)).Exec(ctx); err != nil {
+	if tx != nil {
+		defer func() { _ = tx.Rollback() }()
+	}
+
+	parent, err := txClient.Account.Query().
+		Where(dbaccount.IDEQ(accountID)).
+		ForUpdate().
+		Only(ctx)
+	if err != nil {
+		if dbent.IsNotFound(err) {
+			return service.ErrPlusQuotaAnomalyNotFound
+		}
 		return err
 	}
+	if !service.IsOpenAIPlus401AnomalyAccount(accountEntityToService(parent)) {
+		return service.ErrPlusQuotaAnomalyDeleteConflict
+	}
+
+	shadows, err := txClient.Account.Query().
+		Where(
+			dbaccount.ParentAccountIDEQ(accountID),
+			dbaccount.QuotaDimensionEQ(dbaccount.QuotaDimensionSpark),
+		).
+		ForUpdate().
+		All(ctx)
+	if err != nil {
+		return err
+	}
+
+	deleted := make([]deletedAccountState, 0, len(shadows)+1)
+	for _, shadow := range shadows {
+		state, err := deleteAccountRecord(ctx, txClient, shadow.ID)
+		if err != nil {
+			return err
+		}
+		deleted = append(deleted, state)
+	}
+	state, err := deleteAccountRecord(ctx, txClient, accountID)
+	if err != nil {
+		return err
+	}
+	deleted = append(deleted, state)
 
 	if tx != nil {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
-	r.deleteSchedulerAccountSnapshot(ctx, id)
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, buildSchedulerGroupPayload(groupIDs)); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account delete failed: account=%d err=%v", id, err)
+	for _, state := range deleted {
+		r.afterAccountDelete(ctx, state)
 	}
 	return nil
+}
+
+func (r *accountRepository) beginAccountDeleteTransaction(ctx context.Context) (*dbent.Tx, *dbent.Client, error) {
+	tx, err := r.client.Tx(ctx)
+	if err == nil {
+		return tx, tx.Client(), nil
+	}
+	if errors.Is(err, dbent.ErrTxStarted) {
+		return nil, r.client, nil
+	}
+	return nil, nil, err
+}
+
+func deleteAccountRecord(ctx context.Context, client *dbent.Client, accountID int64) (deletedAccountState, error) {
+	groupIDs, err := loadAccountGroupIDs(ctx, client, accountID)
+	if err != nil {
+		return deletedAccountState{}, err
+	}
+	if _, err := client.AccountGroup.Delete().Where(dbaccountgroup.AccountIDEQ(accountID)).Exec(ctx); err != nil {
+		return deletedAccountState{}, err
+	}
+	if _, err := client.ExecContext(ctx, "DELETE FROM scheduled_test_plans WHERE account_id = $1", accountID); err != nil {
+		return deletedAccountState{}, err
+	}
+	if _, err := client.Account.Delete().Where(dbaccount.IDEQ(accountID)).Exec(ctx); err != nil {
+		return deletedAccountState{}, err
+	}
+	return deletedAccountState{accountID: accountID, groupIDs: groupIDs}, nil
+}
+
+func (r *accountRepository) afterAccountDelete(ctx context.Context, deleted deletedAccountState) {
+	r.deleteSchedulerAccountSnapshot(ctx, deleted.accountID)
+	if err := enqueueSchedulerOutbox(
+		ctx,
+		r.sql,
+		service.SchedulerOutboxEventAccountChanged,
+		&deleted.accountID,
+		nil,
+		buildSchedulerGroupPayload(deleted.groupIDs),
+	); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account delete failed: account=%d err=%v", deleted.accountID, err)
+	}
 }
 
 func (r *accountRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Account, *pagination.PaginationResult, error) {
@@ -3312,7 +3478,11 @@ func uniquePositiveInt64s(ids []int64) []int64 {
 }
 
 func (r *accountRepository) loadAccountGroupIDs(ctx context.Context, accountID int64) ([]int64, error) {
-	entries, err := r.client.AccountGroup.
+	return loadAccountGroupIDs(ctx, r.client, accountID)
+}
+
+func loadAccountGroupIDs(ctx context.Context, client *dbent.Client, accountID int64) ([]int64, error) {
+	entries, err := client.AccountGroup.
 		Query().
 		Where(dbaccountgroup.AccountIDEQ(accountID)).
 		All(ctx)
