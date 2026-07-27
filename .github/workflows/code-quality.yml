@@ -77,6 +77,8 @@ jobs:
           done
       - name: Test Apple container deployment
         run: /bin/bash deploy/tests/apple-container-test.sh
+      - name: Test Caddy cache configuration
+        run: /bin/sh deploy/test-caddyfile-cache.sh
       - name: Test model IQ Compose environment
         run: /bin/bash deploy/tests/model-iq-compose-env-test.sh
       - name: Test install GitHub token handling

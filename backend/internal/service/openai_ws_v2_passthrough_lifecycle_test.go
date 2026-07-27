@@ -322,6 +322,89 @@ func TestPassthroughLifecycle_SuccessfulTerminalWriteStaysOnCurrentTurn(t *testi
 	require.NoError(t, got[1].turnErr)
 }
 
+func TestPassthroughLifecycle_FollowUpModelScopesTransientFailuresToActiveTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		sessionModel  = "gpt-5.1"
+		followUpModel = "gpt-5.2"
+	)
+	tests := []struct {
+		name            string
+		events          []string
+		newTurnPerEvent bool
+	}{
+		{
+			name: "response failed",
+			events: []string{
+				`{"type":"response.failed","response":{"id":"resp_b_1","error":{"code":"server_error","message":"Internal error"}}}`,
+				`{"type":"response.failed","response":{"id":"resp_b_2","error":{"code":"server_error","message":"Internal error"}}}`,
+			},
+			newTurnPerEvent: true,
+		},
+		{
+			name: "error event",
+			events: []string{
+				`{"type":"error","error":{"code":"server_error","type":"server_error","message":"Internal error"}}`,
+				`{"type":"error","error":{"code":"server_error","type":"server_error","message":"Internal error"}}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controlCtx, cancelControl := context.WithCancelCause(context.Background())
+			defer cancelControl(context.Canceled)
+			cfg := passthroughLifecycleConfig()
+			upstream := newStagedPassthroughConn()
+			svc := newPassthroughLifecycleService(cfg, upstream)
+			svc.rateLimitService = NewRateLimitService(transientCooldownAccountRepo{}, nil, &config.Config{}, nil, nil)
+			account := passthroughLifecycleAccount()
+			server, serverErr := startPassthroughLifecycleServer(t, controlCtx, svc, account)
+			defer server.Close()
+			clientConn := dialPassthroughLifecycleClient(t, server)
+
+			firstRequest := requirePassthroughUpstreamWrite(t, upstream, time.Second)
+			require.Equal(t, sessionModel, gjson.GetBytes(firstRequest, "model").String())
+			upstream.Send(`{"type":"response.completed","response":{"id":"resp_a","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)
+			firstTerminal, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
+			require.NoError(t, err)
+			require.Equal(t, "response.completed", gjson.GetBytes(firstTerminal, "type").String())
+
+			writeFollowUp := func() {
+				writeCtx, cancelWrite := context.WithTimeout(context.Background(), time.Second)
+				writeErr := clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.2","stream":false}`))
+				cancelWrite()
+				require.NoError(t, writeErr)
+				followUpRequest := requirePassthroughUpstreamWrite(t, upstream, time.Second)
+				require.Equal(t, followUpModel, gjson.GetBytes(followUpRequest, "model").String())
+			}
+
+			if !tt.newTurnPerEvent {
+				writeFollowUp()
+			}
+			for _, event := range tt.events {
+				if tt.newTurnPerEvent {
+					writeFollowUp()
+				}
+				upstream.Send(event)
+				forwarded, readErr := readPassthroughLifecycleFrame(t, clientConn, time.Second)
+				require.NoError(t, readErr)
+				require.Equal(t, gjson.Get(event, "type").String(), gjson.GetBytes(forwarded, "type").String())
+			}
+
+			require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, followUpModel))
+			require.False(t, svc.isOpenAIAccountModelRuntimeBlocked(account, sessionModel))
+
+			_ = clientConn.CloseNow()
+			select {
+			case <-serverErr:
+			case <-time.After(3 * time.Second):
+				t.Fatal("passthrough transient-model test did not exit")
+			}
+		})
+	}
+}
+
 func TestPassthroughLifecycle_FailedTerminalWriteStaysOnCurrentTurn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type callbackEvent struct {
