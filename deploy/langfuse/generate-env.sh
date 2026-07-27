@@ -28,4 +28,5 @@ sed \
   .env.example > .env
 
 chmod 600 .env
-echo "Created .env for $host_ip. Secrets were not printed."
+./generate-xray-config.sh
+echo "Created .env and Xray configs for $host_ip. Secrets were not printed."

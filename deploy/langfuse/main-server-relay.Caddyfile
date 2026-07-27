@@ -1,8 +1,0 @@
-{
-  admin off
-}
-
-:3100 {
-  bind 172.18.0.1
-  reverse_proxy 127.0.0.1:3000
-}

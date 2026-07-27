@@ -3,11 +3,12 @@ set -eu
 cd "$(dirname "$0")"
 compose() { docker compose --env-file .env -f docker-compose.yml "$@"; }
 require_env() { [ -f .env ] || { echo "Missing .env; run ./generate-env.sh first" >&2; exit 1; }; }
+render_xray() { ./generate-xray-config.sh; }
 
 case "${1:-}" in
-  start) require_env; compose pull; compose up -d ;;
+  start) require_env; render_xray; compose pull; compose up -d ;;
   stop) require_env; compose down ;;
-  restart) require_env; compose up -d --force-recreate ;;
+  restart) require_env; render_xray; compose up -d --force-recreate ;;
   status) require_env; compose ps ;;
   logs) require_env; compose logs --tail 200 -f "${2:-langfuse-web}" ;;
   check)
