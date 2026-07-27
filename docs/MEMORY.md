@@ -9,10 +9,10 @@
 | 项目 | 当前事实 | 来源 |
 | --- | --- | --- |
 | 官方基线 | `v0.1.164` / `cd8bb98c44303b2c8f04c0da340447c992f0cb7d` | [`.upstream-version`](../.upstream-version) |
-| 最近内部发布 | `release-1.0.3` | [`deployments/release-1.0.3.md`](deployments/release-1.0.3.md) |
-| 发布 commit | `13248c9931255c5ca8bdc4ed41c2536445659ea9` | 同上 |
-| 生产固定镜像 | `ghcr.io/alle-group/sub2api@sha256:028dbb92507fdb4903b13b68a4a71e84f6a200920b75c7a89040fa037f7595c9` | 同上 |
-| 程序版本 | `1.0.3` | 同上 |
+| 最近内部发布 | `release-1.0.4` | [`deployments/release-1.0.4.md`](deployments/release-1.0.4.md) |
+| 发布 commit | `d4edac4efe6c30c3e8304b53ec74c8c1bb836a07` | 同上 |
+| 生产固定镜像 | `ghcr.io/alle-group/sub2api@sha256:082232bab72f5d662a6a3f1524fa823b338fab54369a8284bf6525ce805a4179` | 同上 |
+| 程序版本 | `1.0.4` | 同上 |
 | 目标平台 | `linux/amd64` | 同上 |
 
 `main` 在最近发布 tag 之后可以继续包含 VERSION 同步、文档或后续开发提交，因此不要把 `HEAD` 自动视为当前生产版本。
