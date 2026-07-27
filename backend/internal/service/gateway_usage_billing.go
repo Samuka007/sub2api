@@ -216,6 +216,24 @@ func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string)
 	return "generated:" + generateRequestID()
 }
 
+// resolveUsageBillingRequestIDForEndpoint keeps caller-controlled correlation
+// IDs out of Responses billing. Codex reuses X-Client-Request-ID for every turn
+// in a thread, while X-Request-ID may also be supplied by the caller.
+func resolveUsageBillingRequestIDForEndpoint(ctx context.Context, inboundEndpoint, responseID, upstreamRequestID string) string {
+	endpoint := strings.TrimSpace(inboundEndpoint)
+	if endpoint != openAIResponsesEndpoint && endpoint != openAIResponsesCompactEndpoint {
+		return resolveUsageBillingRequestID(ctx, upstreamRequestID)
+	}
+
+	if executionID := strings.TrimSpace(responseID); executionID != "" {
+		return executionID
+	}
+	if requestID := strings.TrimSpace(upstreamRequestID); requestID != "" {
+		return requestID
+	}
+	return "generated:" + generateRequestID()
+}
+
 func resolveUsageBillingPayloadFingerprint(ctx context.Context, requestPayloadHash string) string {
 	if payloadHash := strings.TrimSpace(requestPayloadHash); payloadHash != "" {
 		return payloadHash
@@ -975,7 +993,7 @@ func (s *GatewayService) buildRecordUsageLog(
 	opts *recordUsageOpts,
 ) *UsageLog {
 	durationMs := int(result.Duration.Milliseconds())
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
+	requestID := resolveUsageBillingRequestIDForEndpoint(ctx, input.InboundEndpoint, result.ResponseID, result.RequestID)
 	usageLog := &UsageLog{
 		UserID:                user.ID,
 		APIKeyID:              apiKey.ID,

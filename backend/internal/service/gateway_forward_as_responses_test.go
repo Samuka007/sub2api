@@ -36,7 +36,7 @@ func TestHandleResponsesBufferedStreamingResponse_PreservesMessageStartCacheUsag
 	c, _ := gin.CreateTestContext(rec)
 
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_buffered"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_buffered"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event: message_start`,
 			`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":12,"cache_read_input_tokens":9,"cache_creation_input_tokens":3}}}`,
@@ -54,6 +54,8 @@ func TestHandleResponsesBufferedStreamingResponse_PreservesMessageStartCacheUsag
 	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, "rid_buffered", result.RequestID)
+	require.Equal(t, "msg_1", result.ResponseID)
 	require.Equal(t, 12, result.Usage.InputTokens)
 	require.Equal(t, 7, result.Usage.OutputTokens)
 	require.Equal(t, 9, result.Usage.CacheReadInputTokens)
@@ -69,7 +71,7 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	c, _ := gin.CreateTestContext(rec)
 
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_stream"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_stream"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event: message_start`,
 			`data: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":20,"cache_read_input_tokens":11,"cache_creation_input_tokens":4}}}`,
@@ -90,6 +92,8 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, "rid_stream", result.RequestID)
+	require.Equal(t, "msg_2", result.ResponseID)
 	require.Equal(t, 20, result.Usage.InputTokens)
 	require.Equal(t, 8, result.Usage.OutputTokens)
 	require.Equal(t, 11, result.Usage.CacheReadInputTokens)
@@ -183,7 +187,7 @@ func TestHandleResponsesBufferedStreamingResponse_CompactSSEFormat(t *testing.T)
 
 	// Simulate compact SSE format without spaces after colons (e.g. Kimi API)
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_compact"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_compact"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event:message_start`,
 			`data:{"type":"message_start","message":{"id":"msg_compact","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":10}}}`,
@@ -214,7 +218,7 @@ func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 
 	// Simulate compact SSE format without spaces after colons (e.g. Kimi API)
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_compact_stream"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_compact_stream"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event:message_start`,
 			`data:{"type":"message_start","message":{"id":"msg_compact_stream","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":15}}}`,

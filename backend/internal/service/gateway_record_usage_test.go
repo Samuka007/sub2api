@@ -414,6 +414,87 @@ func TestGatewayServiceRecordUsage_PrefersClientRequestIDOverUpstreamRequestID(t
 	require.Equal(t, "client:client-stable-123", usageRepo.lastLog.RequestID)
 }
 
+func TestGatewayServiceRecordUsage_HTTPResponsesUsesDistinctBillingIDsForTurnsInSameThread(t *testing.T) {
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	responseIDs := []string{"msg_gateway_turn_1", "msg_gateway_turn_2"}
+	resolved := make([]string, 0, len(responseIDs))
+	for i, responseID := range responseIDs {
+		err := svc.RecordUsage(ctx, &RecordUsageInput{
+			Result: &ForwardResult{
+				RequestID:  "anthropic-transport-" + responseID,
+				ResponseID: responseID,
+				Usage:      ClaudeUsage{InputTokens: 10 + i, OutputTokens: 6},
+				Model:      "claude-sonnet-4",
+				Duration:   time.Second,
+			},
+			APIKey:          &APIKey{ID: 506},
+			User:            &User{ID: 606},
+			Account:         &Account{ID: 706},
+			InboundEndpoint: openAIResponsesEndpoint,
+			RequestPayloadHash: HashUsageRequestPayload(
+				[]byte("turn-" + responseID),
+			),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, billingRepo.lastCmd)
+		resolved = append(resolved, billingRepo.lastCmd.RequestID)
+	}
+
+	require.Equal(t, responseIDs, resolved)
+	require.NotEqual(t, resolved[0], resolved[1])
+}
+
+func TestGatewayServiceRecordUsage_HTTPResponsesFallsBackToUpstreamRequestID(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "gateway-turn-456")
+	err := svc.RecordUsage(ctx, &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "anthropic-request-789",
+			Usage:     ClaudeUsage{InputTokens: 10, OutputTokens: 6},
+			Model:     "claude-sonnet-4",
+			Duration:  time.Second,
+		},
+		APIKey:          &APIKey{ID: 507},
+		User:            &User{ID: 607},
+		Account:         &Account{ID: 707},
+		InboundEndpoint: openAIResponsesCompactEndpoint,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Equal(t, "anthropic-request-789", billingRepo.lastCmd.RequestID)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "anthropic-request-789", usageRepo.lastLog.RequestID)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesIgnoresClientCorrelationIDs(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "caller-request-456")
+
+	got := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, "", "")
+
+	require.True(t, strings.HasPrefix(got, "generated:"), got)
+	require.NotEqual(t, "client:codex-thread-123", got)
+	require.NotEqual(t, "local:caller-request-456", got)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesRetryKeepsExecutionID(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	first := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, "msg_same_gateway_turn_456", "transport-attempt-1")
+	second := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, "msg_same_gateway_turn_456", "transport-attempt-2")
+
+	require.Equal(t, "msg_same_gateway_turn_456", first)
+	require.Equal(t, first, second)
+}
+
 func TestGatewayServiceRecordUsage_GeneratesRequestIDWhenAllSourcesMissing(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
