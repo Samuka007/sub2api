@@ -1144,6 +1144,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnNo = int(currentTurn.Load())
 				}
 				turnRequestModel, turnUpstreamModel := usageMeta.turnModels(turn.RequestModel)
+				terminalDelivered := terminalWriteCompletesTurn && terminalWriteSucceeded
 				if terminalWriteCompletesTurn {
 					writeSucceeded := terminalWriteSucceeded
 					terminalWriteTurn = 0
@@ -1186,7 +1187,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnResult.Usage.CacheReadInputTokens,
 				)
 				var turnErr error
-				if clientDisconnected.Load() {
+				if clientDisconnected.Load() && !terminalDelivered {
 					turnErr = ErrOpenAIWSClientDisconnected
 				}
 				if hooks != nil && hooks.AfterTurn != nil {
