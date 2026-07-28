@@ -165,6 +165,39 @@ type CostBreakdown struct {
 	LongContextBillingApplied bool
 }
 
+type usageLimitAnomaly struct {
+	Dimension string
+	Reported  int64
+	Limit     int64
+}
+
+func (s *BillingService) detectUsageLimitAnomaly(model string, tokens UsageTokens) (usageLimitAnomaly, bool) {
+	if s == nil || s.pricingService == nil {
+		return usageLimitAnomaly{}, false
+	}
+	pricing := s.pricingService.GetModelPricing(model)
+	if pricing == nil {
+		return usageLimitAnomaly{}, false
+	}
+
+	reportedInput := int64(tokens.InputTokens) + int64(tokens.CacheCreationTokens) + int64(tokens.CacheReadTokens)
+	if pricing.MaxInputTokens > 0 && reportedInput > int64(pricing.MaxInputTokens) {
+		return usageLimitAnomaly{
+			Dimension: "input_tokens",
+			Reported:  reportedInput,
+			Limit:     int64(pricing.MaxInputTokens),
+		}, true
+	}
+	if pricing.MaxOutputTokens > 0 && int64(tokens.OutputTokens) > int64(pricing.MaxOutputTokens) {
+		return usageLimitAnomaly{
+			Dimension: "output_tokens",
+			Reported:  int64(tokens.OutputTokens),
+			Limit:     int64(pricing.MaxOutputTokens),
+		}, true
+	}
+	return usageLimitAnomaly{}, false
+}
+
 // ErrModelPricingUnavailable indicates that none of the configured pricing
 // sources can price the requested model.
 var ErrModelPricingUnavailable = errors.New("pricing not found")

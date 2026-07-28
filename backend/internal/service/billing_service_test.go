@@ -33,6 +33,64 @@ func newTestBillingService() *BillingService {
 	return NewBillingService(&config.Config{}, nil)
 }
 
+func TestBillingServiceDetectUsageLimitAnomaly(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"claude-fable-5": {
+			MaxInputTokens:  1_000_000,
+			MaxOutputTokens: 128_000,
+		},
+	}})
+
+	tests := []struct {
+		name          string
+		model         string
+		tokens        UsageTokens
+		wantAnomaly   bool
+		wantDimension string
+		wantReported  int64
+		wantLimit     int64
+	}{
+		{
+			name:   "usage exactly at both limits remains billable",
+			model:  "claude-fable-5",
+			tokens: UsageTokens{InputTokens: 1_000_000, OutputTokens: 128_000},
+		},
+		{
+			name:          "cached input contributes to context limit",
+			model:         "claude-fable-5",
+			tokens:        UsageTokens{InputTokens: 800_000, CacheReadTokens: 200_001},
+			wantAnomaly:   true,
+			wantDimension: "input_tokens",
+			wantReported:  1_000_001,
+			wantLimit:     1_000_000,
+		},
+		{
+			name:          "output over limit is held",
+			model:         "claude-fable-5",
+			tokens:        UsageTokens{InputTokens: 1, OutputTokens: 128_001},
+			wantAnomaly:   true,
+			wantDimension: "output_tokens",
+			wantReported:  128_001,
+			wantLimit:     128_000,
+		},
+		{
+			name:   "unknown model without metadata keeps existing billing behavior",
+			model:  "custom-model-without-limits",
+			tokens: UsageTokens{InputTokens: 10_000_000},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			anomaly, gotAnomaly := svc.detectUsageLimitAnomaly(tt.model, tt.tokens)
+			require.Equal(t, tt.wantAnomaly, gotAnomaly)
+			require.Equal(t, tt.wantDimension, anomaly.Dimension)
+			require.Equal(t, tt.wantReported, anomaly.Reported)
+			require.Equal(t, tt.wantLimit, anomaly.Limit)
+		})
+	}
+}
+
 func TestCalculateCost_BasicComputation(t *testing.T) {
 	svc := newTestBillingService()
 
@@ -810,8 +868,8 @@ func TestComputeTokenBreakdown_GptImage2ImageEditIssue4386(t *testing.T) {
 
 	cost := svc.computeTokenBreakdown(pricing, tokens, 1.0, "", false)
 
-	wantTextInput := float64(19) * 5e-6    // 0.000095
-	wantImageInput := float64(352) * 8e-6  // 0.002816
+	wantTextInput := float64(19) * 5e-6     // 0.000095
+	wantImageInput := float64(352) * 8e-6   // 0.002816
 	wantImageOutput := float64(439) * 30e-6 // 0.013170
 	require.InDelta(t, wantTextInput, cost.InputCost, 1e-15, "InputCost 仅含文本输入")
 	require.InDelta(t, wantImageInput, cost.ImageInputCost, 1e-15, "图片输入按 $8/1M 独立计费")

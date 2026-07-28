@@ -346,6 +346,56 @@ func TestOpenAIGatewayServiceRecordUsage_ZeroUsageStillWritesUsageLog(t *testing
 	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsModelLimit(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	svc.cfg.Default.RateMultiplier = 1
+
+	pricingData, err := (&PricingService{}).parsePricingData([]byte(`{
+		"gpt-custom-issue-33": {
+			"input_cost_per_token": 0.00001,
+			"output_cost_per_token": 0.00002,
+			"max_input_tokens": 2000000,
+			"max_output_tokens": 128000,
+			"litellm_provider": "openai",
+			"mode": "chat"
+		}
+	}`))
+	require.NoError(t, err)
+	svc.billingService.pricingService = &PricingService{pricingData: pricingData}
+
+	err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "openai-issue-33-anomalous-usage",
+			Usage: OpenAIUsage{
+				InputTokens:  2_000_001,
+				OutputTokens: 1,
+			},
+			Model:    "gpt-custom-issue-33",
+			Duration: time.Second,
+		},
+		APIKey: &APIKey{ID: 1001, Quota: 100, Group: &Group{RateMultiplier: 1}},
+		User:   &User{ID: 2001},
+		Account: &Account{
+			ID:       3001,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Credentials: map[string]any{
+				"base_url": "https://custom-openai.example.com",
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Zero(t, billingRepo.calls, "usage exceeding provider model limits must not be charged automatically")
+	require.Equal(t, 1, usageRepo.calls)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, 2_000_001, usageRepo.lastLog.InputTokens)
+	require.Positive(t, usageRepo.lastLog.TotalCost)
+	require.Zero(t, usageRepo.lastLog.ActualCost, "held usage must remain pending manual review")
+}
+
 func TestOpenAIGatewayServiceRecordUsage_MissingPricingRecordsZeroCostUsageLog(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}

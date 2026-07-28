@@ -169,6 +169,90 @@ func TestGatewayServiceRecordUsage_BillingFingerprintFallsBackToContextRequestID
 	require.Equal(t, "local:req-local-123", billingRepo.lastCmd.RequestPayloadHash)
 }
 
+func TestGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsModelLimit(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+	svc.cfg.Default.RateMultiplier = 1
+
+	pricingData, err := (&PricingService{}).parsePricingData([]byte(`{
+		"claude-fable-5": {
+			"input_cost_per_token": 0.00001,
+			"output_cost_per_token": 0.00005,
+			"max_input_tokens": 1000000,
+			"max_output_tokens": 128000,
+			"litellm_provider": "anthropic",
+			"mode": "chat"
+		}
+	}`))
+	require.NoError(t, err)
+	svc.billingService.pricingService = &PricingService{pricingData: pricingData}
+
+	err = svc.RecordUsage(context.Background(), &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "issue-33-anomalous-usage",
+			Usage: ClaudeUsage{
+				InputTokens:  7_489_444,
+				OutputTokens: 41_378,
+			},
+			Model:    "claude-fable-5",
+			Duration: 165 * time.Second,
+		},
+		APIKey: &APIKey{ID: 501, Quota: 100},
+		User:   &User{ID: 601},
+		Account: &Account{
+			ID:       701,
+			Platform: PlatformAnthropic,
+			Type:     AccountTypeAPIKey,
+			Credentials: map[string]any{
+				"base_url": "https://custom-anthropic.example.com",
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Zero(t, billingRepo.calls, "usage exceeding provider model limits must not be charged automatically")
+	require.NotNil(t, usageRepo.lastLog, "held usage must remain persisted for review")
+	require.Equal(t, 7_489_444, usageRepo.lastLog.InputTokens)
+	require.Equal(t, 41_378, usageRepo.lastLog.OutputTokens)
+	require.InDelta(t, 76.96334, usageRepo.lastLog.TotalCost, 1e-9)
+	require.Zero(t, usageRepo.lastLog.ActualCost, "held usage must not change user balance")
+}
+
+func TestGatewayServiceRecordUsage_RecordsOnlyAvailableBalanceAsActualCost(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	newBalance := 0.0
+	charged := 0.001
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{
+		Applied:            true,
+		NewBalance:         &newBalance,
+		BalanceCharged:     &charged,
+		BalanceOverdrafted: true,
+	}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+
+	err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "balance-capped-at-zero",
+			Usage: ClaudeUsage{
+				InputTokens:  1_000,
+				OutputTokens: 100,
+			},
+			Model:    "claude-sonnet-4",
+			Duration: time.Second,
+		},
+		APIKey:  &APIKey{ID: 501, Quota: 100},
+		User:    &User{ID: 601, Balance: charged},
+		Account: &Account{ID: 701, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, billingRepo.calls)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Greater(t, usageRepo.lastLog.TotalCost, charged)
+	require.InDelta(t, charged, usageRepo.lastLog.ActualCost, 1e-12)
+}
+
 func TestGatewayServiceRecordUsage_PreservesRequestedAndUpstreamModels(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	svc := newGatewayRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
