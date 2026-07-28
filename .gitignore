@@ -166,9 +166,3 @@ docs/*
 frontend/coverage/
 aicodex
 output/
-
-# Local archives and frontend tool caches
-/archives/
-/frontend/history/
-/.pnpm-store/
-/.vite/

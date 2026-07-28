@@ -5,49 +5,6 @@
         <div class="h-8 w-8 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
       </div>
       <template v-else>
-        <div
-          v-if="showRechargeCodeActions"
-          class="rounded-lg border border-[#87c8b8] bg-[#eaf8f4] p-6 shadow-[0_10px_28px_rgba(35,139,118,0.10)] sm:p-7 dark:border-[#367064] dark:bg-[#142c27] dark:shadow-[0_10px_28px_rgba(0,0,0,0.22)]"
-        >
-          <div class="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between sm:gap-8">
-            <div class="flex min-w-0 items-start gap-4 sm:items-center">
-              <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-white text-[#238b76] shadow-[0_5px_14px_rgba(35,139,118,0.14)] dark:bg-[#1b3b34] dark:text-[#76ddc5]">
-                <Icon name="gift" size="md" :stroke-width="1.9" />
-              </span>
-              <div class="min-w-0 flex-1">
-                <p class="text-base font-bold leading-snug text-[#1d2926] sm:text-xl dark:text-[#f1f7f5]">
-                  {{ t('payment.redeemStorePrompt') }}
-                </p>
-                <p class="mt-2 text-sm leading-relaxed text-[#536a64] sm:text-base dark:text-[#acc0bb]">
-                  {{ t('payment.redeemStoreHint') }}
-                </p>
-              </div>
-            </div>
-            <a
-              data-testid="redeem-code-store-link"
-              :href="REDEEM_CODE_STORE_URL"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex min-h-12 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-[#167563] px-5 py-3 text-sm font-semibold leading-snug text-white shadow-[0_7px_18px_rgba(22,117,99,0.24)] outline-none transition-[background-color,box-shadow,transform] duration-200 hover:bg-[#0f6555] hover:shadow-[0_9px_22px_rgba(22,117,99,0.3)] active:scale-[0.98] sm:w-auto sm:max-w-[24rem] sm:text-base focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#167563] dark:bg-[#53bda5] dark:text-[#0c2923] dark:hover:bg-[#6bcbb5] dark:focus-visible:outline-[#76ddc5]"
-            >
-              <span class="break-all">{{ REDEEM_CODE_STORE_URL }}</span>
-              <Icon name="externalLink" size="sm" class="shrink-0" :stroke-width="1.9" />
-            </a>
-          </div>
-        </div>
-
-        <div
-          v-if="paymentFeatureDisabled"
-          class="flex min-h-[280px] flex-col items-center justify-center rounded-lg border border-[#dfe5e3] bg-white px-6 text-center dark:border-[#273439] dark:bg-[#121c20]"
-        >
-          <span class="flex h-11 w-11 items-center justify-center rounded-md bg-[#edf7f4] text-[#238b76] dark:bg-[#17322d] dark:text-[#62d1b8]">
-            <Icon name="creditCard" size="md" :stroke-width="1.8" />
-          </span>
-          <p class="mt-4 text-sm font-semibold text-[#26312f] dark:text-[#e5ecea]">
-            {{ t('payment.notAvailable') }}
-          </p>
-        </div>
-        <template v-else>
         <!-- Tab Switcher (hide during payment and subscription confirm) -->
         <div v-if="tabs.length > 1 && paymentPhase === 'select' && !selectedPlan" class="flex space-x-1 rounded-xl bg-gray-100 p-1 dark:bg-dark-800">
           <button v-for="tab in tabs" :key="tab.key"
@@ -260,39 +217,13 @@
             </template>
           </template>
         </template>
-        <div v-if="checkout.help_text && paymentPhase === 'select' && !selectedPlan" class="card p-4">
+        <div v-if="(checkout.help_text || checkout.help_image_url) && paymentPhase === 'select' && !selectedPlan" class="card p-4">
           <div class="flex flex-col items-center gap-3">
-            <p class="text-center text-sm text-gray-500 dark:text-gray-400">{{ checkout.help_text }}</p>
+            <img v-if="checkout.help_image_url" :src="checkout.help_image_url" alt=""
+              class="h-40 max-w-full cursor-pointer rounded-lg object-contain transition-opacity hover:opacity-80"
+              @click="previewImage = checkout.help_image_url" />
+            <p v-if="checkout.help_text" class="text-center text-sm text-gray-500 dark:text-gray-400">{{ checkout.help_text }}</p>
           </div>
-        </div>
-        </template>
-
-        <div
-          v-if="showRechargeCodeActions"
-          class="flex flex-col gap-6 rounded-lg border border-[#b9ddd4] bg-[#fbfefd] p-6 sm:flex-row sm:items-center sm:justify-between sm:p-7 dark:border-[#36554f] dark:bg-[#121f1c]"
-        >
-          <div class="flex min-w-0 items-start gap-4 sm:items-center">
-            <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-[#e6f5f1] text-[#167563] dark:bg-[#1b3b34] dark:text-[#76ddc5]">
-              <Icon name="gift" size="md" :stroke-width="1.9" />
-            </span>
-            <div class="min-w-0">
-              <h2 class="text-lg font-bold leading-snug text-[#1d2926] sm:text-xl dark:text-[#f1f7f5]">
-                {{ t('payment.redeemEntryTitle') }}
-              </h2>
-              <p class="mt-2 text-sm leading-relaxed text-[#53645f] sm:text-base dark:text-[#acc0bb]">
-                {{ t('payment.redeemEntryHint') }}
-              </p>
-            </div>
-          </div>
-          <button
-            data-testid="redeem-entry-button"
-            type="button"
-            class="inline-flex min-h-12 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-[#167563] px-6 py-3 text-base font-semibold text-white shadow-[0_7px_18px_rgba(22,117,99,0.24)] outline-none transition-[background-color,box-shadow,transform] duration-200 hover:bg-[#0f6555] hover:shadow-[0_9px_22px_rgba(22,117,99,0.3)] active:scale-[0.98] sm:w-auto focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#167563] dark:bg-[#53bda5] dark:text-[#0c2923] dark:hover:bg-[#6bcbb5] dark:focus-visible:outline-[#76ddc5]"
-            @click="goToRedeem"
-          >
-            {{ t('payment.redeemEntryAction') }}
-            <Icon name="arrowRight" size="sm" :stroke-width="1.9" />
-          </button>
         </div>
       </template>
     </div>
@@ -310,6 +241,14 @@
               <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" @select="selectPlanFromModal" />
             </div>
           </div>
+        </div>
+      </Transition>
+    </Teleport>
+    <!-- Image Preview Overlay -->
+    <Teleport to="body">
+      <Transition name="modal">
+        <div v-if="previewImage" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm" @click="previewImage = ''">
+          <img :src="previewImage" alt="" class="max-h-[85vh] max-w-[90vw] rounded-xl object-contain shadow-2xl" />
         </div>
       </Transition>
     </Teleport>
@@ -363,13 +302,8 @@ const paymentStore = usePaymentStore()
 const subscriptionStore = useSubscriptionStore()
 const appStore = useAppStore()
 
-const REDEEM_CODE_STORE_URL = 'https://catfk.com/shop/3CUH5OLT'
-
 const user = computed(() => authStore.user)
 const activeSubscriptions = computed(() => subscriptionStore.activeSubscriptions)
-const paymentFeatureDisabled = computed(() => (
-  appStore.cachedPublicSettings?.payment_enabled === false
-))
 
 function getDaysRemaining(expiresAt: string): number {
   const diff = new Date(expiresAt).getTime() - Date.now()
@@ -392,17 +326,9 @@ const activeTab = ref<'recharge' | 'subscription'>('recharge')
 const amount = ref<number | null>(null)
 const selectedMethod = ref('')
 const selectedPlan = ref<SubscriptionPlan | null>(null)
+const previewImage = ref('')
 
 const paymentPhase = ref<'select' | 'paying'>('select')
-const showRechargeCodeActions = computed(() => (
-  activeTab.value === 'recharge'
-  && paymentPhase.value === 'select'
-  && !selectedPlan.value
-))
-
-function goToRedeem() {
-  void router.push('/redeem')
-}
 
 interface CreateOrderOptions {
   openid?: string
@@ -1171,12 +1097,6 @@ async function resumeWechatPaymentFromQuery() {
 }
 
 onMounted(async () => {
-  if (paymentFeatureDisabled.value) {
-    loading.value = false
-    subscriptionStore.fetchActiveSubscriptions().catch(() => {})
-    return
-  }
-
   try {
     const res = await paymentAPI.getCheckoutInfo()
     checkout.value = res.data

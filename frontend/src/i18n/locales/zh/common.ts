@@ -150,10 +150,6 @@ export default {
 
   // Navigation
   nav: {
-    workspace: '工作区',
-    developerTools: '开发工具',
-    billingAndSubscription: '账单与订阅',
-    account: '账户',
     dashboard: '仪表盘',
     announcements: '公告',
     apiKeys: 'API 密钥',

@@ -236,59 +236,6 @@ async function mountSubscriptionConfirm(options: Parameters<typeof checkoutInfoW
   return wrapper
 }
 
-async function mountRechargeView(checkout: Partial<CheckoutInfoResponse> = {}) {
-  vi.useRealTimers()
-  routeState.path = '/purchase'
-  routeState.query = {}
-  routerReplace.mockReset().mockResolvedValue(undefined)
-  routerPush.mockReset().mockResolvedValue(undefined)
-  routerResolve.mockClear()
-  createOrder.mockReset()
-  refreshUser.mockReset()
-  fetchActiveSubscriptions.mockReset().mockResolvedValue(undefined)
-  showError.mockReset()
-  showInfo.mockReset()
-  showWarning.mockReset()
-  getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture(checkout))
-  bridgeInvoke.mockReset()
-  window.localStorage.clear()
-  ;(window as Window & { WeixinJSBridge?: { invoke: typeof bridgeInvoke } }).WeixinJSBridge = undefined
-
-  const wrapper = shallowMount(PaymentView, {
-    global: {
-      stubs: {
-        AppLayout: {
-          template: '<div><slot /></div>',
-        },
-        Teleport: true,
-        Transition: false,
-      },
-    },
-  })
-  await flushPromises()
-  await flushPromises()
-  return wrapper
-}
-
-describe('PaymentView redeem-code recharge entry', () => {
-  it('opens the external store, hides the configured help image, and links to redemption', async () => {
-    const helpImageUrl = 'https://example.com/recharge-qr.png'
-    const wrapper = await mountRechargeView({
-      help_text: 'Recharge help',
-      help_image_url: helpImageUrl,
-    })
-
-    const storeLink = wrapper.get('[data-testid="redeem-code-store-link"]')
-    expect(storeLink.attributes('href')).toBe('https://catfk.com/shop/3CUH5OLT')
-    expect(storeLink.attributes('target')).toBe('_blank')
-    expect(storeLink.attributes('rel')).toBe('noopener noreferrer')
-    expect(wrapper.find(`img[src="${helpImageUrl}"]`).exists()).toBe(false)
-
-    await wrapper.get('[data-testid="redeem-entry-button"]').trigger('click')
-    expect(routerPush).toHaveBeenCalledWith('/redeem')
-  })
-})
-
 describe('PaymentView subscription confirmation amounts', () => {
   it('shows converted CNY pay amount using the subscription rate, not the balance multiplier', async () => {
     const wrapper = await mountSubscriptionConfirm({

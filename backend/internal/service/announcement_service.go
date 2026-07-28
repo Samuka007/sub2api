@@ -215,29 +215,6 @@ func (s *AnnouncementService) List(ctx context.Context, params pagination.Pagina
 	return s.announcementRepo.List(ctx, params, filters)
 }
 
-// ListPublic returns the newest active popup announcement that is safe to show
-// before authentication. Targeted announcements must never be exposed here.
-func (s *AnnouncementService) ListPublic(ctx context.Context) ([]Announcement, error) {
-	now := time.Now()
-	anns, err := s.announcementRepo.ListActive(ctx, now)
-	if err != nil {
-		return nil, fmt.Errorf("list active announcements: %w", err)
-	}
-
-	for i := range anns {
-		a := anns[i]
-		if !a.IsActiveAt(now) || a.NotifyMode != AnnouncementNotifyModePopup {
-			continue
-		}
-		if len(a.Targeting.AnyOf) != 0 {
-			continue
-		}
-		return []Announcement{a}, nil
-	}
-
-	return []Announcement{}, nil
-}
-
 func (s *AnnouncementService) ListForUser(ctx context.Context, userID int64, unreadOnly bool) ([]UserAnnouncement, error) {
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
