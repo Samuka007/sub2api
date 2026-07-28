@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -470,6 +471,236 @@ func TestGatewayServiceRecordUsage_PrefersClientRequestIDOverUpstreamRequestID(t
 	require.Equal(t, "client:client-stable-123", billingRepo.lastCmd.RequestID)
 	require.NotNil(t, usageRepo.lastLog)
 	require.Equal(t, "client:client-stable-123", usageRepo.lastLog.RequestID)
+}
+
+func TestGatewayServiceRecordUsage_HTTPResponsesUsesDistinctBillingIDsForTurnsInSameThread(t *testing.T) {
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	responseIDs := []string{"msg_gateway_turn_1", "msg_gateway_turn_2"}
+	resolved := make([]string, 0, len(responseIDs))
+	for i, responseID := range responseIDs {
+		err := svc.RecordUsage(ctx, &RecordUsageInput{
+			Result: &ForwardResult{
+				RequestID:  "anthropic-transport-" + responseID,
+				ResponseID: responseID,
+				Usage:      ClaudeUsage{InputTokens: 10 + i, OutputTokens: 6},
+				Model:      "claude-sonnet-4",
+				Duration:   time.Second,
+			},
+			APIKey:          &APIKey{ID: 506},
+			User:            &User{ID: 606},
+			Account:         &Account{ID: 706},
+			InboundEndpoint: openAIResponsesEndpoint,
+			RequestPayloadHash: HashUsageRequestPayload(
+				[]byte("turn-" + responseID),
+			),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, billingRepo.lastCmd)
+		resolved = append(resolved, billingRepo.lastCmd.RequestID)
+	}
+
+	require.Equal(t, responseIDs, resolved)
+	require.NotEqual(t, resolved[0], resolved[1])
+}
+
+func TestGatewayServiceRecordUsage_HTTPResponsesFallsBackToUpstreamRequestID(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "gateway-turn-456")
+	err := svc.RecordUsage(ctx, &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "anthropic-request-789",
+			Usage:     ClaudeUsage{InputTokens: 10, OutputTokens: 6},
+			Model:     "claude-sonnet-4",
+			Duration:  time.Second,
+		},
+		APIKey:          &APIKey{ID: 507},
+		User:            &User{ID: 607},
+		Account:         &Account{ID: 707},
+		InboundEndpoint: openAIResponsesCompactEndpoint,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Equal(t, "anthropic-request-789", billingRepo.lastCmd.RequestID)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "anthropic-request-789", usageRepo.lastLog.RequestID)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesIgnoresClientCorrelationIDs(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "caller-request-456")
+
+	got := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, &ForwardResult{})
+
+	require.True(t, strings.HasPrefix(got, "generated:"), got)
+	require.NotEqual(t, "client:codex-thread-123", got)
+	require.NotEqual(t, "local:caller-request-456", got)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesRetryKeepsExecutionID(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	first := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, &ForwardResult{
+		ResponseID: "msg_same_gateway_turn_456",
+		RequestID:  "transport-attempt-1",
+	})
+	second := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, &ForwardResult{
+		ResponseID: "msg_same_gateway_turn_456",
+		RequestID:  "transport-attempt-2",
+	})
+
+	require.Equal(t, "msg_same_gateway_turn_456", first)
+	require.Equal(t, first, second)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_NonResponsesRetainsContextFirstBehavior(t *testing.T) {
+	upstreamRequestID := strings.Repeat("upstream-", 10)
+	result := &ForwardResult{RequestID: upstreamRequestID}
+	clientCtx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "client-first")
+
+	first := resolveUsageBillingRequestIDForEndpoint(clientCtx, "/v1/messages", result)
+	second := resolveUsageBillingRequestIDForEndpoint(context.Background(), "/v1/messages", result)
+
+	require.Equal(t, "client:client-first", first)
+	require.Equal(t, normalizeUsageBillingRequestID(upstreamRequestID), second)
+	require.NotEqual(t, first, second)
+}
+
+func TestNormalizeUsageBillingRequestID_BoundsAndCollisionResistance(t *testing.T) {
+	short := strings.Repeat("s", usageBillingRequestIDMaxLength)
+	require.Equal(t, short, normalizeUsageBillingRequestID(" "+short+" "))
+
+	sharedPrefix := strings.Repeat("x", usageBillingRequestIDMaxLength)
+	first := normalizeUsageBillingRequestID(sharedPrefix + "a")
+	second := normalizeUsageBillingRequestID(sharedPrefix + "b")
+
+	require.Equal(t, first, normalizeUsageBillingRequestID(sharedPrefix+"a"))
+	require.NotEqual(t, first, second)
+	require.True(t, strings.HasPrefix(first, "sha256:"), first)
+	require.LessOrEqual(t, len(first), usageBillingRequestIDMaxLength)
+
+	cmd := &UsageBillingCommand{RequestID: " " + sharedPrefix + "a "}
+	cmd.Normalize()
+	require.Equal(t, first, cmd.RequestID)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesConcurrentRetryKeepsGeneratedExecutionID(t *testing.T) {
+	result := &ForwardResult{}
+	const retries = 32
+	resolved := make(chan string, retries)
+
+	var wg sync.WaitGroup
+	for range retries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resolved <- resolveUsageBillingRequestIDForEndpoint(context.Background(), openAIResponsesEndpoint, result)
+		}()
+	}
+	wg.Wait()
+	close(resolved)
+
+	var first string
+	for requestID := range resolved {
+		if first == "" {
+			first = requestID
+		}
+		require.Equal(t, first, requestID)
+	}
+	require.True(t, strings.HasPrefix(first, "generated:"), first)
+}
+
+func TestResolveUsageBillingRequestIDForEndpoint_HTTPResponsesGeneratesDistinctIDsPerExecution(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	first := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, &ForwardResult{})
+	second := resolveUsageBillingRequestIDForEndpoint(ctx, openAIResponsesEndpoint, &ForwardResult{})
+
+	require.NotEqual(t, first, second)
+	require.NotEqual(t, "client:codex-thread-123", first)
+	require.NotEqual(t, "client:codex-thread-123", second)
+}
+
+func TestGatewayServiceRecordUsage_HTTPResponsesNormalizesOversizedExecutionIDs(t *testing.T) {
+	oversizedID := strings.Repeat("execution-", 10)
+	tests := []struct {
+		name     string
+		endpoint string
+		result   *ForwardResult
+	}{
+		{
+			name:     "response ID",
+			endpoint: openAIResponsesEndpoint,
+			result:   &ForwardResult{ResponseID: oversizedID, RequestID: "transport-fallback"},
+		},
+		{
+			name:     "upstream request ID",
+			endpoint: openAIResponsesCompactEndpoint,
+			result:   &ForwardResult{RequestID: oversizedID},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usageRepo := &openAIRecordUsageLogRepoStub{}
+			billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+			svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+			tt.result.Usage = ClaudeUsage{InputTokens: 10, OutputTokens: 6}
+			tt.result.Model = "claude-sonnet-4"
+			tt.result.Duration = time.Second
+
+			err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+				Result:          tt.result,
+				APIKey:          &APIKey{ID: 507},
+				User:            &User{ID: 607},
+				Account:         &Account{ID: 707},
+				InboundEndpoint: tt.endpoint,
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, billingRepo.lastCmd)
+			require.NotNil(t, usageRepo.lastLog)
+			require.Equal(t, normalizeUsageBillingRequestID(oversizedID), billingRepo.lastCmd.RequestID)
+			require.Equal(t, billingRepo.lastCmd.RequestID, usageRepo.lastLog.RequestID)
+			require.LessOrEqual(t, len(usageRepo.lastLog.RequestID), usageBillingRequestIDMaxLength)
+		})
+	}
+}
+
+func TestGatewayServiceRecordUsage_HTTPResponsesBillingRetryKeepsGeneratedExecutionID(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{}
+	billingRepo := &openAIRecordUsageBillingRepoStub{err: errors.New("temporary billing failure")}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+	input := &RecordUsageInput{
+		Result: &ForwardResult{
+			Usage:    ClaudeUsage{InputTokens: 10, OutputTokens: 6},
+			Model:    "claude-sonnet-4",
+			Duration: time.Second,
+		},
+		APIKey:          &APIKey{ID: 507},
+		User:            &User{ID: 607},
+		Account:         &Account{ID: 707},
+		InboundEndpoint: openAIResponsesEndpoint,
+	}
+
+	require.Error(t, svc.RecordUsage(context.Background(), input))
+	require.NotNil(t, billingRepo.lastCmd)
+	first := billingRepo.lastCmd.RequestID
+	require.True(t, strings.HasPrefix(first, "generated:"), first)
+
+	billingRepo.err = nil
+	billingRepo.result = &UsageBillingApplyResult{Applied: true}
+	require.NoError(t, svc.RecordUsage(context.Background(), input))
+	require.Equal(t, first, billingRepo.lastCmd.RequestID)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, first, usageRepo.lastLog.RequestID)
 }
 
 func TestGatewayServiceRecordUsage_GeneratesRequestIDWhenAllSourcesMissing(t *testing.T) {

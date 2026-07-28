@@ -450,6 +450,7 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.GET("/plus-quota-anomalies", h.Admin.PlusQuotaAutomation.ListAnomalies)
 		openai.GET("/plus-quota-anomalies/export-notes", h.Admin.PlusQuotaAutomation.ExportAnomalyNotes)
 		openai.POST("/plus-quota-anomalies/:accountId/resolve", h.Admin.PlusQuotaAutomation.ResolveAnomaly)
+		openai.DELETE("/plus-quota-anomalies/:accountId/account", h.Admin.PlusQuotaAutomation.DeleteAnomalyAccount)
 	}
 }
 

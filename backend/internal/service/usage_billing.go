@@ -3,14 +3,45 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 var ErrUsageBillingRequestIDRequired = errors.New("usage billing request_id is required")
 var ErrUsageBillingRequestConflict = errors.New("usage billing request fingerprint conflict")
+
+const usageBillingRequestIDMaxLength = 64
+
+type usageBillingRequestIDState struct {
+	once  sync.Once
+	value string
+}
+
+var usageBillingRequestIDStateInitMu sync.Mutex
+
+func ensureUsageBillingRequestIDState(target **usageBillingRequestIDState) *usageBillingRequestIDState {
+	usageBillingRequestIDStateInitMu.Lock()
+	defer usageBillingRequestIDStateInitMu.Unlock()
+	if *target == nil {
+		*target = &usageBillingRequestIDState{}
+	}
+	return *target
+}
+
+// normalizeUsageBillingRequestID keeps the shared billing key within the
+// usage_logs.request_id limit without collapsing distinct oversized IDs.
+func normalizeUsageBillingRequestID(requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if len(requestID) <= usageBillingRequestIDMaxLength {
+		return requestID
+	}
+	digest := sha256.Sum256([]byte(requestID))
+	return "sha256:" + base64.RawURLEncoding.EncodeToString(digest[:])
+}
 
 // UsageBillingCommand describes one billable request that must be applied at most once.
 type UsageBillingCommand struct {
@@ -45,7 +76,7 @@ func (c *UsageBillingCommand) Normalize() {
 	if c == nil {
 		return
 	}
-	c.RequestID = strings.TrimSpace(c.RequestID)
+	c.RequestID = normalizeUsageBillingRequestID(c.RequestID)
 	if strings.TrimSpace(c.RequestFingerprint) == "" {
 		c.RequestFingerprint = buildUsageBillingFingerprint(c)
 	}

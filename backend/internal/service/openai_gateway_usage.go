@@ -1,7 +1,6 @@
 package service
 
-// 本文件由 openai_gateway_service.go 纯移动拆分而来：用量记录、计费成本计算与
-// Codex 用量快照。仅做代码搬迁，无任何行为变更。
+// 本文件包含 OpenAI 网关的用量记录、计费成本计算与 Codex 用量快照逻辑。
 
 import (
 	"context"
@@ -72,8 +71,12 @@ func (s *OpenAIGatewayService) RecordCyberPolicyUsageLog(ctx context.Context, in
 	if s == nil || in.APIKey == nil || in.APIKey.User == nil || in.Account == nil || strings.TrimSpace(in.Model) == "" {
 		return
 	}
+	requestID := in.RequestID
+	if in.InboundEndpoint == openAIResponsesEndpoint || in.InboundEndpoint == openAIResponsesCompactEndpoint {
+		requestID = ""
+	}
 	result := &OpenAIForwardResult{
-		RequestID: in.RequestID,
+		RequestID: requestID,
 		Model:     in.Model,
 		Stream:    in.Stream,
 		Usage: OpenAIUsage{
@@ -113,7 +116,40 @@ func (s *OpenAIGatewayService) ResolveUserGroupRateMultiplier(ctx context.Contex
 	return resolver.Resolve(ctx, userID, groupID, groupDefaultMultiplier)
 }
 
-// RecordUsage records usage and deducts balance
+// resolveOpenAIUsageBillingRequestID selects an idempotency key whose lifetime
+// matches one billable OpenAI execution.
+func resolveOpenAIUsageBillingRequestID(ctx context.Context, inboundEndpoint string, result *OpenAIForwardResult) string {
+	if result == nil {
+		if inboundEndpoint == openAIResponsesEndpoint || inboundEndpoint == openAIResponsesCompactEndpoint {
+			return normalizeUsageBillingRequestID("generated:" + generateRequestID())
+		}
+		return resolveUsageBillingRequestID(ctx, "")
+	}
+
+	upstreamRequestID := strings.TrimSpace(result.RequestID)
+	if result.OpenAIWSMode || inboundEndpoint == openAIResponsesEndpoint || inboundEndpoint == openAIResponsesCompactEndpoint {
+		// Caller-provided X-Client-Request-ID and X-Request-ID are correlation
+		// identifiers, not execution identifiers. Keep both out of Responses
+		// billing. Cache the selected ID on the forward result so accounting
+		// retries for one execution reuse the same idempotency key.
+		state := result.billingRequestIDStateForExecution()
+		state.once.Do(func() {
+			requestID := strings.TrimSpace(result.ResponseID)
+			if requestID == "" {
+				requestID = upstreamRequestID
+			}
+			if requestID == "" {
+				requestID = "generated:" + generateRequestID()
+			}
+			state.value = normalizeUsageBillingRequestID(requestID)
+		})
+		return state.value
+	}
+
+	return resolveUsageBillingRequestID(ctx, upstreamRequestID)
+}
+
+// RecordUsage records usage and deducts balance.
 func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
 	if input == nil {
 		return errors.New("openai usage input is nil")
@@ -236,12 +272,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// Create usage log
 	durationMs := int(result.Duration.Milliseconds())
 	accountRateMultiplier := account.BillingRateMultiplier()
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
-	if result.OpenAIWSMode {
-		if upstreamRequestID := strings.TrimSpace(result.RequestID); upstreamRequestID != "" {
-			requestID = upstreamRequestID
-		}
-	}
+	requestID := resolveOpenAIUsageBillingRequestID(ctx, input.InboundEndpoint, result)
 
 	// 确定 RequestedModel（渠道映射前的原始模型）
 	requestedModel := result.Model

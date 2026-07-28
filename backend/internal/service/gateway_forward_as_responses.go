@@ -435,6 +435,7 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 
 	return &ForwardResult{
 		RequestID:       requestID,
+		ResponseID:      responsesResp.ID,
 		Usage:           usage,
 		Model:           originalModel,
 		UpstreamModel:   mappedModel,
@@ -490,6 +491,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
 			RequestID:       requestID,
+			ResponseID:      state.ResponseID,
 			Usage:           usage,
 			Model:           originalModel,
 			UpstreamModel:   mappedModel,

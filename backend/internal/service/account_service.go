@@ -152,11 +152,15 @@ type AccountDuplicateRepository interface {
 	CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error
 }
 
-// AdminAccountRepository makes the account-duplication write capability an explicit
-// construction dependency without forcing read-only gateway test doubles to implement it.
+// AdminAccountRepository keeps admin-only write capabilities out of the shared
+// account interface so read-only gateway test doubles do not need to implement them.
 type AdminAccountRepository interface {
 	AccountRepository
 	AccountDuplicateRepository
+	// CreateSparkShadowWithGroups locks and revalidates the parent before
+	// atomically creating the Spark shadow, group bindings, and outbox event.
+	CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *Account, groups []AccountGroup) error
+	DeleteOpenAIPlus401AnomalyAccount(ctx context.Context, accountID int64) error
 }
 
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.

@@ -124,13 +124,18 @@ export async function resolveAnomaly(accountId: number): Promise<void> {
   await apiClient.post(`${ANOMALIES_PATH}/${accountId}/resolve`)
 }
 
+export async function deleteAnomalyAccount(accountId: number): Promise<void> {
+  await apiClient.delete(`${ANOMALIES_PATH}/${accountId}/account`)
+}
+
 export const plusQuotaAutomationAPI = {
   getAutomation,
   updateAutomation,
   runAutomation,
   listAnomalies,
   exportAnomalyNotes,
-  resolveAnomaly
+  resolveAnomaly,
+  deleteAnomalyAccount
 }
 
 export default plusQuotaAutomationAPI

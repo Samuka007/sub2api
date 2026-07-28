@@ -113,6 +113,19 @@ func (h *PlusQuotaAutomationHandler) ResolveAnomaly(c *gin.Context) {
 	response.Success(c, anomaly)
 }
 
+func (h *PlusQuotaAutomationHandler) DeleteAnomalyAccount(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("accountId"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if err := h.service.DeleteAnomalyAccount(c.Request.Context(), accountID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "Account deleted successfully"})
+}
+
 func queryInt(c *gin.Context, key string, fallback int) int {
 	raw := c.Query(key)
 	if raw == "" {

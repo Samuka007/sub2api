@@ -205,16 +205,45 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string) string {
 	if ctx != nil {
 		if clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
-			return "client:" + strings.TrimSpace(clientRequestID)
+			return normalizeUsageBillingRequestID("client:" + strings.TrimSpace(clientRequestID))
 		}
 		if requestID, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
-			return "local:" + strings.TrimSpace(requestID)
+			return normalizeUsageBillingRequestID("local:" + strings.TrimSpace(requestID))
 		}
 	}
 	if requestID := strings.TrimSpace(upstreamRequestID); requestID != "" {
-		return requestID
+		return normalizeUsageBillingRequestID(requestID)
 	}
-	return "generated:" + generateRequestID()
+	return normalizeUsageBillingRequestID("generated:" + generateRequestID())
+}
+
+// resolveUsageBillingRequestIDForEndpoint keeps caller-controlled correlation
+// IDs out of Responses billing. Codex reuses X-Client-Request-ID for every turn
+// in a thread, while X-Request-ID may also be supplied by the caller.
+func resolveUsageBillingRequestIDForEndpoint(ctx context.Context, inboundEndpoint string, result *ForwardResult) string {
+	endpoint := strings.TrimSpace(inboundEndpoint)
+	if endpoint != openAIResponsesEndpoint && endpoint != openAIResponsesCompactEndpoint {
+		if result == nil {
+			return resolveUsageBillingRequestID(ctx, "")
+		}
+		return resolveUsageBillingRequestID(ctx, result.RequestID)
+	}
+	if result == nil {
+		return normalizeUsageBillingRequestID("generated:" + generateRequestID())
+	}
+
+	state := result.billingRequestIDStateForExecution()
+	state.once.Do(func() {
+		requestID := strings.TrimSpace(result.ResponseID)
+		if requestID == "" {
+			requestID = strings.TrimSpace(result.RequestID)
+		}
+		if requestID == "" {
+			requestID = "generated:" + generateRequestID()
+		}
+		state.value = normalizeUsageBillingRequestID(requestID)
+	})
+	return state.value
 }
 
 func resolveUsageBillingPayloadFingerprint(ctx context.Context, requestPayloadHash string) string {
@@ -980,7 +1009,7 @@ func (s *GatewayService) buildRecordUsageLog(
 	opts *recordUsageOpts,
 ) *UsageLog {
 	durationMs := int(result.Duration.Milliseconds())
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
+	requestID := resolveUsageBillingRequestIDForEndpoint(ctx, input.InboundEndpoint, result)
 	usageLog := &UsageLog{
 		UserID:                user.ID,
 		APIKeyID:              apiKey.ID,

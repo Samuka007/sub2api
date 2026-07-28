@@ -1254,14 +1254,12 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, fmt.Errorf("get parent account: %w", err)
 	}
 	if !parent.IsOpenAIOAuth() {
-		return nil, infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_INVALID_PARENT",
-			"spark shadow requires an OpenAI OAuth parent account")
+		return nil, ErrSparkShadowInvalidParent
 	}
 	// G6:母账号本身不能是影子,否则会建出二级影子——resolveCredentialAccount 只解一层,
 	// 会解析到无凭据的一级影子,进入坏调度/上游失败。
 	if parent.IsCredentialShadow() {
-		return nil, infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_PARENT_IS_SHADOW",
-			"spark shadow parent must be a real account, not another spark shadow")
+		return nil, ErrSparkShadowParentIsShadow
 	}
 
 	// 2. 一母一影校验
@@ -1270,8 +1268,7 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, fmt.Errorf("check existing spark shadows: %w", err)
 	}
 	if len(shadows) > 0 {
-		return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
-			"parent account already has a spark shadow account")
+		return nil, ErrSparkShadowAlreadyExists
 	}
 
 	// 3. 解析分组。未指定 GroupIDs 时:优先**继承母账号当前分组**(影子与母同路由域,母在自定义
@@ -1339,32 +1336,28 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		},
 	}
 
-	// 5. 持久化（Create 填充 shadow.ID）。并发竞态:预查(步骤2)放行后另一请求抢先建成,本次会撞
-	// 一母一影唯一索引。复查确认确为"已存在"竞态时返回结构化 409 而非裸 500——外审 A/P1。
-	if err := s.accountRepo.Create(ctx, shadow); err != nil {
-		if existing, qerr := s.accountRepo.ListShadowsByParent(ctx, parentID); qerr == nil && len(existing) > 0 {
-			return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
-				"parent account already has a spark shadow account")
-		}
+	// 5. The repository locks and revalidates the parent, then persists the
+	// shadow, group bindings, and scheduler outbox in one transaction.
+	groups := make([]AccountGroup, 0, len(groupIDs))
+	for i, groupID := range groupIDs {
+		groups = append(groups, AccountGroup{GroupID: groupID, Priority: i + 1})
+	}
+	creator := sparkShadowAtomicCreator(s.adminAccountRepo)
+	if creator == nil {
+		creator, _ = s.accountRepo.(sparkShadowAtomicCreator)
+	}
+	if creator == nil {
+		return nil, errors.New("atomic spark shadow creation is not supported")
+	}
+	if err := creator.CreateSparkShadowWithGroups(ctx, parentID, shadow, groups); err != nil {
 		return nil, fmt.Errorf("create spark shadow: %w", err)
 	}
 
-	// 6. 绑定分组。注意:create+bind 非单一 DB 事务(通用 Create 走 r.client、outbox 走 r.sql,
-	// 无现成共享事务路径),故绑组失败时做 best-effort 补偿删除刚建的影子,避免半成品影子(否则
-	// 一母一影唯一索引会挡住重试)——外审 C/P1。补偿删除用 detached ctx,即便请求 ctx 已取消/超时
-	// 仍能完成清理(外审第4轮);进程崩溃这种极端仍可能残留,属已知权衡。
-	if len(groupIDs) > 0 {
-		if err := s.accountRepo.BindGroups(ctx, shadow.ID, groupIDs); err != nil {
-			if delErr := s.accountRepo.Delete(context.WithoutCancel(ctx), shadow.ID); delErr != nil {
-				slog.Error("spark_shadow_bind_groups_rollback_failed",
-					"shadow_id", shadow.ID, "parent_id", parentID, "delete_err", delErr)
-			}
-			return nil, fmt.Errorf("bind groups for spark shadow: %w", err)
-		}
-		shadow.GroupIDs = groupIDs
-	}
-
 	return shadow, nil
+}
+
+type sparkShadowAtomicCreator interface {
+	CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *Account, groups []AccountGroup) error
 }
 
 // propagateProxyToShadows syncs proxyID to all spark shadow accounts of parentID.

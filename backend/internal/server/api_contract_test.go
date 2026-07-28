@@ -1771,6 +1771,10 @@ func (s *stubAccountRepo) CreateWithAccountGroups(ctx context.Context, account *
 	return errors.New("not implemented")
 }
 
+func (s *stubAccountRepo) CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *service.Account, groups []service.AccountGroup) error {
+	return errors.New("not implemented")
+}
+
 func (s *stubAccountRepo) GetByID(ctx context.Context, id int64) (*service.Account, error) {
 	return nil, service.ErrAccountNotFound
 }
@@ -1796,6 +1800,10 @@ func (s *stubAccountRepo) Update(ctx context.Context, account *service.Account) 
 }
 
 func (s *stubAccountRepo) Delete(ctx context.Context, id int64) error {
+	return errors.New("not implemented")
+}
+
+func (s *stubAccountRepo) DeleteOpenAIPlus401AnomalyAccount(ctx context.Context, accountID int64) error {
 	return errors.New("not implemented")
 }
 

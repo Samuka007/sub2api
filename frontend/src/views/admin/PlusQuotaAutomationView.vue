@@ -189,13 +189,22 @@
           :data="anomalies"
           :loading="anomaliesLoading"
           row-key="account_id"
-          :actions-count="1"
+          :actions-count="2"
         >
           <template #cell-email="{ row }">
-            <div class="min-w-44">
-              <p class="font-medium text-gray-900 dark:text-white">{{ row.email || '-' }}</p>
-              <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                {{ row.account_name || '-' }} / #{{ row.account_id }}
+            <div class="min-w-0 sm:min-w-44">
+              <p
+                class="break-all font-medium text-gray-900 dark:text-white sm:truncate sm:break-normal"
+                :title="row.email || ''"
+              >
+                {{ row.email || '-' }}
+              </p>
+              <p
+                class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 sm:truncate"
+                :title="`${row.account_name || '-'} / #${row.account_id}`"
+              >
+                <span class="break-all sm:break-normal">{{ row.account_name || '-' }}</span>
+                <span class="whitespace-nowrap"> / #{{ row.account_id }}</span>
               </p>
             </div>
           </template>
@@ -252,21 +261,48 @@
           </template>
 
           <template #cell-actions="{ row }">
-            <button
-              v-if="row.status === 'open'"
-              type="button"
-              class="btn btn-secondary px-2.5 py-1.5 text-xs"
-              :disabled="resolvingAccountIds.has(row.account_id)"
-              :title="t('admin.plusQuotaAutomation.actions.resolve')"
-              @click="resolveRow(row)"
-            >
-              <Icon
-                :name="resolvingAccountIds.has(row.account_id) ? 'refresh' : 'checkCircle'"
-                size="sm"
-                :class="{ 'animate-spin': resolvingAccountIds.has(row.account_id) }"
-              />
-              <span>{{ t('admin.plusQuotaAutomation.actions.resolve') }}</span>
-            </button>
+            <div v-if="row.status === 'open'" class="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                class="btn btn-secondary px-2.5 py-1.5 text-xs"
+                :disabled="resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
+                :title="t('admin.plusQuotaAutomation.actions.resolve')"
+                @click="resolveRow(row)"
+              >
+                <Icon
+                  :name="resolvingAccountIds.has(row.account_id) ? 'refresh' : 'checkCircle'"
+                  size="sm"
+                  :class="{ 'animate-spin': resolvingAccountIds.has(row.account_id) }"
+                />
+                <span>{{ t('admin.plusQuotaAutomation.actions.resolve') }}</span>
+              </button>
+              <button
+                v-if="row.http_status === 401"
+                type="button"
+                class="btn btn-danger px-2.5 py-1.5 text-xs"
+                data-test="delete-anomaly-account"
+                :disabled="resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
+                :aria-busy="deletingAccountIds.has(row.account_id)"
+                :aria-label="t(
+                  deletingAccountIds.has(row.account_id)
+                    ? 'admin.plusQuotaAutomation.actions.deletingAccount'
+                    : 'admin.plusQuotaAutomation.actions.deleteAccount'
+                )"
+                :title="t(
+                  deletingAccountIds.has(row.account_id)
+                    ? 'admin.plusQuotaAutomation.actions.deletingAccount'
+                    : 'admin.plusQuotaAutomation.actions.deleteAccount'
+                )"
+                @click="requestDeleteAccount(row)"
+              >
+                <Icon
+                  :name="deletingAccountIds.has(row.account_id) ? 'refresh' : 'trash'"
+                  size="sm"
+                  :class="{ 'animate-spin': deletingAccountIds.has(row.account_id) }"
+                />
+                <span>{{ t('admin.plusQuotaAutomation.actions.deleteAccount') }}</span>
+              </button>
+            </div>
             <span v-else class="text-xs text-gray-400">-</span>
           </template>
 
@@ -300,6 +336,16 @@
       danger
       @confirm="confirmRun"
       @cancel="showRunConfirm = false"
+    />
+    <ConfirmDialog
+      :show="showDeleteConfirm"
+      :title="t('admin.plusQuotaAutomation.deleteConfirm.title')"
+      :message="deleteConfirmationMessage"
+      :confirm-text="t('admin.plusQuotaAutomation.actions.deleteAccount')"
+      :cancel-text="t('common.cancel')"
+      danger
+      @confirm="confirmDeleteAccount"
+      @cancel="cancelDeleteAccount"
     />
   </AppLayout>
 </template>
@@ -342,7 +388,10 @@ const exportingNotes = ref(false)
 const savingConfig = ref(false)
 const runSubmitting = ref(false)
 const showRunConfirm = ref(false)
+const showDeleteConfirm = ref(false)
+const deleteCandidate = ref<PlusQuotaAnomaly | null>(null)
 const resolvingAccountIds = reactive(new Set<number>())
+const deletingAccountIds = reactive(new Set<number>())
 
 const configForm = reactive({
   enabled: false,
@@ -403,6 +452,15 @@ const groupOptions = computed(() => [
 
 const groupNames = computed(() => new Map(groups.value.map((group) => [group.id, group.name])))
 const selectedGroup = computed(() => groups.value.find((group) => group.id === configForm.group_id))
+const deleteConfirmationMessage = computed(() => {
+  const row = deleteCandidate.value
+  if (!row) return ''
+  return t('admin.plusQuotaAutomation.deleteConfirm.message', {
+    name: row.account_name || '-',
+    email: row.email || '-',
+    id: row.account_id
+  })
+})
 
 const configValid = computed(() =>
   Number.isInteger(configForm.group_id)
@@ -708,7 +766,7 @@ async function confirmRun() {
 }
 
 async function resolveRow(row: PlusQuotaAnomaly) {
-  if (resolvingAccountIds.has(row.account_id)) return
+  if (resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)) return
   resolvingAccountIds.add(row.account_id)
   try {
     await adminAPI.plusQuotaAutomation.resolveAnomaly(row.account_id)
@@ -720,6 +778,64 @@ async function resolveRow(row: PlusQuotaAnomaly) {
     )
   } finally {
     resolvingAccountIds.delete(row.account_id)
+  }
+}
+
+function requestDeleteAccount(row: PlusQuotaAnomaly) {
+  if (
+    row.status !== 'open'
+    || row.http_status !== 401
+    || resolvingAccountIds.has(row.account_id)
+    || deletingAccountIds.has(row.account_id)
+  ) {
+    return
+  }
+  deleteCandidate.value = row
+  showDeleteConfirm.value = true
+}
+
+function cancelDeleteAccount() {
+  showDeleteConfirm.value = false
+  deleteCandidate.value = null
+}
+
+async function confirmDeleteAccount() {
+  const candidate = deleteCandidate.value
+  showDeleteConfirm.value = false
+  deleteCandidate.value = null
+  if (
+    !candidate
+    || resolvingAccountIds.has(candidate.account_id)
+    || deletingAccountIds.has(candidate.account_id)
+  ) {
+    return
+  }
+
+  deletingAccountIds.add(candidate.account_id)
+  try {
+    await adminAPI.plusQuotaAutomation.deleteAnomalyAccount(candidate.account_id)
+    appStore.showSuccess(
+      t('admin.plusQuotaAutomation.messages.accountDeleted', {
+        name: candidate.account_name || candidate.email || `#${candidate.account_id}`
+      })
+    )
+    await Promise.all([
+      loadAnomalies(),
+      loadOverview(false)
+    ])
+  } catch (error) {
+    if (apiErrorStatus(error) === 409) {
+      appStore.showWarning(
+        t('admin.plusQuotaAutomation.messages.deleteAccountNoLongerEligible')
+      )
+    } else {
+      appStore.showError(
+        apiErrorMessage(error, t('admin.plusQuotaAutomation.messages.deleteAccountFailed'))
+      )
+    }
+    await loadAnomalies()
+  } finally {
+    deletingAccountIds.delete(candidate.account_id)
   }
 }
 

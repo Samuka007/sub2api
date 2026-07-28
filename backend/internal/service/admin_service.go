@@ -608,7 +608,24 @@ const (
 	proxyQualityClientUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
 
-var ErrRPMStatusUnavailable = infraerrors.New(http.StatusNotImplemented, "RPM_STATUS_UNAVAILABLE", "RPM cache not available")
+var (
+	ErrRPMStatusUnavailable     = infraerrors.New(http.StatusNotImplemented, "RPM_STATUS_UNAVAILABLE", "RPM cache not available")
+	ErrSparkShadowInvalidParent = infraerrors.New(
+		http.StatusBadRequest,
+		"SPARK_SHADOW_INVALID_PARENT",
+		"spark shadow requires an OpenAI OAuth parent account",
+	)
+	ErrSparkShadowParentIsShadow = infraerrors.New(
+		http.StatusBadRequest,
+		"SPARK_SHADOW_PARENT_IS_SHADOW",
+		"spark shadow parent must be a real account, not another spark shadow",
+	)
+	ErrSparkShadowAlreadyExists = infraerrors.New(
+		http.StatusConflict,
+		"SPARK_SHADOW_ALREADY_EXISTS",
+		"parent account already has a spark shadow account",
+	)
+)
 
 // adminServiceImpl implements AdminService
 type adminServiceImpl struct {
@@ -616,6 +633,7 @@ type adminServiceImpl struct {
 	groupRepo            GroupRepository
 	groupDuplicateRepo   GroupDuplicateRepository
 	accountRepo          AccountRepository
+	adminAccountRepo     AdminAccountRepository
 	accountDuplicateRepo AccountDuplicateRepository
 	proxyRepo            ProxyRepository
 	apiKeyRepo           APIKeyRepository
@@ -674,6 +692,7 @@ func NewAdminService(
 		groupRepo:            groupRepo,
 		groupDuplicateRepo:   groupRepo,
 		accountRepo:          accountRepo,
+		adminAccountRepo:     accountRepo,
 		accountDuplicateRepo: accountRepo,
 		proxyRepo:            proxyRepo,
 		apiKeyRepo:           apiKeyRepo,

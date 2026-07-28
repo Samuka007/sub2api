@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,6 +103,26 @@ func TestRecordCyberPolicyUsageLog_BillsRealUpstreamTokens(t *testing.T) {
 	require.InDelta(t, expected.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.Equal(t, 1, userRepo.deductCalls, "按真实 token 扣费，与 WS/正常请求一致")
 	require.InDelta(t, expected.ActualCost, userRepo.lastAmount, 1e-12)
+}
+
+func TestRecordCyberPolicyUsageLog_ResponsesDoesNotUseCallerControlledRequestIDForBilling(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+
+	svc.RecordCyberPolicyUsageLog(context.Background(), CyberPolicyUsageInput{
+		APIKey:          &APIKey{ID: 2, User: &User{ID: 1}},
+		Account:         &Account{ID: 3},
+		RequestID:       "caller-reused-request-id",
+		Model:           "gpt-5.1",
+		InboundEndpoint: openAIResponsesEndpoint,
+		InputTokens:     1200,
+		OutputTokens:    300,
+	})
+
+	require.NotNil(t, billingRepo.lastCmd)
+	require.True(t, strings.HasPrefix(billingRepo.lastCmd.RequestID, "generated:"), billingRepo.lastCmd.RequestID)
+	require.NotEqual(t, "caller-reused-request-id", billingRepo.lastCmd.RequestID)
 }
 
 func TestRecordCyberPolicyUsageLog_NonStreamZeroTokensZeroCost(t *testing.T) {
@@ -838,17 +860,18 @@ func TestOpenAIGatewayServiceRecordUsage_UsesFallbackRequestIDForBillingAndUsage
 	require.Equal(t, "local:req-local-fallback", usageRepo.lastLog.RequestID)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_PrefersClientRequestIDOverUpstreamRequestID(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_HTTPResponsesPrefersResponseIDOverTransportAndThreadIDs(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
 	userRepo := &openAIRecordUsageUserRepoStub{}
 	subRepo := &openAIRecordUsageSubRepoStub{}
 	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, userRepo, subRepo, nil)
 
-	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "openai-client-stable-123")
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
 	err := svc.RecordUsage(ctx, &OpenAIRecordUsageInput{
 		Result: &OpenAIForwardResult{
-			RequestID: "upstream-openai-volatile-456",
+			RequestID:  "transport-request-456",
+			ResponseID: "resp_http_turn_456",
 			Usage: OpenAIUsage{
 				InputTokens:  8,
 				OutputTokens: 4,
@@ -856,16 +879,256 @@ func TestOpenAIGatewayServiceRecordUsage_PrefersClientRequestIDOverUpstreamReque
 			Model:    "gpt-5.1",
 			Duration: time.Second,
 		},
-		APIKey:  &APIKey{ID: 10049},
-		User:    &User{ID: 20049},
-		Account: &Account{ID: 30049},
+		APIKey:          &APIKey{ID: 10049},
+		User:            &User{ID: 20049},
+		Account:         &Account{ID: 30049},
+		InboundEndpoint: "/v1/responses",
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, billingRepo.lastCmd)
-	require.Equal(t, "client:openai-client-stable-123", billingRepo.lastCmd.RequestID)
+	require.Equal(t, "resp_http_turn_456", billingRepo.lastCmd.RequestID)
 	require.NotNil(t, usageRepo.lastLog)
-	require.Equal(t, "client:openai-client-stable-123", usageRepo.lastLog.RequestID)
+	require.Equal(t, "resp_http_turn_456", usageRepo.lastLog.RequestID)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_EndpointPolicies(t *testing.T) {
+	clientCtx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	localCtx := context.WithValue(clientCtx, ctxkey.RequestID, "caller-reused-request-id")
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		endpoint   string
+		result     *OpenAIForwardResult
+		want       string
+		wantPrefix string
+	}{
+		{
+			name:     "responses compact uses response execution ID",
+			ctx:      clientCtx,
+			endpoint: openAIResponsesCompactEndpoint,
+			result:   &OpenAIForwardResult{RequestID: "transport-789", ResponseID: "resp_compact_turn_789"},
+			want:     "resp_compact_turn_789",
+		},
+		{
+			name:       "responses ignores caller request IDs when upstream ID is missing",
+			ctx:        localCtx,
+			endpoint:   openAIResponsesEndpoint,
+			result:     &OpenAIForwardResult{},
+			wantPrefix: "generated:",
+		},
+		{
+			name:       "responses compact ignores caller request IDs when upstream ID is missing",
+			ctx:        localCtx,
+			endpoint:   openAIResponsesCompactEndpoint,
+			result:     &OpenAIForwardResult{},
+			wantPrefix: "generated:",
+		},
+		{
+			name:     "responses falls back to upstream transport ID",
+			ctx:      localCtx,
+			endpoint: openAIResponsesEndpoint,
+			result:   &OpenAIForwardResult{RequestID: "transport-fallback-456"},
+			want:     "transport-fallback-456",
+		},
+		{
+			name:       "responses never falls back to thread ID",
+			ctx:        clientCtx,
+			endpoint:   openAIResponsesEndpoint,
+			result:     &OpenAIForwardResult{},
+			wantPrefix: "generated:",
+		},
+		{
+			name:       "responses handles nil context",
+			endpoint:   openAIResponsesEndpoint,
+			result:     &OpenAIForwardResult{},
+			wantPrefix: "generated:",
+		},
+		{
+			name:       "responses handles nil result without caller fallback",
+			ctx:        localCtx,
+			endpoint:   openAIResponsesEndpoint,
+			wantPrefix: "generated:",
+		},
+		{
+			name:     "non-responses retains client-first behavior",
+			ctx:      context.WithValue(context.Background(), ctxkey.ClientRequestID, "client-idempotency-key-123"),
+			endpoint: "/v1/chat/completions",
+			result:   &OpenAIForwardResult{RequestID: "upstream-chat-456"},
+			want:     "client:client-idempotency-key-123",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOpenAIUsageBillingRequestID(tt.ctx, tt.endpoint, tt.result)
+			if tt.wantPrefix != "" {
+				require.True(t, strings.HasPrefix(got, tt.wantPrefix), got)
+				require.NotEqual(t, "client:codex-thread-123", got)
+				return
+			}
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesRetryKeepsGeneratedExecutionID(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "caller-reused-request-id")
+	result := &OpenAIForwardResult{}
+
+	first := resolveOpenAIUsageBillingRequestID(ctx, openAIResponsesEndpoint, result)
+	second := resolveOpenAIUsageBillingRequestID(ctx, openAIResponsesEndpoint, result)
+
+	require.True(t, strings.HasPrefix(first, "generated:"), first)
+	require.Equal(t, first, second)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesRetryUsesResponseIDAcrossTransportAttempts(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	firstResult := &OpenAIForwardResult{RequestID: "transport-attempt-1", ResponseID: "resp_same_turn_456"}
+	secondResult := &OpenAIForwardResult{RequestID: "transport-attempt-2", ResponseID: "resp_same_turn_456"}
+
+	first := resolveOpenAIUsageBillingRequestID(ctx, openAIResponsesEndpoint, firstResult)
+	second := resolveOpenAIUsageBillingRequestID(ctx, openAIResponsesEndpoint, secondResult)
+
+	require.Equal(t, "resp_same_turn_456", first)
+	require.Equal(t, first, second)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesConcurrentRetryKeepsGeneratedExecutionID(t *testing.T) {
+	result := &OpenAIForwardResult{}
+	const retries = 32
+	resolved := make(chan string, retries)
+
+	var wg sync.WaitGroup
+	for range retries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resolved <- resolveOpenAIUsageBillingRequestID(context.Background(), openAIResponsesEndpoint, result)
+		}()
+	}
+	wg.Wait()
+	close(resolved)
+
+	var first string
+	for requestID := range resolved {
+		if first == "" {
+			first = requestID
+		}
+		require.Equal(t, first, requestID)
+	}
+	require.True(t, strings.HasPrefix(first, "generated:"), first)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesNormalizesOversizedUpstreamID(t *testing.T) {
+	result := &OpenAIForwardResult{RequestID: strings.Repeat("upstream-", 16)}
+
+	first := resolveOpenAIUsageBillingRequestID(context.Background(), openAIResponsesEndpoint, result)
+	second := resolveOpenAIUsageBillingRequestID(context.Background(), openAIResponsesEndpoint, result)
+
+	require.Len(t, first, len("sha256:")+43)
+	require.True(t, strings.HasPrefix(first, "sha256:"), first)
+	require.Equal(t, first, second)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_WSModeNormalizesOversizedUpstreamID(t *testing.T) {
+	result := &OpenAIForwardResult{
+		RequestID:    strings.Repeat("ws-upstream-", 8),
+		OpenAIWSMode: true,
+	}
+
+	got := resolveOpenAIUsageBillingRequestID(context.Background(), openAIResponsesEndpoint, result)
+
+	require.Len(t, got, len("sha256:")+43)
+	require.True(t, strings.HasPrefix(got, "sha256:"), got)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_HTTPResponsesUsesResponseIDBeforeGenerating(t *testing.T) {
+	result := &OpenAIForwardResult{ResponseID: "resp_payload_turn_456"}
+
+	got := resolveOpenAIUsageBillingRequestID(context.Background(), openAIResponsesEndpoint, result)
+
+	require.Equal(t, "resp_payload_turn_456", got)
+}
+
+func TestResolveOpenAIUsageBillingRequestID_NonResponsesNormalizesCallerIDWithoutCaching(t *testing.T) {
+	callerID := strings.Repeat("c", usageBillingRequestIDMaxLength)
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, callerID)
+	result := &OpenAIForwardResult{RequestID: "upstream-chat-456"}
+
+	first := resolveOpenAIUsageBillingRequestID(ctx, "/v1/chat/completions", result)
+	second := resolveOpenAIUsageBillingRequestID(context.Background(), "/v1/chat/completions", result)
+
+	require.Equal(t, normalizeUsageBillingRequestID("client:"+callerID), first)
+	require.True(t, strings.HasPrefix(first, "sha256:"), first)
+	require.LessOrEqual(t, len(first), usageBillingRequestIDMaxLength)
+	require.Equal(t, "upstream-chat-456", second)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_HTTPResponsesUsesDistinctBillingIDsForTurnsInSameThread(t *testing.T) {
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+
+	responseIDs := []string{"resp_turn_1", "resp_turn_2"}
+	resolved := make([]string, 0, len(responseIDs))
+	for i, responseID := range responseIDs {
+		err := svc.RecordUsage(ctx, &OpenAIRecordUsageInput{
+			Result: &OpenAIForwardResult{
+				RequestID:  "transport-" + responseID,
+				ResponseID: responseID,
+				Usage:      OpenAIUsage{InputTokens: 8 + i, OutputTokens: 4},
+				Model:      "gpt-5.1",
+				Duration:   time.Second,
+			},
+			APIKey:          &APIKey{ID: 10054},
+			User:            &User{ID: 20054},
+			Account:         &Account{ID: 30054},
+			InboundEndpoint: "/v1/responses",
+			RequestPayloadHash: HashUsageRequestPayload(
+				[]byte("turn-" + responseID),
+			),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, billingRepo.lastCmd)
+		resolved = append(resolved, billingRepo.lastCmd.RequestID)
+	}
+
+	require.Equal(t, responseIDs, resolved)
+	require.NotEqual(t, resolved[0], resolved[1])
+}
+
+func TestOpenAIGatewayServiceRecordUsage_HTTPResponsesUsesDistinctBillingIDsWhenCallerReusesBothRequestHeaders(t *testing.T) {
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "codex-thread-123")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "caller-reused-request-id")
+
+	resolved := make([]string, 0, 2)
+	for i := range 2 {
+		err := svc.RecordUsage(ctx, &OpenAIRecordUsageInput{
+			Result: &OpenAIForwardResult{
+				Usage:    OpenAIUsage{InputTokens: 8 + i, OutputTokens: 4},
+				Model:    "gpt-5.1",
+				Duration: time.Second,
+			},
+			APIKey:             &APIKey{ID: 10054},
+			User:               &User{ID: 20054},
+			Account:            &Account{ID: 30054},
+			InboundEndpoint:    openAIResponsesEndpoint,
+			RequestPayloadHash: HashUsageRequestPayload([]byte(fmt.Sprintf("turn-%d", i))),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, billingRepo.lastCmd)
+		resolved = append(resolved, billingRepo.lastCmd.RequestID)
+	}
+
+	require.NotEqual(t, resolved[0], resolved[1])
+	require.NotEqual(t, "client:codex-thread-123", resolved[0])
+	require.NotEqual(t, "local:caller-reused-request-id", resolved[0])
 }
 
 func TestOpenAIGatewayServiceRecordUsage_WSModePrefersUpstreamRequestIDOverClientRequestID(t *testing.T) {

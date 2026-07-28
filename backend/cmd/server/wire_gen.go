@@ -210,7 +210,7 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 	backupHandler := admin.NewBackupHandler(backupService, userService, imageStorageSettingService)
 	oAuthHandler := admin.NewOAuthHandler(oAuthService)
 	openAIOAuthHandler := admin.NewOpenAIOAuthHandler(openAIOAuthService, adminService, openAIQuotaService)
-	plusQuotaAutomationService := service.ProvidePlusQuotaAutomationService(accountRepository, openAIQuotaService, settingRepository, db)
+	plusQuotaAutomationService := service.ProvidePlusQuotaAutomationService(adminAccountRepository, openAIQuotaService, settingRepository, db)
 	plusQuotaAutomationHandler := admin.NewPlusQuotaAutomationHandler(plusQuotaAutomationService)
 	geminiOAuthHandler := admin.NewGeminiOAuthHandler(geminiOAuthService)
 	antigravityOAuthHandler := admin.NewAntigravityOAuthHandler(antigravityOAuthService)

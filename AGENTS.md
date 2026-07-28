@@ -8,6 +8,7 @@
 - 分支命名：功能分支 `<scope>/<short-slug>`。模型请求 OTEL→Langfuse 透传追踪这个特性（`backend/internal/modeltrace/`、`skills/sub2api-model-trace-e2e/`）归在 `otel/` 前缀下，如 `otel/model-trace`。OTel 是功能特性名，不是分支体系。
 - **禁止**：把本仓库路由给 `antcode-skill`；本仓库与 AntCode 无关。涉及 PR / Issue / 分支 / pipeline 时使用 `gh` CLI 或 `git`。
 - 提交前 `git status --porcelain` + `git diff --cached --name-only` 自检；未授权不提交。
+- Pull Request 标题和正文必须使用中文；命令、文件路径、代码标识符、GitHub 关联关键字（如 `Closes #20`）及必要的技术术语可保留原文。
 
 ## 工具偏好
 

@@ -176,6 +176,8 @@ docs(scope): 文档说明
 chore(upstream): merge Sub2API v0.1.162
 ```
 
+Pull Request 标题和正文必须使用中文；命令、文件路径、代码标识符、GitHub 关联关键字（如 `Closes #20`）及必要的技术术语可保留原文。
+
 Pull Request 必须填写：
 
 - 改动目的和范围。

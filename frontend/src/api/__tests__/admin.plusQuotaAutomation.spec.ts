@@ -1,16 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { get, post, put } = vi.hoisted(() => ({
+const { get, post, put, remove } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  put: vi.fn()
+  put: vi.fn(),
+  remove: vi.fn()
 }))
 
 vi.mock('@/api/client', () => ({
-  apiClient: { get, post, put }
+  apiClient: { get, post, put, delete: remove }
 }))
 
 import {
+  deleteAnomalyAccount,
   exportAnomalyNotes,
   getAutomation,
   listAnomalies,
@@ -24,6 +26,7 @@ describe('admin Plus quota automation API', () => {
     get.mockReset()
     post.mockReset()
     put.mockReset()
+    remove.mockReset()
   })
 
   it('reads and updates automation configuration', async () => {
@@ -91,7 +94,7 @@ describe('admin Plus quota automation API', () => {
     await expect(runAutomation()).rejects.toEqual(busy)
   })
 
-  it('lists and resolves 401 anomalies through dedicated endpoints', async () => {
+  it('lists, resolves, and deletes 401 anomalies through dedicated endpoints', async () => {
     const response = {
       items: [],
       total: 0,
@@ -101,6 +104,7 @@ describe('admin Plus quota automation API', () => {
     const controller = new AbortController()
     get.mockResolvedValueOnce({ data: response })
     post.mockResolvedValueOnce({ data: undefined })
+    remove.mockResolvedValueOnce({ data: undefined })
 
     await expect(
       listAnomalies(
@@ -109,6 +113,7 @@ describe('admin Plus quota automation API', () => {
       )
     ).resolves.toEqual(response)
     await expect(resolveAnomaly(42)).resolves.toBeUndefined()
+    await expect(deleteAnomalyAccount(42)).resolves.toBeUndefined()
 
     expect(get).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies', {
       params: {
@@ -120,6 +125,7 @@ describe('admin Plus quota automation API', () => {
       signal: controller.signal
     })
     expect(post).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/42/resolve')
+    expect(remove).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/42/account')
   })
 
   it('downloads the open anomaly notes snapshot as a TXT blob', async () => {

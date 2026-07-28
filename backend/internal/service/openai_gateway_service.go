@@ -224,7 +224,9 @@ type OpenAIForwardResult struct {
 	RequestID  string
 	ResponseID string
 	Usage      OpenAIUsage
-	Model      string // 原始模型（用于响应和日志显示）
+
+	billingRequestIDState *usageBillingRequestIDState
+	Model                 string // 原始模型（用于响应和日志显示）
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
 	// This is set by the Anthropic Messages conversion path where
@@ -268,6 +270,10 @@ type OpenAIForwardResult struct {
 
 	wsReplayInput       []json.RawMessage
 	wsReplayInputExists bool
+}
+
+func (r *OpenAIForwardResult) billingRequestIDStateForExecution() *usageBillingRequestIDState {
+	return ensureUsageBillingRequestIDState(&r.billingRequestIDState)
 }
 
 // SucceededForScheduling reports whether this result is an upstream success
