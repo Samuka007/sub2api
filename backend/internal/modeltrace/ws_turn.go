@@ -27,6 +27,7 @@ type ResponsesWSTurnMetadata struct {
 	Path                string
 	Model               string
 	SessionID           string
+	Correlation         Correlation
 }
 
 // ResponsesWSTurn owns one independent root Trace inside a longer WebSocket
@@ -76,7 +77,11 @@ func (m *Manager) StartResponsesWSTurn(parent context.Context, metadata Response
 		input = input[:cfg.PromptMaxBytes]
 	}
 	recorder := newTraceRecorder(ctx, tracer, metadata.Identity, cfg.PromptMaxBytes, cfg.ResponseMaxBytes, policy, generation)
-	recorder.setTraceCorrelation(metadata.TurnRequestID, metadata.SessionID)
+	correlation := metadata.Correlation
+	if correlation.SessionID == "" && metadata.SessionID != "" {
+		correlation.SessionID = metadata.SessionID
+	}
+	recorder.setTraceCorrelation(metadata.TurnRequestID, correlation)
 	recorder.ctx = recording.WithRecorder(ctx, recorder)
 	recorder.BeginStream()
 	turn := &ResponsesWSTurn{
@@ -160,7 +165,8 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 		}
 		t.recorder.FinishRequest()
 
-		requestID, sessionID := t.recorder.traceCorrelation()
+		requestID, correlation := t.recorder.traceCorrelation()
+		sessionID := correlation.SessionID
 		metadataJSON, _ := json.Marshal(map[string]any{
 			"connection_request_id": scrubURLsInString(t.metadata.ConnectionRequestID),
 			"turn_request_id":       scrubURLsInString(t.metadata.TurnRequestID),
@@ -170,6 +176,10 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			"user_id":               t.metadata.Identity.UserID,
 			"group_id":              t.metadata.Identity.GroupID,
 			"session_id":            sessionID,
+			"session_source":        correlation.SessionSource,
+			"thread_id":             correlation.ThreadID,
+			"thread_source":         correlation.ThreadSource,
+			"session_conflict":      correlation.SessionConflict,
 		})
 		attrs := []attribute.KeyValue{
 			attribute.String("langfuse.trace.name", rootSpanName),
@@ -201,6 +211,7 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 		if sessionID != "" {
 			attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
 		}
+		attrs = appendCorrelationAttributes(attrs, correlation)
 		if stream.firstOutputMs != nil {
 			attrs = append(attrs, attribute.Int64(firstOutputMsAttribute, *stream.firstOutputMs))
 		}

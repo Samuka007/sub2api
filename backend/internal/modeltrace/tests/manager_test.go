@@ -179,6 +179,54 @@ func TestModelTraceCandidateRecognizedRequestExportsOneRootWithoutAttempt(t *tes
 	require.JSONEq(t, string(responseBody), stringAttribute(t, rootAttrs, "langfuse.observation.output"))
 }
 
+func TestModelTraceHTTPCorrelationUsesBodySessionAndKeepsThreadIndependent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fake := newFakeOTLPServer(t)
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
+		Enabled: true, Endpoint: fake.server.URL + "/api/public/otel",
+		PublicKey: testPublicKey, SecretKey: testSecretKey, PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+	})
+	require.NoError(t, err)
+
+	requestBody := []byte(`{"model":"claude-test","client_metadata":{"session_id":"body-session","thread_id":"body-thread"}}`)
+	router := gin.New()
+	router.POST("/v1/responses",
+		manager.CandidateMiddleware(),
+		func(c *gin.Context) {
+			apiKey := &service.APIKey{ID: 73, UserID: 42, User: &service.User{ID: 42}}
+			servermiddleware.SetOpsFallbackAPIKey(c, apiKey)
+			c.Set(string(servermiddleware.ContextKeyAPIKey), apiKey)
+			c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: 42})
+			c.Next()
+		},
+		func(c *gin.Context) {
+			_, readErr := io.ReadAll(c.Request.Body)
+			require.NoError(t, readErr)
+			c.JSON(http.StatusOK, gin.H{"id": "resp-1"})
+		},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Session-Id", "header-session")
+	req.Header.Set("Thread-Id", "header-thread")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Shutdown(shutdownCtx))
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	root := spanNamed(t, exportedSpans(requests), modeltrace.TestingRootSpanName)
+	attrs := attributesByKey(root.Attributes)
+	require.Equal(t, "body-session", stringAttribute(t, attrs, "langfuse.session.id"))
+	require.Equal(t, "body.client_metadata.session_id", stringAttribute(t, attrs, "modeltrace.correlation.session_source"))
+	require.Equal(t, "body-thread", stringAttribute(t, attrs, "langfuse.trace.metadata.thread_id"))
+	require.Equal(t, "body.client_metadata.thread_id", stringAttribute(t, attrs, "modeltrace.correlation.thread_source"))
+	require.True(t, boolAttribute(t, attrs, "modeltrace.correlation.session_conflict"))
+}
+
 func TestModelTraceDeferredCandidateStartsOnlyForExecution(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -495,4 +543,13 @@ func intAttribute(t *testing.T, attributes map[string]*commonpb.AnyValue, key st
 	_, ok = value.Value.(*commonpb.AnyValue_IntValue)
 	require.True(t, ok, "attribute %q is not an integer", key)
 	return value.GetIntValue()
+}
+
+func boolAttribute(t *testing.T, attributes map[string]*commonpb.AnyValue, key string) bool {
+	t.Helper()
+	value, ok := attributes[key]
+	require.True(t, ok, "attribute %q is missing", key)
+	_, ok = value.Value.(*commonpb.AnyValue_BoolValue)
+	require.True(t, ok, "attribute %q is not a boolean", key)
+	return value.GetBoolValue()
 }

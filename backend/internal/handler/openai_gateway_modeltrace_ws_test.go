@@ -153,7 +153,7 @@ func TestOpenAIResponsesWebSocketTraceStartsBeforeResponseCreateSemanticValidati
 	}
 }
 
-func TestOpenAIWSTraceTurnsUsesExplicitPayloadSession(t *testing.T) {
+func TestOpenAIWSTraceTurnsUsesPayloadCorrelationBeforeHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fake := newOpenAIWSTraceOTLPServer(t)
 	manager := newOpenAIWSTraceTestManager(t, fake)
@@ -162,15 +162,21 @@ func TestOpenAIWSTraceTurnsUsesExplicitPayloadSession(t *testing.T) {
 
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/responses", nil)
+	c.Request.Header.Set("Session-Id", "header-session")
+	c.Request.Header.Set("Thread-Id", "header-thread")
 	turns := newOpenAIWSTraceTurns(h, c, &service.APIKey{ID: 41}, servermiddleware.AuthSubject{UserID: 42})
-	turns.start(1, []byte(`{"type":"response.create","model":"gpt-test","session_id":"session-client-owned","prompt_cache_key":"cache-not-a-session"}`), "gpt-test")
+	turns.start(1, []byte(`{"type":"response.create","model":"claude-test","client_metadata":{"session_id":"body-session","thread_id":"body-thread"},"prompt_cache_key":"cache-not-a-session","previous_response_id":"resp-not-a-session"}`), "claude-test")
 	turns.finishOpen()
 
 	shutdownOpenAIWSTraceTestManager(t, manager)
 	spans, exportErrors := fake.snapshot()
 	require.Empty(t, exportErrors)
 	require.Len(t, spans, 1)
-	require.Equal(t, "session-client-owned", openAIWSTraceSpanStringAttribute(spans[0], "langfuse.session.id"))
+	require.Equal(t, "body-session", openAIWSTraceSpanStringAttribute(spans[0], "langfuse.session.id"))
+	require.Equal(t, "body.client_metadata.session_id", openAIWSTraceSpanStringAttribute(spans[0], "modeltrace.correlation.session_source"))
+	require.Equal(t, "body-thread", openAIWSTraceSpanStringAttribute(spans[0], "langfuse.trace.metadata.thread_id"))
+	require.Equal(t, "body.client_metadata.thread_id", openAIWSTraceSpanStringAttribute(spans[0], "modeltrace.correlation.thread_source"))
+	require.True(t, openAIWSTraceSpanBoolAttribute(spans[0], "modeltrace.correlation.session_conflict"))
 }
 
 func openAIWSTraceSpanStringAttribute(span *tracepb.Span, key string) string {
@@ -183,6 +189,18 @@ func openAIWSTraceSpanStringAttribute(span *tracepb.Span, key string) string {
 		}
 	}
 	return ""
+}
+
+func openAIWSTraceSpanBoolAttribute(span *tracepb.Span, key string) bool {
+	if span == nil {
+		return false
+	}
+	for _, attr := range span.Attributes {
+		if attr.Key == key {
+			return attr.Value.GetBoolValue()
+		}
+	}
+	return false
 }
 
 func TestOpenAIResponsesWebSocketUsageUsesTurnTraceContext(t *testing.T) {

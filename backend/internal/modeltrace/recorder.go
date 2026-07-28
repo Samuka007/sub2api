@@ -31,7 +31,7 @@ type traceRecorder struct {
 	identity           servermiddleware.ResolvedIdentity
 	correlationMu      sync.RWMutex
 	requestID          string
-	sessionID          string
+	correlation        Correlation
 	generation         *GenerationSnapshot
 	promptMaxBytes     int
 	responseMaxBytes   int
@@ -70,7 +70,7 @@ func (r *traceRecorder) TraceInputLimit() int {
 	return r.promptMaxBytes
 }
 
-func (r *traceRecorder) setTraceCorrelation(requestID, sessionID string) {
+func (r *traceRecorder) setTraceCorrelation(requestID string, correlation Correlation) {
 	if r == nil {
 		return
 	}
@@ -79,18 +79,26 @@ func (r *traceRecorder) setTraceCorrelation(requestID, sessionID string) {
 	if requestID = scrubURLsInString(requestID); requestID != "" {
 		r.requestID = requestID
 	}
-	if sessionID = scrubURLsInString(sessionID); sessionID != "" {
-		r.sessionID = sessionID
+	if correlation.SessionID = scrubURLsInString(correlation.SessionID); correlation.SessionID != "" {
+		r.correlation.SessionID = correlation.SessionID
+		r.correlation.SessionSource = correlation.SessionSource
+	}
+	if correlation.ThreadID = scrubURLsInString(correlation.ThreadID); correlation.ThreadID != "" {
+		r.correlation.ThreadID = correlation.ThreadID
+		r.correlation.ThreadSource = correlation.ThreadSource
+	}
+	if correlation.SessionConflict {
+		r.correlation.SessionConflict = true
 	}
 }
 
-func (r *traceRecorder) traceCorrelation() (requestID, sessionID string) {
+func (r *traceRecorder) traceCorrelation() (requestID string, correlation Correlation) {
 	if r == nil {
-		return "", ""
+		return "", Correlation{}
 	}
 	r.correlationMu.RLock()
 	defer r.correlationMu.RUnlock()
-	return r.requestID, r.sessionID
+	return r.requestID, r.correlation
 }
 
 func (r *traceRecorder) TraceContinuation() recording.TraceContinuation {
@@ -198,7 +206,8 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 	name := fmt.Sprintf("upstream.attempt.%d", index)
 	_, span := r.tracer.Start(r.ctx, name, trace.WithSpanKind(trace.SpanKindClient))
 
-	requestID, sessionID := r.traceCorrelation()
+	requestID, correlation := r.traceCorrelation()
+	sessionID := correlation.SessionID
 	observationMetadata := attemptObservationMetadata{
 		AttemptIndex: index,
 		AccountID:    metadata.AccountID,

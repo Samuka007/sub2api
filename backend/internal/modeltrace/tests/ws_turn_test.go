@@ -60,6 +60,32 @@ func TestModelTraceResponsesWebSocketTurns(t *testing.T) {
 	require.Equal(t, int64(2), intAttribute(t, attributesByKey(spans[1].Attributes), "langfuse.trace.metadata.turn_index"))
 }
 
+func TestModelTraceResponsesWebSocketCorrelationAttributes(t *testing.T) {
+	manager, fake := newWSTurnTestManager(t)
+	turn := manager.StartResponsesWSTurn(context.Background(), modeltrace.ResponsesWSTurnMetadata{
+		Identity:      servermiddleware.ResolvedIdentity{APIKeyID: 71, UserID: 73, GroupID: 19},
+		TurnRequestID: "correlation-turn-1", TurnIndex: 1, Path: "/v1/responses", Model: "claude-test",
+		Correlation: modeltrace.Correlation{
+			SessionID: "body-session", SessionSource: "body.client_metadata.session_id",
+			ThreadID: "body-thread", ThreadSource: "body.client_metadata.thread_id", SessionConflict: true,
+		},
+	}, []byte(`{"type":"response.create","model":"claude-test"}`))
+	require.NotNil(t, turn)
+	turn.End(modeltrace.TestingStreamStatusCompleted, "", nil)
+
+	shutdownWSTurnManager(t, manager)
+	requests, serverErrors := fake.snapshot()
+	require.Empty(t, serverErrors)
+	spans := exportedSpans(requests)
+	require.Len(t, spans, 1)
+	attrs := attributesByKey(spans[0].Attributes)
+	require.Equal(t, "body-session", stringAttribute(t, attrs, "langfuse.session.id"))
+	require.Equal(t, "body.client_metadata.session_id", stringAttribute(t, attrs, "modeltrace.correlation.session_source"))
+	require.Equal(t, "body-thread", stringAttribute(t, attrs, "langfuse.trace.metadata.thread_id"))
+	require.Equal(t, "body.client_metadata.thread_id", stringAttribute(t, attrs, "modeltrace.correlation.thread_source"))
+	require.True(t, boolAttribute(t, attrs, "modeltrace.correlation.session_conflict"))
+}
+
 func TestModelTraceResponsesWebSocketConfigSwitch(t *testing.T) {
 	firstManager, firstFake := newWSTurnTestManager(t)
 	secondManager, secondFake := newWSTurnTestManager(t)

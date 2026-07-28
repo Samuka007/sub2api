@@ -126,7 +126,7 @@ func (s *candidateState) start(c *gin.Context, identity middleware.ResolvedIdent
 			},
 			s.generation,
 		)
-		recorder.setTraceCorrelation(clientRequestID(c), extractSession(nil, c))
+		recorder.setTraceCorrelation(clientRequestID(c), extractCorrelation(nil, c))
 		ctx = recording.WithRecorder(ctx, recorder)
 		c.Request = c.Request.WithContext(ctx)
 		s.span = span
@@ -158,7 +158,7 @@ func (s *candidateState) bindRequestCapture(c *gin.Context, recorder *traceRecor
 		return
 	}
 	s.requestCapture.setCaptureObserver(func(captured []byte) {
-		recorder.setTraceCorrelation("", extractSession(captured, c))
+		recorder.setTraceCorrelation("", extractCorrelation(captured, c))
 	})
 }
 
@@ -235,10 +235,9 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 			attrs = append(attrs, attribute.String("error.type", stream.errorType))
 		}
 	}
-	if extracted := scrubURLsInString(extractSession(clientInput, c)); extracted != "" {
-		s.recorder.setTraceCorrelation("", extracted)
-	}
-	requestID, session := s.recorder.traceCorrelation()
+	s.recorder.setTraceCorrelation("", extractCorrelation(clientInput, c))
+	requestID, correlation := s.recorder.traceCorrelation()
+	session := correlation.SessionID
 	if requestID != "" {
 		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
 	}
@@ -254,6 +253,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 	if session != "" {
 		attrs = append(attrs, attribute.String("langfuse.session.id", session))
 	}
+	attrs = appendCorrelationAttributes(attrs, correlation)
 	s.span.SetAttributes(attrs...)
 	if status >= 400 || (isStream && stream.status != streamStatusCompleted) {
 		description := httpStatusText(status)
@@ -393,15 +393,38 @@ func clientRequestID(c *gin.Context) string {
 	return ""
 }
 
-func extractSession(body []byte, c *gin.Context) string {
+func extractCorrelation(body []byte, c *gin.Context) Correlation {
 	if c == nil || c.Request == nil {
-		return ExtractLangfuseSessionID(body, nil, false)
+		return ExtractCorrelation(body, nil, "", false)
 	}
 	grokRoute := false
 	if apiKey, ok := middleware.GetAPIKeyFromContext(c); ok && apiKey != nil && apiKey.Group != nil {
 		grokRoute = strings.EqualFold(strings.TrimSpace(apiKey.Group.Platform), "grok")
 	}
-	return ExtractLangfuseSessionID(body, c.Request.Header, grokRoute)
+	return ExtractCorrelation(body, c.Request.Header, entryProtocol(c.Request.URL.Path), grokRoute)
+}
+
+func appendCorrelationAttributes(attrs []attribute.KeyValue, correlation Correlation) []attribute.KeyValue {
+	attrs = append(attrs,
+		attribute.Bool("modeltrace.correlation.session_conflict", correlation.SessionConflict),
+		attribute.Bool("langfuse.trace.metadata.session_conflict", correlation.SessionConflict),
+	)
+	if correlation.SessionSource != "" {
+		attrs = append(attrs,
+			attribute.String("modeltrace.correlation.session_source", correlation.SessionSource),
+			attribute.String("langfuse.trace.metadata.session_source", correlation.SessionSource),
+		)
+	}
+	if correlation.ThreadID != "" {
+		attrs = append(attrs, attribute.String("langfuse.trace.metadata.thread_id", correlation.ThreadID))
+	}
+	if correlation.ThreadSource != "" {
+		attrs = append(attrs,
+			attribute.String("modeltrace.correlation.thread_source", correlation.ThreadSource),
+			attribute.String("langfuse.trace.metadata.thread_source", correlation.ThreadSource),
+		)
+	}
+	return attrs
 }
 
 func httpStatusText(code int) string {

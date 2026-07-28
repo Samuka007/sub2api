@@ -141,3 +141,39 @@
 - `backend/internal/modeltrace/tests/config_manager_test.go` 仅执行 `gofmt`，修复 Code Quality 的格式门禁；模型追踪生产行为、测试断言和配置契约均未改变。
 - 验证：`gofmt -l backend/internal/modeltrace/tests/config_manager_test.go` 无输出；完整 `make test-unit` 与 golangci-lint `v2.9.0` 退出 0。
 - 本次不新增或记录任何模型追踪凭据、endpoint 或运行时配置。
+
+## 2026-07-28 — Issue #38 Session / Thread 关联修复
+
+### 问题与边界
+
+- 当前 `ExtractLangfuseSessionID` 会把 `client_metadata.thread_id`、`Thread-Id` / `thread_id` 回退为 Langfuse session，错误合并本应独立的 session 与 thread。
+- Anthropic Messages 的 `metadata.user_id` 字符串尚未按严格 JSON 与已确认 legacy 格式提取 session，`X-Claude-Code-Session-Id` 也未纳入 modeltrace fallback。
+- 提取规则必须由入口协议和显式客户端信号决定，不得依赖模型名称；`prompt_cache_key`、`previous_response_id`、路由 hash、身份 ID、内容 hash 和上游生成 ID 均继续排除。
+
+### 实施计划
+
+- 引入带 `SessionID` / `SessionSource` / `ThreadID` / `ThreadSource` 与 session conflict 标记的结构化关联结果。
+- HTTP middleware 首次记录 header 关联，读取请求体后按协议优先级合并；Responses WebSocket 回合复用相同提取器。
+- 根 span 记录低基数 session/thread source、独立 thread ID 与 conflict 布尔属性；原始冲突 ID 不进入属性。
+- 增加协议、优先级、JSON/legacy、thread 独立性、模型无关性以及 HTTP/WS 接线测试，并运行 modeltrace 单测与 `skills/sub2api-model-trace-e2e/` smoke。
+
+### 安全取值位置
+
+- 入口协议来自请求 URL path；客户端关联信号只来自请求 body 与允许的 header。
+- 本记录不包含任何 Langfuse、模型供应商或本地测试凭据；运行时配置继续从既有 model-tracing 配置安全加载。
+
+### 实现与验证结果
+
+- `backend/internal/modeltrace/session.go` 新增结构化 `Correlation`：Anthropic Messages 按 body session/conversation、metadata session、`metadata.user_id` JSON、已确认 legacy、`X-Claude-Code-Session-Id`、标准 session header 优先级解析；Responses 按 body、`client_metadata.session_id`、标准 session header、Claude header、对应 Grok header 解析；其他入口只接受显式 body/header 信号。
+- `client_metadata.thread_id`、`Thread-Id` / `thread_id`、`X-Codex-Turn-Metadata.thread_id` 独立保存，不再回退为 Langfuse session。根 span 写入低基数 source 与 conflict 属性，冲突时 body session 胜出且不导出落选 ID。
+- HTTP middleware、Responses WebSocket handler/turn、upstream attempt 均接入结构化结果；协议判断来自 URL path，与模型名称无关。
+- 定向单测：`go test ./internal/modeltrace/... -run 'TestCorrelationExtractor|TestModelTraceHTTPCorrelation|TestModelTraceResponsesWebSocketCorrelation' -count=1` 通过。
+- 完整单测：`go test ./internal/modeltrace/... -count=1` 通过；race：`go test -race ./internal/modeltrace/... -count=1` 通过。
+- handler 接线测试：`go test ./internal/handler -run 'TestOpenAIWSTraceTurnsUsesPayloadCorrelationBeforeHeaders|TestOpenAIResponsesWebSocketTrace|TestOpenAIResponsesWebSocketUsageUsesTurnTraceContext' -count=1` 通过。
+
+### Smoke 边界
+
+- `skills/sub2api-model-trace-e2e/SKILL.md` 要求的 `run_e2e.sh` 依赖 Colima profile `swebench`。本机已安装 Colima，但 guest Docker provisioning 因宿主环境缺少可用的 containerd 服务未完成；因此没有把 Colima VM 结果当作通过依据。
+- 为完成行为验证，使用同一脚本通过宿主 rootful Docker socket `/var/run/docker.sock` 运行临时 fallback：镜像来自国内镜像，Go 客户端使用 host network，编译目标按宿主 `linux/amd64` 适配；Langfuse MinIO 数据绑定到 `/data`，绕过根分区空间保留阈值。该路径仅为本机验证适配，不改变生产代码或脚本。
+- `run_e2e.sh` 完整 smoke 通过：Langfuse `3.224.2`，stdout 为 `trace_id=174c92bd5cb108117971adb3a9bead20`、观测数 `1`、`VERIFY_OK`；日志含 `full-scale e2e passed`，HTTP/WS、failover、断连、配置快照、OTLP fail-open、200 项 batch 续接及敏感内容门禁均通过。
+- 单测与 race 使用 `golang:1.26.5` 容器完成；本记录不包含任何 Langfuse、模型供应商或本地测试凭据。

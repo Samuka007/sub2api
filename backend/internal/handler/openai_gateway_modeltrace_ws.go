@@ -85,7 +85,7 @@ func (t *openAIWSTraceTurns) start(turn int, payload []byte, model string) {
 		TurnIndex:           turn,
 		Path:                t.path,
 		Model:               strings.TrimSpace(model),
-		SessionID:           modeltrace.ExtractLangfuseSessionID(payload, t.headers, t.grokRoute),
+		Correlation:         modeltrace.ExtractCorrelation(payload, t.headers, "openai.responses", t.grokRoute),
 	}, payload)
 	if turnTrace == nil {
 		return
