@@ -340,6 +340,7 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
 		return false, nil
 	}
+	reconcileUsageLogBalanceCharge(usageLog, p, result)
 
 	if result.APIKeyQuotaExhausted {
 		if invalidator, ok := p.APIKeyService.(apiKeyAuthCacheInvalidator); ok && p.APIKey != nil && p.APIKey.Key != "" {
@@ -349,6 +350,28 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 
 	finalizePostUsageBilling(billingCtx, p, deps, result)
 	return true, nil
+}
+
+func reconcileUsageLogBalanceCharge(usageLog *UsageLog, p *postUsageBillingParams, result *UsageBillingApplyResult) {
+	if usageLog == nil || p == nil || p.User == nil || result == nil || result.BalanceCharged == nil {
+		return
+	}
+	charged := *result.BalanceCharged
+	if charged < 0 {
+		charged = 0
+	}
+	if charged >= usageLog.ActualCost {
+		return
+	}
+	requested := usageLog.ActualCost
+	usageLog.ActualCost = charged
+	slog.Warn("usage_billing.balance_charge_capped",
+		"request_id", usageLog.RequestID,
+		"user_id", p.User.ID,
+		"requested_cost", requested,
+		"charged_cost", charged,
+		"balance_exhausted", result.BalanceOverdrafted,
+	)
 }
 
 func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
@@ -447,23 +470,31 @@ func notifyBalanceLow(p *postUsageBillingParams, deps *billingDeps, result *Usag
 		return
 	}
 
+	charged := resolveBalanceCharge(p, result)
 	oldBalance := resolveOldBalance(p, result)
 	slog.Debug("notifyBalanceLow: calling CheckBalanceAfterDeduction",
 		"user_id", p.User.ID,
 		"old_balance", oldBalance,
-		"cost", p.Cost.ActualCost,
+		"cost", charged,
 		"notify_enabled", p.User.BalanceNotifyEnabled,
 		"threshold", p.User.BalanceNotifyThreshold,
 		"result_has_new_balance", result != nil && result.NewBalance != nil,
 	)
-	deps.balanceNotifyService.CheckBalanceAfterDeduction(context.Background(), p.User, oldBalance, p.Cost.ActualCost)
+	deps.balanceNotifyService.CheckBalanceAfterDeduction(context.Background(), p.User, oldBalance, charged)
+}
+
+func resolveBalanceCharge(p *postUsageBillingParams, result *UsageBillingApplyResult) float64 {
+	if result != nil && result.BalanceCharged != nil {
+		return *result.BalanceCharged
+	}
+	return p.Cost.ActualCost
 }
 
 // resolveOldBalance returns the pre-deduction balance.
-// Prefers the DB transaction result (newBalance + cost) over snapshot.
+// Prefers the DB transaction result (newBalance + amount charged) over snapshot.
 func resolveOldBalance(p *postUsageBillingParams, result *UsageBillingApplyResult) float64 {
 	if result != nil && result.NewBalance != nil {
-		return *result.NewBalance + p.Cost.ActualCost
+		return *result.NewBalance + resolveBalanceCharge(p, result)
 	}
 	// Legacy fallback: snapshot balance from request context
 	return p.User.Balance
@@ -739,6 +770,25 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 
 	// 计算费用
 	cost := s.calculateRecordUsageCost(ctx, result, apiKey, billingModel, multiplier, imageMultiplier, opts)
+	reportedTokens := UsageTokens{
+		InputTokens:         result.Usage.InputTokens,
+		OutputTokens:        result.Usage.OutputTokens,
+		CacheCreationTokens: result.Usage.CacheCreationInputTokens,
+		CacheReadTokens:     result.Usage.CacheReadInputTokens,
+		ImageOutputTokens:   result.Usage.ImageOutputTokens,
+	}
+	var anomaly usageLimitAnomaly
+	holdCharge := false
+	heldActualCost := 0.0
+	if result.ImageCount == 0 {
+		anomaly, holdCharge = s.billingService.detectUsageLimitAnomaly(billingModel, reportedTokens)
+	}
+	if holdCharge {
+		heldActualCost = cost.ActualCost
+		heldCost := *cost
+		heldCost.ActualCost = 0
+		cost = &heldCost
+	}
 
 	// 判断计费方式：订阅模式 vs 余额模式
 	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
@@ -753,18 +803,15 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		requestedModel, multiplier, imageMultiplier, accountRateMultiplier, billingType, cacheTTLOverridden, cost, opts)
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）
-	if apiKey.GroupID != nil {
+	if holdCharge {
+		zero := 0.0
+		usageLog.AccountStatsCost = &zero
+	} else if apiKey.GroupID != nil {
 		applyAccountStatsCost(ctx, usageLog, s.channelService, s.billingService,
 			account.ID, *apiKey.GroupID, result.UpstreamModel, result.Model,
 			// Anthropic's input_tokens excludes cache_read and cache_creation (billed separately);
 			// OpenAI gateway uses actualInputTokens which also excludes cache_read for the same reason.
-			UsageTokens{
-				InputTokens:         result.Usage.InputTokens,
-				OutputTokens:        result.Usage.OutputTokens,
-				CacheCreationTokens: result.Usage.CacheCreationInputTokens,
-				CacheReadTokens:     result.Usage.CacheReadInputTokens,
-				ImageOutputTokens:   result.Usage.ImageOutputTokens,
-			},
+			reportedTokens,
 			cost.TotalCost,
 		)
 	}
@@ -773,6 +820,24 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		recordModelTraceUsage(ctx, usageLog)
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
+		s.deferredService.ScheduleLastUsedUpdate(account.ID)
+		return nil
+	}
+
+	if holdCharge {
+		slog.Error("usage_billing.anomalous_usage_charge_held",
+			"request_id", usageLog.RequestID,
+			"user_id", user.ID,
+			"account_id", account.ID,
+			"provider", account.Platform,
+			"model", billingModel,
+			"dimension", anomaly.Dimension,
+			"reported_tokens", anomaly.Reported,
+			"model_limit", anomaly.Limit,
+			"calculated_actual_cost", heldActualCost,
+		)
+		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+		recordModelTraceUsage(ctx, usageLog)
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 		return nil
 	}

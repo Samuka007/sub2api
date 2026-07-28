@@ -80,6 +80,104 @@ func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	require.Equal(t, 1, dedupCount)
 }
 
+func TestUsageBillingRepositoryApply_CapsBalanceChargeAtAvailableBalance(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-cap-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      5,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-cap-" + uuid.NewString(),
+		Name:   "billing-cap",
+	})
+
+	result, err := repo.Apply(ctx, &service.UsageBillingCommand{
+		RequestID:   uuid.NewString(),
+		APIKeyID:    apiKey.ID,
+		UserID:      user.ID,
+		BalanceCost: 10,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Applied)
+	require.True(t, result.BalanceOverdrafted)
+	require.NotNil(t, result.NewBalance)
+	require.Zero(t, *result.NewBalance)
+	require.NotNil(t, result.BalanceCharged)
+	require.InDelta(t, 5.0, *result.BalanceCharged, 0.000001)
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.Zero(t, balance)
+}
+
+func TestUsageBillingRepositoryApply_ConcurrentChargesNeverOverdraw(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-concurrent-cap-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      5,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-concurrent-cap-" + uuid.NewString(),
+		Name:   "billing-concurrent-cap",
+	})
+
+	type outcome struct {
+		result *service.UsageBillingApplyResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	requestIDs := []string{uuid.NewString(), uuid.NewString()}
+	for _, requestID := range requestIDs {
+		go func(requestID string) {
+			<-start
+			result, err := repo.Apply(ctx, &service.UsageBillingCommand{
+				RequestID:   requestID,
+				APIKeyID:    apiKey.ID,
+				UserID:      user.ID,
+				BalanceCost: 4,
+			})
+			outcomes <- outcome{result: result, err: err}
+		}(requestID)
+	}
+	close(start)
+
+	totalCharged := 0.0
+	overdrafted := 0
+	for range requestIDs {
+		got := <-outcomes
+		require.NoError(t, got.err)
+		require.NotNil(t, got.result)
+		require.True(t, got.result.Applied)
+		require.NotNil(t, got.result.BalanceCharged)
+		totalCharged += *got.result.BalanceCharged
+		if got.result.BalanceOverdrafted {
+			overdrafted++
+		}
+	}
+	require.InDelta(t, 5.0, totalCharged, 0.000001)
+	require.Equal(t, 1, overdrafted)
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.Zero(t, balance)
+
+	var dedupCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_billing_dedup WHERE request_id IN ($1, $2) AND api_key_id = $3", requestIDs[0], requestIDs[1], apiKey.ID).Scan(&dedupCount))
+	require.Equal(t, len(requestIDs), dedupCount)
+}
+
 func TestUsageBillingRepositoryApply_DeduplicatesSubscriptionBilling(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
