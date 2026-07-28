@@ -312,7 +312,9 @@ const routes: RouteRecordRaw[] = [
       title: 'Purchase Subscription',
       titleKey: 'nav.buySubscription',
       descriptionKey: 'purchase.description',
-      requiresPayment: true
+      // Keep the user-facing entry reachable so PaymentView can render its
+      // explicit unavailable state when online payments are disabled.
+      requiresPayment: false
     }
   },
   {
@@ -744,7 +746,12 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-  scrollBehavior(_to, _from, savedPosition) {
+  scrollBehavior(to, _from, savedPosition) {
+    // The cinematic homepage must always open on its hero instead of restoring
+    // a previous position from a reload or browser history navigation.
+    if (to.name === 'Home' || to.name === 'HomePreviewTwo') {
+      return { top: 0, left: 0 }
+    }
     // Scroll to saved position when using browser back/forward
     if (savedPosition) {
       return savedPosition

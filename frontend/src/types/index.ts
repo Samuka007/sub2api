@@ -337,6 +337,12 @@ export interface UserAnnouncement {
   updated_at: string
 }
 
+export interface PublicAnnouncement {
+  id: number
+  title: string
+  content: string
+}
+
 export interface CreateAnnouncementRequest {
   title: string
   content: string

@@ -150,6 +150,10 @@ export default {
 
   // Navigation
   nav: {
+    workspace: 'Workspace',
+    developerTools: 'Developer tools',
+    billingAndSubscription: 'Billing & subscription',
+    account: 'Account',
     dashboard: 'Dashboard',
     announcements: 'Announcements',
     apiKeys: 'API Keys',
