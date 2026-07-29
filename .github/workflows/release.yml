@@ -118,6 +118,10 @@ jobs:
 
   quality-gate:
     needs: resolve-release
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     uses: ./.github/workflows/code-quality.yml
     with:
       ref: ${{ needs.resolve-release.outputs.tag_sha }}
