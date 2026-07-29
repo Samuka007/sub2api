@@ -26,15 +26,6 @@
         </router-link>
 
         <nav class="flex shrink-0 items-center gap-2 sm:gap-3" :aria-label="copy.navigation">
-          <a
-            :href="docHref"
-            :target="docUrl ? '_blank' : undefined"
-            :rel="docUrl ? 'noopener noreferrer' : undefined"
-            class="hidden h-10 items-center gap-2 rounded-md px-3 text-sm font-medium text-white/75 outline-none transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-white sm:inline-flex"
-          >
-            <Icon name="book" size="sm" />
-            {{ copy.docs }}
-          </a>
           <router-link
             :to="primaryPath"
             class="inline-flex h-10 items-center gap-2 rounded-md border border-white/20 bg-white/10 px-3.5 text-sm font-medium text-white backdrop-blur-md transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:px-4"
@@ -82,15 +73,6 @@
               {{ copy.primaryAction }}
               <Icon name="arrowRight" size="sm" :stroke-width="2" />
             </router-link>
-            <a
-              :href="docHref"
-              :target="docUrl ? '_blank' : undefined"
-              :rel="docUrl ? 'noopener noreferrer' : undefined"
-              class="inline-flex h-12 items-center gap-2 rounded-md border border-white/25 bg-black/10 px-5 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:px-6"
-            >
-              <Icon name="book" size="sm" />
-              {{ copy.secondaryAction }}
-            </a>
           </div>
         </div>
       </main>
@@ -141,10 +123,6 @@ const siteLogo = computed(() =>
     allowDataUrl: true,
   }),
 )
-const docUrl = computed(() =>
-  sanitizeUrl(appStore.cachedPublicSettings?.doc_url || appStore.docUrl || ''),
-)
-const docHref = computed(() => docUrl.value || '/key-usage')
 const primaryPath = computed(() => {
   if (!authStore.isAuthenticated) return '/login'
   return authStore.isAdmin ? '/admin/dashboard' : '/dashboard'
@@ -159,25 +137,21 @@ const copy = computed(() =>
     ? {
         home: '首页',
         navigation: '主导航',
-        docs: '文档',
         imageAlt: '深色背景前的白色机器人',
         eyebrow: '专注于 AI API 网关服务',
         description: '为开发者与团队提供便捷、稳定、可管理的 AI 模型接入服务。',
         primaryAction: authStore.isAuthenticated ? '进入控制台' : '立即开始',
-        secondaryAction: docUrl.value ? '查看接入文档' : '查询 API 用量',
         capabilities: '核心能力',
         photoCredit: '图片来源：Pexels',
       }
     : {
         home: 'home',
         navigation: 'Primary navigation',
-        docs: 'Docs',
         imageAlt: 'A white robot against a dark background',
         eyebrow: 'Focused on AI API gateway services',
         description:
           'Convenient, reliable, and manageable AI model access for developers and teams.',
         primaryAction: authStore.isAuthenticated ? 'Open console' : 'Get started',
-        secondaryAction: docUrl.value ? 'Read the docs' : 'Check API usage',
         capabilities: 'Core capabilities',
         photoCredit: 'Photo via Pexels',
       },
