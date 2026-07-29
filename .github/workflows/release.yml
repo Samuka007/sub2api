@@ -32,13 +32,14 @@ concurrency:
 
 jobs:
   resolve-release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     outputs:
       tag_name: ${{ steps.resolve.outputs.tag_name }}
       version: ${{ steps.resolve.outputs.version }}
       semantic_tag: ${{ steps.resolve.outputs.semantic_tag }}
       tag_sha: ${{ steps.resolve.outputs.tag_sha }}
       release_mode: ${{ steps.resolve.outputs.release_mode }}
+      release_runner: ${{ steps.resolve.outputs.release_runner }}
     steps:
       - name: Checkout repository history
         uses: actions/checkout@v6
@@ -108,12 +109,19 @@ jobs:
             RELEASE_MODE=full
           fi
 
+          if [ "$RELEASE_MODE" = simple ]; then
+            RELEASE_RUNNER=sub2api-pve
+          else
+            RELEASE_RUNNER=ubuntu-latest
+          fi
+
           {
             echo "tag_name=$TAG_NAME"
             echo "version=$VERSION"
             echo "semantic_tag=v$VERSION"
             echo "tag_sha=$TAG_SHA"
             echo "release_mode=$RELEASE_MODE"
+            echo "release_runner=$RELEASE_RUNNER"
           } >> "$GITHUB_OUTPUT"
 
   quality-gate:
@@ -128,7 +136,7 @@ jobs:
 
   update-version:
     needs: [resolve-release, quality-gate]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
@@ -154,7 +162,7 @@ jobs:
 
   build-frontend:
     needs: [resolve-release, quality-gate]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
@@ -193,7 +201,7 @@ jobs:
 
   release:
     needs: [resolve-release, quality-gate, update-version, build-frontend]
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.resolve-release.outputs.release_runner }}
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -255,6 +263,7 @@ jobs:
         run: test "$(go env GOVERSION)" = "go1.26.5"
 
       - name: Set up QEMU
+        if: needs.resolve-release.outputs.release_mode == 'full'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -413,7 +422,7 @@ jobs:
   sync-version-file:
     needs: [resolve-release, release]
     if: ${{ needs.release.result == 'success' && (github.event_name == 'push' || inputs.sync_version_file) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     steps:
       - name: Checkout default branch
         uses: actions/checkout@v6

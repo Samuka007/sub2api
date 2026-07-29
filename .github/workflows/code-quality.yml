@@ -28,7 +28,7 @@ concurrency:
 jobs:
   branch-policy:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -75,7 +75,7 @@ jobs:
         run: /bin/bash tools/check_pr_title.sh
 
   repository-governance:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -94,19 +94,18 @@ jobs:
 
   deploy-contract:
     if: github.event_name != 'schedule'
-    runs-on: macos-15
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - name: Check deployment scripts
+      - name: Check Linux deployment scripts
         run: |
-          for script in deploy/apple-container.sh deploy/install.sh deploy/tests/*.sh; do
+          /bin/bash -n deploy/install.sh
+          for script in deploy/tests/*.sh; do
             /bin/bash -n "$script"
           done
-      - name: Test Apple container deployment
-        run: /bin/bash deploy/tests/apple-container-test.sh
       - name: Test model IQ Compose environment
         run: /bin/bash deploy/tests/model-iq-compose-env-test.sh
       - name: Test install GitHub token handling
@@ -114,7 +113,7 @@ jobs:
 
   backend-test:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -140,7 +139,7 @@ jobs:
 
   backend-lint:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -164,7 +163,7 @@ jobs:
 
   frontend-quality:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -188,7 +187,7 @@ jobs:
         run: make build-frontend
 
   backend-security:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -208,7 +207,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   frontend-security:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
