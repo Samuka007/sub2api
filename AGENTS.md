@@ -17,7 +17,7 @@
 
 - 优先复用现有 Issue；使用 `gh issue edit <number> --add-assignee @me` 将执行者设为 assignee。
 - 开工前补齐问题、目标、非目标、方案、验收标准、上下游影响和风险。不得只保留一句标题或占位正文。
-- 一个分支和 Pull Request 只解决一个 Issue；发现独立问题时新建 Issue，不顺手扩大范围。
+- 同一会话中，先判断新增改动是否属于当前 Issue 的同一问题域和验收目标；同类或当前目标所需的治理调整必须复用现有 Issue、分支和 Pull Request，不得重复建 Issue。只有可独立交付、风险边界不同或脱离当前验收目标的问题才新建 Issue，不得把无关改动塞入当前分支。
 - 本仓库使用 GitHub 与 `gh` CLI。禁止路由到 AntCode 或 `antcode-skill`。
 
 ## 3. 分支与 worktree
@@ -63,11 +63,11 @@ git worktree add -b <scope>/<short-slug> ../sub2api-<short-slug> origin/main
 2. 分支已同步最新 `origin/main`，变更范围与 Issue 一致。
 3. 运行 `make pr-check`，所有适用测试、构建、lint、部署契约和安全检查真实通过。
 4. 用户可见或错误路径变更完成一次真实 smoke；涉及模型追踪时额外执行 `.agent/skills/sub2api-model-trace-e2e/` 对应 smoke。
-5. 使用仓库内 `.agent/skills/reviewing-code-changes/` 对完整 diff 执行评审。Reviewer 只读；主控修复已采纳的 P0/P1，重跑相关测试和定向复审，直到没有阻塞 finding。
+5. 纯文档且不涉及代码、配置、CI、依赖、生成物、运行行为或安全、权限、数据、数据库、发布边界的简单改动无需 AI 评审，PR 中记录 skip 原因即可。其余改动建议运行 `.agent/skills/reviewing-code-changes/`；高风险变更必须评审，Reviewer 只读，发现 P0/P1 后由主控修复并重跑相关测试。
 6. README 和长期文档已按第 5 节更新，工作文档和评审中间产物未被跟踪。
 7. PR 标题与正文使用中文，正文包含 `Closes #<issue>`、方案摘要、测试证据、评审结论、影响和回滚方式。
 
-测试通过不等于评审通过，静态评审也不等于运行验证。任一门禁失败、被跳过或缺少证据时，不得创建 PR 或声称可以合入。
+测试通过不等于评审通过，静态评审也不等于运行验证。任一适用门禁失败或缺少证据时，不得创建 PR 或声称可以合入。
 
 ## 7. GitHub 与授权
 
@@ -75,7 +75,7 @@ git worktree add -b <scope>/<short-slug> ../sub2api-<short-slug> origin/main
 - 用户未明确授权时，禁止 `git commit`、`git push`、`gh pr create`、合并、发布、删除分支或改写远端状态。
 - “实现/修改/修复”不等于提交授权；“提交”“推送”“创建 PR”只授权用户明确点名的动作。
 - 只允许对自己未合并的临时分支使用 `--force-with-lease`；禁止 `--force`。
-- PR 必须通过 GitHub `Code Quality`、Issue 归属检查、至少一名人工审批并解决全部讨论后才能合并。
+- PR 必须通过 GitHub `Code Quality`、Issue 归属检查并解决全部讨论；满足这些条件后，PR 作者可以自行合并。
 
 ## 8. 项目专项规则
 

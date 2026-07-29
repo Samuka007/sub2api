@@ -325,6 +325,7 @@ jobs:
         env:
           RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}
           VERSION: ${{ needs.resolve-release.outputs.version }}
+          TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}
         run: |
           set -euo pipefail
           {
@@ -343,6 +344,12 @@ jobs:
               echo 'Simple release: linux/amd64 GHCR image only; no binary attachments.'
             fi
           } > release-notes.md
+          # Append categorized commit history since the previous release.
+          commit_section="$(/bin/bash tools/generate_release_notes.sh || true)"
+          if [ -n "$commit_section" ]; then
+            printf '\n' >> release-notes.md
+            printf '%s\n' "$commit_section" >> release-notes.md
+          fi
 
       - name: Create GitHub Release
         env:

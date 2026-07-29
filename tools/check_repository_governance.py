@@ -32,6 +32,10 @@ REQUIRED_FILES = (
     "tools/check_pr_issue_ownership.sh",
     "tools/check_pr_issue_ownership_test.sh",
     "tools/test_check_repository_governance.py",
+    "tools/check_pr_title.sh",
+    "tools/test_check_pr_title.sh",
+    "tools/generate_release_notes.sh",
+    "tools/test_generate_release_notes.sh",
 )
 
 REQUIRED_SYMLINKS = {

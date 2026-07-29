@@ -44,6 +44,8 @@ fi
 
 step "Repository governance tests" python3 -m unittest tools.test_check_repository_governance
 step "PR issue ownership tests" /bin/bash tools/check_pr_issue_ownership_test.sh
+step "PR title gate tests" /bin/bash tools/test_check_pr_title.sh
+step "Release notes generator tests" /bin/bash tools/test_generate_release_notes.sh
 step "Review Skill smoke tests" /bin/bash tools/test_review_skill.sh
 step "Repository governance" python3 tools/check_repository_governance.py
 

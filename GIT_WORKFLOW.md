@@ -7,9 +7,9 @@
 1. `main` 始终是已审核、已通过质量门禁、可发布的内部稳定主线。
 2. 任何仓库变更先有 Issue，再有分支和实现，最终通过 Pull Request 合入。
 3. 禁止直接修改、提交或推送 `main`、`vendor/main`。
-4. 一个 Issue、一个分支、一个 Pull Request 只解决一个问题；上游同步、内部功能和生产修复不得混合。
+4. 一个 Issue、一个分支、一个 Pull Request 只解决一个问题域；同一会话中属于当前问题域和验收目标的追加改动必须复用当前 Issue、分支和 Pull Request，只有可独立交付、风险边界不同或脱离当前目标的问题才新建 Issue。
 5. Agent 在独立 `git worktree` 中工作；人工开发至少使用独立分支。
-6. 测试、运行 smoke、AI 评审和人工审批是不同证据，任何一项不能替代另一项。
+6. 测试、运行 smoke 和 AI 评审是不同证据，任何一项不能替代另一项。
 7. 服务器只部署明确的内部 annotated tag 和固定镜像，不部署浮动 `main` 或 `latest`。
 
 ## 2. 远程仓库与长期分支
@@ -135,7 +135,9 @@ make pr-check
 
 任何失败都阻塞后续评审和 PR。修复后重跑失败项，最后重新运行 `make pr-check`，不得只贴历史成功输出。
 
-### 3.6 执行独立 AI 评审并修复
+### 3.6 按风险执行独立 AI 评审
+
+仅修改 Markdown 等文档，且不涉及代码、配置、CI、依赖、生成物、运行行为或安全、权限、数据、数据库、发布边界的简单改动，可跳过本节 AI 评审；PR 中必须记录 skip 原因。其他改动按风险执行以下流程。
 
 仓库内评审 Skill：
 
@@ -151,7 +153,7 @@ python3 .agent/skills/reviewing-code-changes/scripts/prepare_review_context.py \
 ```
 
 
-随后严格按 `.agent/skills/reviewing-code-changes/SKILL.md` 执行一次独立评审：
+需要评审时，严格按 `.agent/skills/reviewing-code-changes/SKILL.md` 执行一次独立评审：
 
 1. Reviewer 只读，先审测试证明力，再审实现和上下游风险。
 2. 主控逐条复核 finding；无路径、行号、证据或风险链条的发现不得采纳。
@@ -160,7 +162,7 @@ python3 .agent/skills/reviewing-code-changes/scripts/prepare_review_context.py \
 5. 直到没有已采纳的 P0/P1、`make pr-check` 再次通过，才算评审门禁通过。
 6. P2 必须在 PR 中记录“已修复”或“不修及原因”，不得静默忽略。
 
-评审事实包和中间 JSON 只能写入 `/tmp` 或被忽略的 `code-reviews/`，不得提交。AI 评审通过不替代 GitHub 人工审批。
+评审事实包和中间 JSON 只能写入 `/tmp` 或被忽略的 `code-reviews/`，不得提交。
 
 ### 3.7 提交、推送与创建 Pull Request
 
@@ -196,7 +198,7 @@ python3 .agent/skills/reviewing-code-changes/scripts/prepare_review_context.py \
 
 只有自己的未合并临时分支可以在 rebase 后使用 `git push --force-with-lease`；禁止 `git push --force`。首次推送使用 `git push -u origin <branch>`。
 
-Pull Request 标题和正文必须使用中文，并包含：
+Pull Request 标题必须遵循 Conventional Commits 形式 `type(scope): 中文描述`（scope 可选，`!` 表示破坏性变更），允许的 type：`feat fix hotfix sync docs style refactor perf test build ci chore revert otel`；CI 校验标题格式。正文必须使用中文，并包含：
 
 - `Closes #<issue>`；CI 会验证 Issue 为 open，且 PR 作者是 assignee。
 - 问题、方案、范围和非目标。
@@ -208,7 +210,7 @@ Pull Request 标题和正文必须使用中文，并包含：
 一个 PR 只解决一个 Issue。功能 PR 默认 squash merge；同步 PR 使用 merge commit。合并前必须满足：
 
 - `Code Quality` 和全部 required checks 通过。
-- 至少一名非作者人工审批。
+- PR 作者可在其余合并条件满足后自行合并。
 - 所有 review conversation 已解决。
 - 分支仍可干净合入最新 `main`。
 
