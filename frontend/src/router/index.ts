@@ -305,15 +305,19 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/purchase',
     name: 'PurchaseSubscription',
-    component: () => import('@/views/user/PaymentView.vue'),
+    component: () => import('@/views/user/RedeemCodeStoreView.vue'),
     meta: {
       requiresAuth: true,
       requiresAdmin: false,
-      title: 'Purchase Subscription',
+      title: 'Redeem Code Store',
       titleKey: 'nav.buySubscription',
       descriptionKey: 'purchase.description',
-      requiresPayment: true
+      requiresPayment: false
     }
+  },
+  {
+    path: '/purchase/store-preview',
+    redirect: '/purchase'
   },
   {
     path: '/orders',
@@ -744,7 +748,12 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-  scrollBehavior(_to, _from, savedPosition) {
+  scrollBehavior(to, _from, savedPosition) {
+    // The cinematic homepage must always open on its hero instead of restoring
+    // a previous position from a reload or browser history navigation.
+    if (to.name === 'Home') {
+      return { top: 0, left: 0 }
+    }
     // Scroll to saved position when using browser back/forward
     if (savedPosition) {
       return savedPosition
@@ -861,6 +870,14 @@ router.beforeEach(async (to, _from, next) => {
       path: '/login',
       query: { redirect: to.fullPath } // Save intended destination
     })
+    return
+  }
+
+  // The user dashboard is not the administrator landing page. Keep admin
+  // sessions on the existing admin console even when an auth flow falls back
+  // to the generic /dashboard path.
+  if (to.path === '/dashboard' && authStore.isAdmin) {
+    next('/admin/dashboard')
     return
   }
 

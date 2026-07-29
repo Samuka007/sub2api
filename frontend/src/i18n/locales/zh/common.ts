@@ -150,6 +150,10 @@ export default {
 
   // Navigation
   nav: {
+    workspace: '工作区',
+    developerTools: '开发工具',
+    billingAndSubscription: '账单与订阅',
+    account: '账户',
     dashboard: '仪表盘',
     announcements: '公告',
     apiKeys: 'API 密钥',
@@ -182,7 +186,7 @@ export default {
     logout: '退出登录',
     github: 'GitHub',
     mySubscriptions: '我的订阅',
-    buySubscription: '充值/订阅',
+    buySubscription: '兑换码直购',
     docs: '文档',
     myOrders: '我的订单',
     orderManagement: '订单管理',

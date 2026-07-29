@@ -16,6 +16,9 @@ func RegisterUserRoutes(
 	auditLog middleware.AuditLogMiddleware,
 	settingService *service.SettingService,
 ) {
+	// Public homepage announcements are filtered to global popup notices by the service.
+	v1.GET("/public/announcements", h.Announcement.ListPublic)
+
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
 	authenticated.Use(middleware.BackendModeUserGuard(settingService))

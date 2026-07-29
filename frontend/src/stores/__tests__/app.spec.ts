@@ -411,6 +411,16 @@ describe('useAppStore', () => {
       expect(store.publicSettingsLoaded).toBe(true)
     })
 
+    it('将旧默认站点名映射为 SCIbuddy', () => {
+      const windowAny = window as any
+      windowAny.__APP_CONFIG__ = createPublicSettings({ site_name: 'Sub2API' })
+
+      const store = useAppStore()
+      store.initFromInjectedConfig()
+
+      expect(store.siteName).toBe('SCIbuddy')
+    })
+
     it('无注入配置时返回 false', () => {
       const store = useAppStore()
       const result = store.initFromInjectedConfig()

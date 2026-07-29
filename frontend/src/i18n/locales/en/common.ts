@@ -150,6 +150,10 @@ export default {
 
   // Navigation
   nav: {
+    workspace: 'Workspace',
+    developerTools: 'Developer tools',
+    billingAndSubscription: 'Billing & subscription',
+    account: 'Account',
     dashboard: 'Dashboard',
     announcements: 'Announcements',
     apiKeys: 'API Keys',
@@ -182,7 +186,7 @@ export default {
     logout: 'Logout',
     github: 'GitHub',
     mySubscriptions: 'My Subscriptions',
-    buySubscription: 'Recharge / Subscription',
+    buySubscription: 'Redeem Code Store',
     docs: 'Docs',
     myOrders: 'My Orders',
     orderManagement: 'Orders',

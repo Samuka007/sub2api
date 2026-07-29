@@ -49,6 +49,9 @@ export default {
         }
       },
       fontFamily: {
+        geist: ['Geist', 'sans-serif'],
+        instrument: ['Instrument Serif', 'serif'],
+        newsreader: ['Newsreader', 'serif'],
         sans: [
           'system-ui',
           '-apple-system',

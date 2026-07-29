@@ -8,6 +8,8 @@ const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSi
 const componentSource = readFileSync(componentPath, 'utf8')
 const stylePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../style.css')
 const styleSource = readFileSync(stylePath, 'utf8')
+const routerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../router/index.ts')
+const routerSource = readFileSync(routerPath, 'utf8')
 
 describe('AppSidebar custom SVG styles', () => {
   it('does not override uploaded SVG fill or stroke colors', () => {
@@ -43,6 +45,10 @@ describe('AppSidebar scroll position persistence', () => {
 })
 
 describe('AppSidebar header styles', () => {
+  it('uses the SCIbuddy wordmark in the user console', () => {
+    expect(componentSource).toContain("props.variant === 'user' ? 'SCIbuddy' : appStore.siteName")
+  })
+
   it('does not clip the version badge dropdown', () => {
     const sidebarHeaderBlockMatch = styleSource.match(/\.sidebar-header\s*\{[\s\S]*?\n {2}\}/)
     const sidebarBrandBlockMatch = componentSource.match(/\.sidebar-brand\s*\{[\s\S]*?\n\}/)
@@ -51,5 +57,24 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch).not.toBeNull()
     expect(sidebarHeaderBlockMatch?.[0]).not.toContain('@apply overflow-hidden;')
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
+  })
+})
+
+describe('AppSidebar payment entry', () => {
+  it('keeps recharge and subscription visible for every user mode', () => {
+    const purchaseItem = componentSource
+      .split('\n')
+      .find(line => line.includes("path: '/purchase'"))
+
+    expect(purchaseItem).toContain("label: t('nav.buySubscription')")
+    expect(purchaseItem).not.toContain('hideInSimpleMode')
+    expect(purchaseItem).not.toContain('featureFlag')
+  })
+
+  it('allows the payment page to render its unavailable state', () => {
+    const purchaseRoute = routerSource.match(/path: '\/purchase',[\s\S]*?\n {2}},/)
+
+    expect(purchaseRoute).not.toBeNull()
+    expect(purchaseRoute?.[0]).toContain('requiresPayment: false')
   })
 })

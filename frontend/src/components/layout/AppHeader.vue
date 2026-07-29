@@ -1,6 +1,14 @@
 <template>
-  <header class="glass sticky top-0 z-30 border-b border-gray-200/50 dark:border-dark-700/50">
-    <div class="flex h-16 items-center justify-between gap-2 px-2 sm:px-4 md:px-6">
+  <header
+    class="sticky top-0 z-30 border-b"
+    :class="variant === 'user'
+      ? 'user-console-header border-[#dde3e1] bg-white/95 dark:border-[#253237] dark:bg-[#111b1f]/95'
+      : 'glass border-gray-200/50 dark:border-dark-700/50'"
+  >
+    <div
+      class="flex items-center justify-between gap-2 px-2 sm:px-4 md:px-6"
+      :class="variant === 'user' ? 'h-[68px]' : 'h-16'"
+    >
       <!-- Left: Mobile Menu Toggle + Page Title -->
       <div class="flex shrink-0 items-center gap-2 sm:gap-4">
         <button
@@ -47,7 +55,10 @@
         <!-- Balance Display -->
         <div
           v-if="user"
-          class="group relative hidden items-center gap-2 rounded-xl bg-primary-50 px-3 py-1.5 dark:bg-primary-900/20 sm:flex"
+          class="group relative hidden items-center gap-2 px-3 py-1.5 sm:flex"
+          :class="variant === 'user'
+            ? 'rounded-md border border-[#dbe3e0] bg-[#f7faf9] dark:border-[#2c3b40] dark:bg-[#182428]'
+            : 'rounded-xl bg-primary-50 dark:bg-primary-900/20'"
         >
           <svg
             class="h-4 w-4 text-primary-600 dark:text-primary-400"
@@ -95,10 +106,14 @@
         <div v-if="user" class="relative" ref="dropdownRef">
           <button
             @click="toggleDropdown"
-            class="flex items-center gap-2 rounded-xl p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
+            class="flex items-center gap-2 p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
+            :class="variant === 'user' ? 'rounded-md' : 'rounded-xl'"
             :aria-label="t('common.userMenu')"
           >
-            <div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-medium text-white shadow-sm">
+            <div
+              class="flex h-8 w-8 items-center justify-center overflow-hidden bg-primary-600 text-sm font-medium text-white shadow-sm"
+              :class="variant === 'user' ? 'rounded-md' : 'rounded-xl bg-gradient-to-br from-primary-500 to-primary-600'"
+            >
               <img
                 v-if="avatarUrl"
                 :src="avatarUrl"
@@ -259,6 +274,12 @@ const authStore = useAuthStore()
 const adminSettingsStore = useAdminSettingsStore()
 const onboardingStore = useOnboardingStore()
 
+withDefaults(defineProps<{
+  variant?: 'admin' | 'user'
+}>(), {
+  variant: 'admin'
+})
+
 const user = computed(() => authStore.user)
 const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
@@ -379,5 +400,16 @@ onBeforeUnmount(() => {
 .dropdown-leave-to {
   opacity: 0;
   transform: scale(0.95) translateY(-4px);
+}
+
+.user-console-header {
+  backdrop-filter: blur(12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropdown-enter-active,
+  .dropdown-leave-active {
+    transition: none;
+  }
 }
 </style>

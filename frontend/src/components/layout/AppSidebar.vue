@@ -2,7 +2,8 @@
   <aside
     class="sidebar"
     :class="[
-      sidebarCollapsed ? 'w-[72px]' : 'w-64',
+      sidebarCollapsed ? 'w-[72px]' : props.variant === 'user' ? 'w-[232px]' : 'w-64',
+      { 'sidebar-user-console': props.variant === 'user' },
       { '-translate-x-full lg:translate-x-0': !mobileOpen }
     ]"
   >
@@ -32,7 +33,7 @@
     <!-- Navigation -->
     <nav ref="sidebarNavRef" class="sidebar-nav scrollbar-hide">
       <!-- Admin View: Admin menu first, then personal menu -->
-      <template v-if="isAdmin">
+      <template v-if="props.variant === 'admin' && isAdmin">
         <!-- Admin Section -->
         <div class="sidebar-section">
           <template v-for="item in adminNavItems" :key="item.path">
@@ -128,21 +129,33 @@
 
       <!-- Regular User View -->
       <template v-else-if="!appStore.backendModeEnabled">
-        <div class="sidebar-section">
-          <router-link
-            v-for="item in userNavItems"
-            :key="item.path"
-            :to="item.path"
-            class="sidebar-link mb-1"
-            :class="{ 'sidebar-link-active': isActive(item.path), 'sidebar-link-collapsed': sidebarCollapsed }"
-            :title="sidebarCollapsed ? item.label : undefined"
-            :data-tour="item.path === '/keys' ? 'sidebar-my-keys' : undefined"
-            @click="handleMenuItemClick(item.path)"
+        <div v-for="section in userNavSections" :key="section.label" class="sidebar-section">
+          <div
+            class="sidebar-section-title"
+            :class="{ 'sidebar-section-title-collapsed': sidebarCollapsed }"
+            :aria-hidden="sidebarCollapsed ? 'true' : 'false'"
           >
-            <span v-if="item.iconSvg" class="h-5 w-5 flex-shrink-0 sidebar-svg-icon" v-html="sanitizeSvg(item.iconSvg)"></span>
-            <component v-else :is="item.icon" class="h-5 w-5 flex-shrink-0" />
-            <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{ item.label }}</span>
-          </router-link>
+            <span
+              class="sidebar-section-title-text"
+              :class="{ 'sidebar-section-title-text-collapsed': sidebarCollapsed }"
+            >
+              {{ section.label }}
+            </span>
+          </div>
+          <template v-for="item in section.items" :key="item.path">
+            <router-link
+              :to="item.path"
+              class="sidebar-link mb-1"
+              :class="{ 'sidebar-link-active': isActive(item.path), 'sidebar-link-collapsed': sidebarCollapsed }"
+              :title="sidebarCollapsed ? item.label : undefined"
+              :data-tour="item.path === '/keys' ? 'sidebar-my-keys' : undefined"
+              @click="handleMenuItemClick(item.path)"
+            >
+              <span v-if="item.iconSvg" class="h-5 w-5 flex-shrink-0 sidebar-svg-icon" v-html="sanitizeSvg(item.iconSvg)"></span>
+              <component v-else :is="item.icon" class="h-5 w-5 flex-shrink-0" />
+              <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{ item.label }}</span>
+            </router-link>
+          </template>
         </div>
       </template>
     </nav>
@@ -236,6 +249,12 @@ function applyFeatureFlags(items: NavItem[]): NavItem[] {
 
 const { t } = useI18n()
 
+const props = withDefaults(defineProps<{
+  variant?: 'admin' | 'user'
+}>(), {
+  variant: 'admin'
+})
+
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
@@ -250,13 +269,13 @@ const isAdmin = computed(() => authStore.isAdmin)
 const sidebarNavRef = ref<HTMLElement | null>(null)
 const isDark = ref(document.documentElement.classList.contains('dark'))
 
-const homePath = computed(() => (isAdmin.value ? '/admin/dashboard' : '/dashboard'))
+const homePath = computed(() => (props.variant === 'admin' && isAdmin.value ? '/admin/dashboard' : '/dashboard'))
 
 // Track which parent nav groups are expanded
 const expandedGroups = ref<Set<string>>(new Set())
 
 // Site settings from appStore (cached, no flicker)
-const siteName = computed(() => appStore.siteName)
+const siteName = computed(() => props.variant === 'user' ? 'SCIbuddy' : appStore.siteName)
 const siteLogo = computed(() => sanitizeUrl(appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
 const siteVersion = computed(() => appStore.siteVersion)
 const settingsLoaded = computed(() => appStore.publicSettingsLoaded)
@@ -706,7 +725,7 @@ function buildSelfNavItems(withDashboard: boolean): NavItem[] {
     { path: '/available-channels', label: t('nav.availableChannels'), icon: ChannelIcon, hideInSimpleMode: true, featureFlag: flagAvailableChannels },
     { path: '/monitor', label: t('nav.channelStatus'), icon: SignalIcon, featureFlag: flagChannelMonitor },
     { path: '/subscriptions', label: t('nav.mySubscriptions'), icon: CreditCardIcon, hideInSimpleMode: true },
-    { path: '/purchase', label: t('nav.buySubscription'), icon: RechargeSubscriptionIcon, hideInSimpleMode: true, featureFlag: flagPayment },
+    { path: '/purchase', label: t('nav.buySubscription'), icon: RechargeSubscriptionIcon },
     { path: '/orders', label: t('nav.myOrders'), icon: OrderListIcon, hideInSimpleMode: true, featureFlag: flagPayment },
     { path: '/redeem', label: t('nav.redeem'), icon: GiftIcon, hideInSimpleMode: true },
     { path: '/affiliate', label: t('nav.affiliate'), icon: UsersIcon, hideInSimpleMode: true, featureFlag: flagAffiliate },
@@ -730,6 +749,32 @@ function finalizeNav(items: NavItem[]): NavItem[] {
 
 // User navigation items (for regular users)
 const userNavItems = computed((): NavItem[] => finalizeNav(buildSelfNavItems(true)))
+
+const userNavSections = computed(() => {
+  const items = userNavItems.value
+  const sectionDefinitions = [
+    { label: t('nav.workspace'), paths: ['/dashboard'] },
+    { label: t('nav.developerTools'), paths: ['/keys', '/batch-image', '/usage', '/available-channels', '/monitor', '/model-iq'] },
+    { label: t('nav.billingAndSubscription'), paths: ['/subscriptions', '/purchase', '/orders', '/redeem', '/affiliate'] },
+    { label: t('nav.account'), paths: ['/profile'] }
+  ]
+  const assigned = new Set(sectionDefinitions.flatMap(section => section.paths))
+  const sections = sectionDefinitions
+    .map(section => ({
+      label: section.label,
+      items: section.paths
+        .map(path => items.find(item => item.path === path))
+        .filter((item): item is NavItem => Boolean(item))
+    }))
+    .filter(section => section.items.length > 0)
+  const customItems = items.filter(item => !assigned.has(item.path))
+  if (customItems.length > 0) {
+    const accountSection = sections.find(section => section.label === t('nav.account'))
+    if (accountSection) accountSection.items.push(...customItems)
+    else sections.push({ label: t('nav.account'), items: customItems })
+  }
+  return sections
+})
 
 // Personal navigation items (for admin's "My Account" section, without Dashboard).
 // Admins access 可用渠道 from this section just like regular users — there is no
@@ -1084,5 +1129,91 @@ onBeforeUnmount(() => {
   display: block;
   width: 1.25rem;
   height: 1.25rem;
+}
+
+.sidebar-user-console {
+  border-color: #233034;
+  background: #111b1f;
+  color: #d8e1df;
+}
+
+.sidebar-user-console .sidebar-header {
+  height: 68px;
+  border-color: #253237;
+  padding-left: 1.25rem;
+  padding-right: 1.25rem;
+}
+
+.sidebar-user-console .sidebar-logo {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.sidebar-user-console .sidebar-brand-title {
+  color: #f4f8f7;
+  letter-spacing: 0;
+}
+
+.sidebar-user-console .sidebar-nav {
+  padding: 1.125rem 0.75rem;
+}
+
+.sidebar-user-console .sidebar-section {
+  margin-bottom: 1.125rem;
+}
+
+.sidebar-user-console .sidebar-section-title {
+  color: #71817f;
+  font-size: 0.625rem;
+  letter-spacing: 0;
+  margin-bottom: 0.375rem;
+}
+
+.sidebar-user-console .sidebar-link {
+  position: relative;
+  min-height: 40px;
+  border-radius: 6px;
+  color: #9fadaa;
+  padding-top: 0.625rem;
+  padding-bottom: 0.625rem;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.sidebar-user-console .sidebar-link:hover {
+  background: #182428;
+  color: #edf4f2;
+}
+
+.sidebar-user-console .sidebar-link-active {
+  background: #1b2b2f;
+  color: #59d5bd;
+}
+
+.sidebar-user-console .sidebar-link-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 2px;
+  border-radius: 2px;
+  background: #48c9ae;
+}
+
+.sidebar-user-console > div:last-of-type {
+  border-color: #253237;
+}
+
+.sidebar-user-console .sidebar-section-title::after {
+  background: #2a373b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-user-console,
+  .sidebar-user-console .sidebar-link,
+  .sidebar-brand,
+  .sidebar-label {
+    transition: none;
+  }
 }
 </style>

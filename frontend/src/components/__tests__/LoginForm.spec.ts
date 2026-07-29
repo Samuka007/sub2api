@@ -65,7 +65,7 @@ const LoginFormTestComponent = defineComponent({
           return
         }
 
-        mockPush('/dashboard')
+        mockPush(authStore.isAdmin ? '/admin/dashboard' : '/dashboard')
       } catch (error: any) {
         errorMessage.value = error.message || '登录失败'
       } finally {
@@ -110,6 +110,23 @@ describe('LoginForm 核心逻辑', () => {
       password: 'password123',
     })
     expect(mockPush).toHaveBeenCalledWith('/dashboard')
+  })
+
+  it('redirects an admin login to the admin dashboard', async () => {
+    mockLogin.mockResolvedValue({
+      access_token: 'admin-token',
+      token_type: 'Bearer',
+      user: { id: 2, username: 'admin', email: 'admin@example.com', role: 'admin', balance: 0, concurrency: 5, status: 'active', allowed_groups: null, created_at: '', updated_at: '' },
+    })
+
+    const wrapper = mount(LoginFormTestComponent)
+
+    await wrapper.find('#email').setValue('admin@example.com')
+    await wrapper.find('#password').setValue('password123')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(mockPush).toHaveBeenCalledWith('/admin/dashboard')
   })
 
   it('登录失败时显示错误信息', async () => {

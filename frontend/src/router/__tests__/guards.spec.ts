@@ -109,6 +109,10 @@ function simulateGuard(
     return '/login'
   }
 
+  if (toPath === '/dashboard' && authState.isAdmin) {
+    return '/admin/dashboard'
+  }
+
   // 需要管理员但不是管理员
   if (requiresAdmin && !authState.isAdmin) {
     return '/dashboard'
@@ -249,9 +253,9 @@ describe('路由守卫逻辑', () => {
       expect(redirect).toBeNull()
     })
 
-    it('访问用户页面允许通过', () => {
+    it('访问用户仪表盘重定向到管理员仪表盘', () => {
       const redirect = simulateGuard('/dashboard', {}, authState)
-      expect(redirect).toBeNull()
+      expect(redirect).toBe('/admin/dashboard')
     })
   })
 
