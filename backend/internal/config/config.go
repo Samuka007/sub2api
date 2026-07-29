@@ -2231,7 +2231,7 @@ func setDefaults() {
 	viper.SetDefault("quota_recovery.interval_seconds", 86400)
 	viper.SetDefault("quota_recovery.batch_size", 50)
 	viper.SetDefault("quota_recovery.concurrency", 3)
-	viper.SetDefault("quota_recovery.timeout_seconds", 25)
+	viper.SetDefault("quota_recovery.timeout_seconds", 75)
 	viper.SetDefault("quota_recovery.jitter_seconds", 10)
 
 	// Gateway

@@ -20,7 +20,7 @@ func TestQuotaRecoveryDefaults(t *testing.T) {
 	require.Equal(t, 86400, cfg.QuotaRecovery.IntervalSeconds)
 	require.Equal(t, 50, cfg.QuotaRecovery.BatchSize)
 	require.Equal(t, 3, cfg.QuotaRecovery.Concurrency)
-	require.Equal(t, 25, cfg.QuotaRecovery.TimeoutSeconds)
+	require.Equal(t, 75, cfg.QuotaRecovery.TimeoutSeconds)
 	require.Equal(t, 10, cfg.QuotaRecovery.JitterSeconds)
 }
 

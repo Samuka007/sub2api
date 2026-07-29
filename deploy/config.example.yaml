@@ -888,7 +888,8 @@ quota_recovery:
   # Database page size; this is not a per-cycle account limit.
   batch_size: 50
   concurrency: 3
-  timeout_seconds: 25
+  # Allows query -> reset-credit consume -> post-reset query for one account.
+  timeout_seconds: 75
   # Random per-account delay to avoid synchronized upstream requests.
   jitter_seconds: 10
 

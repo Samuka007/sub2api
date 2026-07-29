@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
@@ -10,7 +12,7 @@ import (
 
 const (
 	quotaRecoveryExhaustionPercent = 100.0
-	quotaRecoveryCheckTimeout      = 35 * time.Second
+	quotaRecoveryCheckTimeout      = 70 * time.Second
 	quotaRecoveryResetTolerance    = 30 * time.Second
 	openAISparkMeteredFeature      = "codex_bengalfox"
 )
@@ -49,6 +51,15 @@ type OpenAIQuotaUsageReader interface {
 	QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error)
 }
 
+// OpenAIQuotaRecoveryClient adds the idempotent reset operation used when an
+// exhausted global quota still has a reset credit. *OpenAIQuotaService satisfies
+// this interface; read-only test doubles may continue to implement only the
+// usage reader.
+type OpenAIQuotaRecoveryClient interface {
+	OpenAIQuotaUsageReader
+	ResetCreditWithRequestID(ctx context.Context, accountID int64, requestID string) (*OpenAIQuotaResetResult, error)
+}
+
 // AnthropicOAuthUsageReader is the read-only dependency used for Anthropic
 // OAuth quota checks. *AccountUsageService satisfies this interface without
 // invoking an inference endpoint.
@@ -57,7 +68,8 @@ type AnthropicOAuthUsageReader interface {
 }
 
 // QuotaRecoveryChecker converts provider-specific quota responses into a
-// conservative three-state decision. It never mutates account state.
+// conservative three-state decision. For OpenAI global quota it may consume an
+// available reset credit, but it never mutates local account state.
 type QuotaRecoveryChecker struct {
 	openAI    OpenAIQuotaUsageReader
 	anthropic AnthropicOAuthUsageReader
@@ -73,8 +85,9 @@ func NewQuotaRecoveryChecker(
 	}
 }
 
-// Check queries only authoritative, read-only quota endpoints. Unsupported
-// providers/account types, incomplete responses, and query failures are
+// Check uses authoritative quota endpoints. OpenAI global quota may consume an
+// idempotent reset credit after an exhausted response; all other checks are
+// read-only. Unsupported accounts, incomplete responses, and failures are
 // deliberately reported as unknown.
 func (c *QuotaRecoveryChecker) Check(ctx context.Context, account *Account) QuotaRecoveryCheckResult {
 	if account == nil || account.ID <= 0 {
@@ -111,7 +124,54 @@ func (c *QuotaRecoveryChecker) checkOpenAI(ctx context.Context, account *Account
 	if err != nil {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "query_failed")
 	}
-	return classifyOpenAIQuotaRecovery(account, usage)
+	result := classifyOpenAIQuotaRecovery(account, usage)
+	if result.Verdict != QuotaRecoveryExhausted {
+		return result
+	}
+	return c.recoverOpenAIWithResetCredit(queryCtx, account, usage, result)
+}
+
+func (c *QuotaRecoveryChecker) recoverOpenAIWithResetCredit(
+	ctx context.Context,
+	account *Account,
+	usage *OpenAIQuotaUsage,
+	exhausted QuotaRecoveryCheckResult,
+) QuotaRecoveryCheckResult {
+	if account == nil || account.IsShadow() || account.QuotaDimensionOrDefault() == QuotaDimensionSpark {
+		return exhausted
+	}
+	if usage == nil || usage.RateLimitResetCredits == nil || usage.RateLimitResetCredits.AvailableCount <= 0 {
+		return exhausted
+	}
+	client, ok := c.openAI.(OpenAIQuotaRecoveryClient)
+	if !ok {
+		return exhausted
+	}
+	// Exhausted responses normally fail closed before checking window identity.
+	// A reset consumes a scarce credit, so require the stronger match here.
+	if !matchesOpenAIPersistedQuotaReset(account, usage) {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "quota_window_mismatch")
+	}
+
+	requestID, ok := quotaRecoveryRedeemRequestID(account)
+	if !ok {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_rate_limit_observation")
+	}
+	if _, err := client.ResetCreditWithRequestID(ctx, account.ID, requestID); err != nil {
+		if ctx.Err() != nil {
+			return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "context_done")
+		}
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "reset_credit_failed")
+	}
+
+	postResetUsage, err := client.QueryUsage(ctx, account.ID)
+	if ctx.Err() != nil {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "context_done")
+	}
+	if err != nil {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "post_reset_query_failed")
+	}
+	return classifyOpenAIQuotaRecoveryAfterReset(account, postResetUsage)
 }
 
 func (c *QuotaRecoveryChecker) checkAnthropic(ctx context.Context, account *Account) QuotaRecoveryCheckResult {
@@ -135,9 +195,37 @@ func classifyOpenAIQuotaRecovery(account *Account, usage *OpenAIQuotaUsage) Quot
 	if usage == nil {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_quota_data")
 	}
+	limits, ok := openAIRateLimitsForAccount(account, usage)
+	if !ok {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_quota_data")
+	}
+	return classifyOpenAIRateLimits(account.RateLimitResetAt, usage.FetchedAt, limits, true)
+}
 
+func classifyOpenAIQuotaRecoveryAfterReset(account *Account, usage *OpenAIQuotaUsage) QuotaRecoveryCheckResult {
+	if usage == nil {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_post_reset_quota_data")
+	}
+	limits, ok := openAIRateLimitsForAccount(account, usage)
+	if !ok {
+		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_post_reset_quota_data")
+	}
+	result := classifyOpenAIRateLimits(nil, usage.FetchedAt, limits, false)
+	switch result.Verdict {
+	case QuotaRecoveryAvailable:
+		result.Reason = "quota_reset_credit_recovered"
+	case QuotaRecoveryExhausted:
+		result.Reason = "quota_exhausted_after_reset"
+	}
+	return result
+}
+
+func openAIRateLimitsForAccount(account *Account, usage *OpenAIQuotaUsage) ([]*OpenAIRateLimit, bool) {
+	if account == nil || usage == nil {
+		return nil, false
+	}
 	if account.QuotaDimensionOrDefault() != QuotaDimensionSpark {
-		return classifyOpenAIRateLimits(account.RateLimitResetAt, usage.FetchedAt, []*OpenAIRateLimit{usage.RateLimit})
+		return []*OpenAIRateLimit{usage.RateLimit}, usage.RateLimit != nil
 	}
 
 	limits := make([]*OpenAIRateLimit, 0, 1)
@@ -147,13 +235,15 @@ func classifyOpenAIQuotaRecovery(account *Account, usage *OpenAIQuotaUsage) Quot
 			limits = append(limits, additional.RateLimit)
 		}
 	}
-	if len(limits) == 0 {
-		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_quota_data")
-	}
-	return classifyOpenAIRateLimits(account.RateLimitResetAt, usage.FetchedAt, limits)
+	return limits, len(limits) > 0
 }
 
-func classifyOpenAIRateLimits(persistedResetAt *time.Time, fetchedAt int64, limits []*OpenAIRateLimit) QuotaRecoveryCheckResult {
+func classifyOpenAIRateLimits(
+	persistedResetAt *time.Time,
+	fetchedAt int64,
+	limits []*OpenAIRateLimit,
+	requirePersistedReset bool,
+) QuotaRecoveryCheckResult {
 	if len(limits) == 0 {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "missing_quota_data")
 	}
@@ -187,10 +277,67 @@ func classifyOpenAIRateLimits(persistedResetAt *time.Time, fetchedAt int64, limi
 	if exhausted {
 		return authoritativeQuotaRecovery(QuotaRecoveryExhausted, QuotaRecoverySourceOpenAI, "quota_exhausted")
 	}
-	if !matchesPersistedQuotaReset(persistedResetAt, providerResets) {
+	if requirePersistedReset && !matchesPersistedQuotaReset(persistedResetAt, providerResets) {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "quota_window_mismatch")
 	}
 	return authoritativeQuotaRecovery(QuotaRecoveryAvailable, QuotaRecoverySourceOpenAI, "quota_available")
+}
+
+func matchesOpenAIPersistedQuotaReset(account *Account, usage *OpenAIQuotaUsage) bool {
+	limits, ok := openAIRateLimitsForAccount(account, usage)
+	if !ok {
+		return false
+	}
+	providerResets := make([]time.Time, 0, len(limits)*2)
+	for _, limit := range limits {
+		if limit == nil || !limit.hasQuotaRecoveryEvidence() || limit.PrimaryWindow == nil {
+			return false
+		}
+		windows := []*OpenAIRateLimitWindow{limit.PrimaryWindow}
+		if limit.SecondaryWindow != nil {
+			windows = append(windows, limit.SecondaryWindow)
+		}
+		for _, window := range windows {
+			if !validOpenAIQuotaWindow(window) {
+				return false
+			}
+			resetAt, ok := openAIQuotaWindowResetAt(window, usage.FetchedAt)
+			if !ok {
+				return false
+			}
+			providerResets = append(providerResets, resetAt)
+		}
+	}
+	return matchesPersistedQuotaReset(account.RateLimitResetAt, providerResets)
+}
+
+// quotaRecoveryRedeemRequestID is stable for one persisted 429 observation.
+// Retrying an ambiguous reset therefore reuses the upstream idempotency key,
+// while a later rate-limit generation receives a different key.
+func quotaRecoveryRedeemRequestID(account *Account) (string, bool) {
+	if account == nil || account.ID <= 0 || account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
+		return "", false
+	}
+	seed := fmt.Sprintf(
+		"sub2api:quota-recovery:%d:%d:%d",
+		account.ID,
+		account.RateLimitedAt.UTC().UnixNano(),
+		account.RateLimitResetAt.UTC().UnixNano(),
+	)
+	digest := sha256.Sum256([]byte(seed))
+	// Keep the format accepted by the existing consume endpoint while deriving
+	// the bytes deterministically from the observation.
+	digest[6] = (digest[6] & 0x0f) | 0x40
+	digest[8] = (digest[8] & 0x3f) | 0x80
+	hexValue := hex.EncodeToString(digest[:16])
+	return fmt.Sprintf(
+		"%s-%s-%s-%s-%s",
+		hexValue[0:8],
+		hexValue[8:12],
+		hexValue[12:16],
+		hexValue[16:20],
+		hexValue[20:32],
+	), true
 }
 
 func validOpenAIQuotaWindow(window *OpenAIRateLimitWindow) bool {
@@ -353,4 +500,5 @@ func (s *AccountUsageService) QueryAnthropicOAuthUsage(ctx context.Context, acco
 }
 
 var _ OpenAIQuotaUsageReader = (*OpenAIQuotaService)(nil)
+var _ OpenAIQuotaRecoveryClient = (*OpenAIQuotaService)(nil)
 var _ AnthropicOAuthUsageReader = (*AccountUsageService)(nil)

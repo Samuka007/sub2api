@@ -303,6 +303,45 @@ func TestQuotaRecoveryRunOnceRecoversOnlyAuthoritativeAvailable(t *testing.T) {
 	require.Equal(t, originalAvailable, available)
 }
 
+func TestQuotaRecoveryRunOnceConsumesCreditAndClearsRateLimit(t *testing.T) {
+	now := time.Now().UTC()
+	account := quotaRecoveryTestAccount(4, now)
+	resetAt := account.RateLimitResetAt.UTC()
+	exhaustedUsage := &OpenAIQuotaUsage{
+		FetchedAt: now.Unix(),
+		RateLimit: openAIRateLimitForRecovery(false, true, 100, quotaRecoveryFloat(100)),
+		RateLimitResetCredits: &OpenAIRateLimitResetCredits{
+			AvailableCount: 1,
+		},
+	}
+	exhaustedUsage.RateLimit.PrimaryWindow.ResetAt = resetAt.Unix()
+	exhaustedUsage.RateLimit.SecondaryWindow.ResetAt = resetAt.Unix()
+	postResetUsage := &OpenAIQuotaUsage{
+		FetchedAt: now.Add(time.Second).Unix(),
+		RateLimit: openAIRateLimitForRecovery(true, false, 0, quotaRecoveryFloat(0)),
+	}
+	postResetUsage.RateLimit.PrimaryWindow.ResetAt = resetAt.Add(5 * time.Hour).Unix()
+	postResetUsage.RateLimit.SecondaryWindow.ResetAt = resetAt.Add(7 * 24 * time.Hour).Unix()
+	client := &quotaRecoveryOpenAIResetClientStub{usages: []*OpenAIQuotaUsage{exhaustedUsage, postResetUsage}}
+	checker := NewQuotaRecoveryChecker(client, nil)
+	repo := &quotaRecoveryRepoStub{candidates: []Account{account}}
+	blocker := &quotaRecoveryRuntimeBlockerStub{}
+	blocker.BlockAccountScheduling(&account, resetAt, "old-429")
+	svc := newQuotaRecoveryService(repo, checker, blocker, quotaRecoveryTestConfig())
+	svc.jitterFor = func(time.Duration) time.Duration { return 0 }
+
+	result, err := svc.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Checked)
+	require.Equal(t, 1, result.Recovered)
+	require.Zero(t, result.Exhausted)
+	require.Zero(t, result.Unknown)
+	require.Equal(t, 1, client.resetCalls)
+	require.Len(t, repo.clearCallSnapshot(), 1)
+	require.False(t, blocker.isBlocked(account.ID))
+}
+
 func TestQuotaRecoveryRunOnceFailsClosedForWeakOrStaleEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	repo := &quotaRecoveryRepoStub{candidates: []Account{

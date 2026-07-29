@@ -171,6 +171,10 @@ Hermes 是默认关闭的后台恢复任务，用于重新核对仍处于限流�
 保存的重置窗口匹配时，才会通过 compare-and-clear 清除限流状态。查询失败、证据缺失、窗口不匹配
 或任务超时都会保持原限流状态，按 fail-closed 处理。
 
+对于 OpenAI 全局额度，若周额度已耗尽但仍有 reset credit，Hermes 会用绑定本次限流观测的稳定
+request ID 消费一次刷新次数，并在重新查询确认额度可用后恢复账号。同一次限流观测的重试会复用
+request ID；Spark 维度不会消费父账号的 reset credit。
+
 任务通过 PostgreSQL advisory lock 保证只有一个运行实例，并在清除数据库状态前检查运行时限流
 状态没有被更新。当前仅支持单应用进程部署，因为进程内运行时限流状态尚不能跨应用实例失效。
 
@@ -369,7 +373,7 @@ quota_recovery:
   interval_seconds: 86400
   batch_size: 50
   concurrency: 3
-  timeout_seconds: 25
+  timeout_seconds: 75
   jitter_seconds: 10
 ```
 

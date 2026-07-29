@@ -22,7 +22,7 @@ const (
 	defaultQuotaRecoveryInterval    = 24 * time.Hour
 	defaultQuotaRecoveryBatchSize   = 50
 	defaultQuotaRecoveryConcurrency = 3
-	defaultQuotaRecoveryTimeout     = 25 * time.Second
+	defaultQuotaRecoveryTimeout     = 75 * time.Second
 )
 
 type quotaRecoveryLifecycleState uint8

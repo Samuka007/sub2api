@@ -27,6 +27,45 @@ func (s *quotaRecoveryOpenAIReaderStub) QueryUsage(_ context.Context, accountID 
 	return s.usage, s.err
 }
 
+type quotaRecoveryOpenAIResetClientStub struct {
+	usages          []*OpenAIQuotaUsage
+	queryErrors     []error
+	queryCalls      int
+	resetErr        error
+	resetCalls      int
+	resetAccountIDs []int64
+	resetRequestIDs []string
+}
+
+func (s *quotaRecoveryOpenAIResetClientStub) QueryUsage(_ context.Context, _ int64) (*OpenAIQuotaUsage, error) {
+	call := s.queryCalls
+	s.queryCalls++
+	if call < len(s.queryErrors) && s.queryErrors[call] != nil {
+		return nil, s.queryErrors[call]
+	}
+	if len(s.usages) == 0 {
+		return nil, nil
+	}
+	if call >= len(s.usages) {
+		call = len(s.usages) - 1
+	}
+	return s.usages[call], nil
+}
+
+func (s *quotaRecoveryOpenAIResetClientStub) ResetCreditWithRequestID(
+	_ context.Context,
+	accountID int64,
+	requestID string,
+) (*OpenAIQuotaResetResult, error) {
+	s.resetCalls++
+	s.resetAccountIDs = append(s.resetAccountIDs, accountID)
+	s.resetRequestIDs = append(s.resetRequestIDs, requestID)
+	if s.resetErr != nil {
+		return nil, s.resetErr
+	}
+	return &OpenAIQuotaResetResult{Code: "success", WindowsReset: 2}, nil
+}
+
 type quotaRecoveryAnthropicReaderStub struct {
 	usage   *ClaudeUsageResponse
 	err     error
@@ -405,6 +444,152 @@ func TestQuotaRecoveryChecker_OpenAIRequiresMatchingAccountWindow(t *testing.T) 
 			}
 			assertQuotaRecoveryState(t, NewQuotaRecoveryChecker(reader, nil).Check(context.Background(), account), tt.want)
 		})
+	}
+}
+
+func TestQuotaRecoveryChecker_OpenAIResetCreditRecovery(t *testing.T) {
+	limitedAt := quotaRecoveryTestFiveHourReset.Add(-time.Hour)
+	account := &Account{
+		ID:               47,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		RateLimitedAt:    &limitedAt,
+		RateLimitResetAt: quotaRecoveryTime(quotaRecoveryTestFiveHourReset),
+	}
+	exhaustedUsage := &OpenAIQuotaUsage{
+		FetchedAt: quotaRecoveryTestFiveHourReset.Add(-time.Minute).Unix(),
+		RateLimit: openAIRateLimitForRecovery(false, true, 100, quotaRecoveryFloat(100)),
+		RateLimitResetCredits: &OpenAIRateLimitResetCredits{
+			AvailableCount: 1,
+		},
+	}
+	postResetUsage := &OpenAIQuotaUsage{
+		FetchedAt: quotaRecoveryTestFiveHourReset.Unix(),
+		RateLimit: openAIRateLimitForRecovery(true, false, 0, quotaRecoveryFloat(0)),
+	}
+	postResetWindow := quotaRecoveryTestFiveHourReset.Add(7 * 24 * time.Hour).Unix()
+	postResetUsage.RateLimit.PrimaryWindow.ResetAt = postResetWindow
+	postResetUsage.RateLimit.SecondaryWindow.ResetAt = postResetWindow
+	client := &quotaRecoveryOpenAIResetClientStub{usages: []*OpenAIQuotaUsage{exhaustedUsage, postResetUsage}}
+
+	got := NewQuotaRecoveryChecker(client, nil).Check(context.Background(), account)
+
+	assertQuotaRecoveryState(t, got, QuotaRecoveryAvailable)
+	if got.Reason != "quota_reset_credit_recovered" {
+		t.Fatalf("decision reason = %q, want quota_reset_credit_recovered", got.Reason)
+	}
+	if client.queryCalls != 2 || client.resetCalls != 1 {
+		t.Fatalf("query calls = %d, reset calls = %d", client.queryCalls, client.resetCalls)
+	}
+	if client.resetAccountIDs[0] != account.ID || len(client.resetRequestIDs[0]) != 36 {
+		t.Fatalf("unexpected reset call: account IDs = %v, request IDs = %v", client.resetAccountIDs, client.resetRequestIDs)
+	}
+}
+
+func TestQuotaRecoveryChecker_OpenAIResetCreditFailuresStayLimited(t *testing.T) {
+	limitedAt := quotaRecoveryTestFiveHourReset.Add(-time.Hour)
+	baseAccount := Account{
+		ID:               48,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		RateLimitedAt:    &limitedAt,
+		RateLimitResetAt: quotaRecoveryTime(quotaRecoveryTestFiveHourReset),
+	}
+	exhaustedUsage := func(credits int) *OpenAIQuotaUsage {
+		return &OpenAIQuotaUsage{
+			FetchedAt: quotaRecoveryTestFiveHourReset.Add(-time.Minute).Unix(),
+			RateLimit: openAIRateLimitForRecovery(false, true, 100, quotaRecoveryFloat(100)),
+			RateLimitResetCredits: &OpenAIRateLimitResetCredits{
+				AvailableCount: credits,
+			},
+		}
+	}
+
+	t.Run("no reset credit remains exhausted", func(t *testing.T) {
+		client := &quotaRecoveryOpenAIResetClientStub{usages: []*OpenAIQuotaUsage{exhaustedUsage(0)}}
+		got := NewQuotaRecoveryChecker(client, nil).Check(context.Background(), &baseAccount)
+		assertQuotaRecoveryState(t, got, QuotaRecoveryExhausted)
+		if client.resetCalls != 0 || client.queryCalls != 1 {
+			t.Fatalf("query calls = %d, reset calls = %d", client.queryCalls, client.resetCalls)
+		}
+	})
+
+	t.Run("mismatched quota window does not consume credit", func(t *testing.T) {
+		account := baseAccount
+		account.RateLimitResetAt = quotaRecoveryTime(quotaRecoveryTestFiveHourReset.Add(-10 * time.Minute))
+		client := &quotaRecoveryOpenAIResetClientStub{usages: []*OpenAIQuotaUsage{exhaustedUsage(1)}}
+		got := NewQuotaRecoveryChecker(client, nil).Check(context.Background(), &account)
+		assertQuotaRecoveryState(t, got, QuotaRecoveryUnknown)
+		if got.Reason != "quota_window_mismatch" || client.resetCalls != 0 {
+			t.Fatalf("reason = %q, reset calls = %d", got.Reason, client.resetCalls)
+		}
+	})
+
+	t.Run("reset failure is unknown and reuses request ID", func(t *testing.T) {
+		client := &quotaRecoveryOpenAIResetClientStub{
+			usages:   []*OpenAIQuotaUsage{exhaustedUsage(1)},
+			resetErr: errors.New("ambiguous reset failure"),
+		}
+		checker := NewQuotaRecoveryChecker(client, nil)
+		first := checker.Check(context.Background(), &baseAccount)
+		second := checker.Check(context.Background(), &baseAccount)
+		assertQuotaRecoveryState(t, first, QuotaRecoveryUnknown)
+		assertQuotaRecoveryState(t, second, QuotaRecoveryUnknown)
+		if first.Reason != "reset_credit_failed" || second.Reason != "reset_credit_failed" {
+			t.Fatalf("reset failure reasons = %q, %q", first.Reason, second.Reason)
+		}
+		if client.resetCalls != 2 || client.resetRequestIDs[0] != client.resetRequestIDs[1] {
+			t.Fatalf("reset request IDs = %v", client.resetRequestIDs)
+		}
+		laterObservation := baseAccount
+		laterLimitedAt := limitedAt.Add(time.Nanosecond)
+		laterObservation.RateLimitedAt = &laterLimitedAt
+		laterRequestID, ok := quotaRecoveryRedeemRequestID(&laterObservation)
+		if !ok || laterRequestID == client.resetRequestIDs[0] {
+			t.Fatalf("later observation request ID = %q, previous = %q", laterRequestID, client.resetRequestIDs[0])
+		}
+	})
+
+	t.Run("post reset query failure is unknown", func(t *testing.T) {
+		client := &quotaRecoveryOpenAIResetClientStub{
+			usages:      []*OpenAIQuotaUsage{exhaustedUsage(1)},
+			queryErrors: []error{nil, errors.New("post-reset query failed")},
+		}
+		got := NewQuotaRecoveryChecker(client, nil).Check(context.Background(), &baseAccount)
+		assertQuotaRecoveryState(t, got, QuotaRecoveryUnknown)
+		if got.Reason != "post_reset_query_failed" || client.resetCalls != 1 {
+			t.Fatalf("reason = %q, reset calls = %d", got.Reason, client.resetCalls)
+		}
+	})
+}
+
+func TestQuotaRecoveryChecker_OpenAISparkDoesNotConsumeGlobalResetCredit(t *testing.T) {
+	limitedAt := quotaRecoveryTestFiveHourReset.Add(-time.Hour)
+	parentID := int64(49)
+	account := &Account{
+		ID:               50,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		ParentAccountID:  &parentID,
+		QuotaDimension:   QuotaDimensionSpark,
+		RateLimitedAt:    &limitedAt,
+		RateLimitResetAt: quotaRecoveryTime(quotaRecoveryTestFiveHourReset),
+	}
+	usage := &OpenAIQuotaUsage{
+		RateLimit: openAIRateLimitForRecovery(true, false, 10, nil),
+		AdditionalRateLimits: []OpenAIAdditionalRateLimit{{
+			MeteredFeature: openAISparkMeteredFeature,
+			RateLimit:      openAIRateLimitForRecovery(false, true, 100, nil),
+		}},
+		RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 1},
+	}
+	client := &quotaRecoveryOpenAIResetClientStub{usages: []*OpenAIQuotaUsage{usage}}
+
+	got := NewQuotaRecoveryChecker(client, nil).Check(context.Background(), account)
+
+	assertQuotaRecoveryState(t, got, QuotaRecoveryExhausted)
+	if client.resetCalls != 0 {
+		t.Fatalf("reset calls = %d, want 0", client.resetCalls)
 	}
 }
 
