@@ -2,10 +2,11 @@
 
 ## 2026-07-23 — Langfuse long-horizon conversation (P0/P1)
 
-### Spec / plan
+### Durable references
 
-- Spec: `docs/superpowers/specs/2026-07-23-langfuse-long-horizon-conversation-design.md`
-- Plan: `docs/superpowers/plans/2026-07-23-langfuse-long-horizon-conversation.md`
+- Runtime behavior: `backend/internal/modeltrace/`
+- E2E behavior mapping: `.agent/skills/sub2api-model-trace-e2e/references/otel-spec-mapping.md`
+- The original local Superpowers plan/spec were working artifacts and are intentionally not tracked.
 
 ### P0 — Session extraction
 
@@ -155,7 +156,7 @@
 - 引入带 `SessionID` / `SessionSource` / `ThreadID` / `ThreadSource` 与 session conflict 标记的结构化关联结果。
 - HTTP middleware 首次记录 header 关联，读取请求体后按协议优先级合并；Responses WebSocket 回合复用相同提取器。
 - 根 span 记录低基数 session/thread source、独立 thread ID 与 conflict 布尔属性；原始冲突 ID 不进入属性。
-- 增加协议、优先级、JSON/legacy、thread 独立性、模型无关性以及 HTTP/WS 接线测试，并运行 modeltrace 单测与 `skills/sub2api-model-trace-e2e/` smoke。
+- 增加协议、优先级、JSON/legacy、thread 独立性、模型无关性以及 HTTP/WS 接线测试，并运行 modeltrace 单测与 `.agent/skills/sub2api-model-trace-e2e/` smoke。
 
 ### 安全取值位置
 
@@ -173,7 +174,7 @@
 
 ### Smoke 边界
 
-- `skills/sub2api-model-trace-e2e/SKILL.md` 要求的 `run_e2e.sh` 依赖 Colima profile `swebench`。本机已安装 Colima，但 guest Docker provisioning 因宿主环境缺少可用的 containerd 服务未完成；因此没有把 Colima VM 结果当作通过依据。
+- `.agent/skills/sub2api-model-trace-e2e/SKILL.md` 要求的 `run_e2e.sh` 依赖 Colima profile `swebench`。本机已安装 Colima，但 guest Docker provisioning 因宿主环境缺少可用的 containerd 服务未完成；因此没有把 Colima VM 结果当作通过依据。
 - 为完成行为验证，使用同一脚本通过宿主 rootful Docker socket `/var/run/docker.sock` 运行临时 fallback：镜像来自国内镜像，Go 客户端使用 host network，编译目标按宿主 `linux/amd64` 适配；Langfuse MinIO 数据绑定到 `/data`，绕过根分区空间保留阈值。该路径仅为本机验证适配，不改变生产代码或脚本。
 - `run_e2e.sh` 完整 smoke 通过：Langfuse `3.224.2`，stdout 为 `trace_id=174c92bd5cb108117971adb3a9bead20`、观测数 `1`、`VERIFY_OK`；日志含 `full-scale e2e passed`，HTTP/WS、failover、断连、配置快照、OTLP fail-open、200 项 batch 续接及敏感内容门禁均通过。
 - 单测与 race 使用 `golang:1.26.5` 容器完成；本记录不包含任何 Langfuse、模型供应商或本地测试凭据。

@@ -2,7 +2,7 @@
 
 本文档用于说明 4Sub2 的私有功能、源代码架构，以及团队后续协作开发时应遵循的约定。
 
-[查看 Git 协作与上游同步规范](GIT_WORKFLOW.md) | [查看历史源码恢复记录](RECOVERY.md) | [查看最新生产部署记录](docs/deployments/company-v0.1.164.1.md)
+[Git 与 Agent 协作规范](GIT_WORKFLOW.md) | [本地开发指南](DEV_GUIDE.md) | [文档边界](docs/README.md) | [历史源码恢复记录](RECOVERY.md) | [最新生产部署记录](docs/deployments/company-v0.1.164.1.md)
 
 ## 仓库信息
 
@@ -412,7 +412,10 @@ quota_recovery:
 |   `-- public/                     # 前端静态资源
 |-- deploy/                         # Docker Compose 和部署脚本
 |-- docs/                           # 功能与运维文档
-|-- GIT_WORKFLOW.md                 # Git 协作、上游同步和回滚流程
+|-- .agent/skills/                  # Agent Skill 唯一真源；Claude/Codex 通过软链接自动发现
+|-- GIT_WORKFLOW.md                 # Issue、worktree、测试、评审、PR 与发布流程
+|-- DEV_GUIDE.md                    # 本地环境、生成和完整质量门禁
+|-- AGENTS.md                       # Agent 必须遵守的项目级原则
 |-- README.md                       # 私有功能和架构说明
 |-- README_CN.md                    # 上游中文说明
 |-- README_JA.md                    # 上游日文说明
@@ -463,42 +466,21 @@ frontend/src/views/user/__tests__/ModelIqView.spec.ts
 
 ## 团队开发流程
 
-本仓库采用 `vendor/main + main + feature/* + fix/* + sync/* + release tag` 模型。
-`dev_xq`、`dev_sh` 仅作为迁移前的归档分支，不再用于新开发。
+本仓库采用 `Issue → 独立分支/worktree → 实现与 smoke → 长期文档 → 完整质量门禁 → AI 评审与修复 → Pull Request → 人工审批` 流程。`main` 和 `vendor/main` 禁止直接修改或推送。
 
-完整的分支职责、上游同步、Pull Request、发布、部署和回滚规则见
-[`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。正常开发不得直接提交到 `main`，每项需求必须从
-最新 `main` 创建独立临时分支并通过 Pull Request 合入。
+每项变更必须先创建或复用 GitHub Issue，由执行者 assign 给自己并补齐方案、验收标准和影响；随后从最新 `origin/main` 创建独立分支。Agent 必须使用独立 `git worktree`，避免污染用户或其他任务的工作区。
 
-### 前端检查
+Pull Request 前统一运行：
 
 ```bash
-cd frontend
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm lint:check
-pnpm test:run
+make pr-check
 ```
 
-### 后端检查
+该门禁覆盖当前 CI 的仓库治理、部署契约、后端测试/构建/lint/安全检查和前端 lint/typecheck/Vitest/build/依赖审计。行为变更还必须完成真实用户路径 smoke；涉及模型追踪时执行 `.agent/skills/sub2api-model-trace-e2e/` 的对应 smoke。
 
-```bash
-cd backend
-go test -tags=unit ./...
-go test -tags=integration ./...
-golangci-lint run ./...
-```
+完整 diff 必须按 [`.agent/skills/reviewing-code-changes/SKILL.md`](.agent/skills/reviewing-code-changes/SKILL.md) 评审。Reviewer 保持只读，主控修复已采纳的 P0/P1 并重跑相关测试和定向复审；仍有阻塞 finding、失败或未验证关键路径时不得创建 PR。
 
-修改 Ent Schema 后执行并提交生成文件：
-
-```bash
-cd backend
-go generate ./ent
-go generate ./cmd/server
-```
-
-仅修改 Wire Provider 时执行 `go generate ./cmd/server`。需要将重新生成的
-`backend/cmd/server/wire_gen.go` 与 Provider 修改一起提交。
+PR 使用中文标题和正文，以 `Closes #<issue>` 关联对应 Issue，并通过全部 required checks、至少一名非作者人工审批和全部 discussion resolution 后合入。详细命令、上游同步、发布和回滚规则见 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)；本地环境见 [`DEV_GUIDE.md`](DEV_GUIDE.md)；文档提交边界见 [`docs/README.md`](docs/README.md)。
 
 ## 安全与维护规则
 

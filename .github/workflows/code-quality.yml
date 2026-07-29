@@ -18,6 +18,8 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -61,6 +63,28 @@ jobs:
             git cat-file -e "$UPSTREAM_COMMIT^{commit}"
             git merge-base --is-ancestor "$UPSTREAM_COMMIT" HEAD
           fi
+      - name: Validate linked issue ownership
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: /bin/bash tools/check_pr_issue_ownership.sh
+
+  repository-governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Test repository governance gates
+        run: |
+          python3 -m unittest tools.test_check_repository_governance
+          /bin/bash tools/check_pr_issue_ownership_test.sh
+          /bin/bash tools/test_review_skill.sh
+
+      - name: Check repository governance
+        run: python3 tools/check_repository_governance.py
 
   deploy-contract:
     if: github.event_name != 'schedule'

@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend
+.PHONY: build build-backend build-frontend test test-backend test-frontend pr-check
 
 # 一键编译前后端
 build: build-backend build-frontend
@@ -21,3 +21,7 @@ test-frontend:
 	@pnpm --dir frontend run lint:check
 	@pnpm --dir frontend run typecheck
 	@pnpm --dir frontend run test:run
+
+# 创建 Pull Request 前运行与 CI 对齐的完整质量门禁
+pr-check:
+	@./tools/pr_gate.sh

@@ -1,35 +1,85 @@
-# Sub2API 项目规约
+# Sub2API 项目级 Agent 规约
 
-本文件是 sub2api 仓库的项目级规约，补充全局 `~/.omp/agent/AGENTS.md`。冲突时以全局规约为准，但本文件的 GitHub 相关约定在本仓库内生效。
+本文件只定义所有 Agent 必须遵守的仓库原则和门禁。详细命令以 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md) 与 [`DEV_GUIDE.md`](DEV_GUIDE.md) 为准；产品与架构事实以 [`README.md`](README.md) 为准。
 
-## 远端与分支
+## 1. 规则优先级
 
-- 本仓库远端是 **GitHub**：`origin` = `git@github.com:Vitus213/sub2api.git`（个人 fork）。
-- 分支命名：功能分支 `<scope>/<short-slug>`。模型请求 OTEL→Langfuse 透传追踪这个特性（`backend/internal/modeltrace/`、`skills/sub2api-model-trace-e2e/`）归在 `otel/` 前缀下，如 `otel/model-trace`。OTel 是功能特性名，不是分支体系。
-- **禁止**：把本仓库路由给 `antcode-skill`；本仓库与 AntCode 无关。涉及 PR / Issue / 分支 / pipeline 时使用 `gh` CLI 或 `git`。
-- 提交前 `git status --porcelain` + `git diff --cached --name-only` 自检；未授权不提交。
-- Pull Request 标题和正文必须使用中文；命令、文件路径、代码标识符、GitHub 关联关键字（如 `Closes #20`）及必要的技术术语可保留原文。
+1. 系统与用户明确指令。
+2. 本文件的安全、授权和协作门禁。
+3. `GIT_WORKFLOW.md` 的执行流程。
+4. `DEV_GUIDE.md`、代码、测试和具体 Skill 的领域规则。
 
-## 工具偏好
+发现文档与代码、CI 或运行结果冲突时，以当前代码、CI 和新鲜运行证据为准，并在本次分支中修正文档；不得自行绕过门禁。
 
-- GitHub 操作：优先 `gh` CLI（`gh pr create`、`gh pr view`、`gh issue list` 等）；缺失时 fallback 到 `git push` + 浏览器。
-- 代码搜索：优先 `grep` / `glob` / `lsp`，不用 antcode search。
-- CI：本仓库走 GitHub Actions（`.github/workflows/`），不涉及 AntCode pipeline。
+## 2. Issue 先行
 
-## OTEL 与 e2e 测试
+任何代码、配置、CI、依赖、仓库行为或长期文档变更开始前，必须有一个对应的 GitHub Issue。
 
-- 模型请求 OTEL/Langfuse 追踪的实现位于 `backend/internal/modeltrace/`，端到端行为映射位于 `skills/sub2api-model-trace-e2e/references/otel-spec-mapping.md`。
-- 端到端测试流程沉淀在 `skills/sub2api-model-trace-e2e/`，每次涉及模型追踪代码的改动都应跑一次该 skill 的 smoke。
-- 本地环境默认用 Colima profile `swebench` 运行 Docker；Langfuse 部署在 `http://localhost:3000`，预置凭据 `pk-lf-local`/`sk-lf-local`（仅本地）。
+- 优先复用现有 Issue；使用 `gh issue edit <number> --add-assignee @me` 将执行者设为 assignee。
+- 开工前补齐问题、目标、非目标、方案、验收标准、上下游影响和风险。不得只保留一句标题或占位正文。
+- 一个分支和 Pull Request 只解决一个 Issue；发现独立问题时新建 Issue，不顺手扩大范围。
+- 本仓库使用 GitHub 与 `gh` CLI。禁止路由到 AntCode 或 `antcode-skill`。
 
-## 模型追踪实施记录
+## 3. 分支与 worktree
 
-- 模型追踪相关改动的踩坑、根因、修复、持久化产物、验证证据和剩余边界，统一追加到 `docs/MODEL_TRACING_IMPLEMENTATION_LOG.md`。
-- 进入下一项模型追踪改动前必须先更新该记录；运行时配置、端口、容器、生成命令、provider 取值位置等会影响后续 agent 的持久化事实也必须记录。
-- 禁止在记录中写入任何真实或本地测试凭据；只允许记录 provider 名称、配置键名和安全取值位置。
+- 禁止直接修改、提交或推送 `main`、`vendor/main`。
+- 每项变更必须从最新 `origin/main` 创建符合命名规则的独立分支。
+- Agent 必须在独立 `git worktree` 中修改；当前工作区存在用户改动时尤其不得复用、stash、清理或覆盖。
+- 人工开发者可以在普通 clone 中工作，但仍必须使用独立分支。
+- 分支前缀只允许 `feature/`、`fix/`、`hotfix/`、`sync/`、`docs/`、`chore/`、`refactor/`、`test/`、`otel/`。
 
-## 禁止
+标准起点：
 
-- 主动 `git commit` / `git push` / `gh pr create`：除非用户明确要求。
-- 把本地测试凭据（`pk-lf-local`/`sk-lf-local`/`admin123456`）写进提交、文档或 PR。
-- 在生产路径引入对本地 Langfuse endpoint 的硬编码。
+```bash
+git fetch origin main
+git worktree add -b <scope>/<short-slug> ../sub2api-<short-slug> origin/main
+```
+
+## 4. 实现原则
+
+- 先读 Issue、现有测试、调用链和相邻实现，再修改；禁止在同一仓库创造第二套约定。
+- 修复根因，不用吞异常、关闭检查、伪造 fallback、硬编码环境或只特判样例掩盖问题。
+- 代码必须保持接口契约、失败语义、数据一致性、并发边界、安全边界和性能成本；跨模块改动必须核对真实调用方与上下游契约。
+- 新行为以可观察测试保护；测试必须能在合理缺陷下失败，不测试源码文本、mock 调用次数或偶然实现细节。
+- 不做与 Issue 无关的重构、依赖升级、文档扩写或兼容 shim。废弃路径应连同全部调用方一起清理。
+- 不得提交凭证、客户数据、生产配置、本地环境、生成缓存或评审中间产物。
+
+## 5. 文档边界
+
+长期文档必须服务用户、维护者或运行系统；思考过程和 Agent 工作材料只留在本地。
+
+- `README.md`：产品能力、架构和协作入口。重大用户可见功能、长期架构或协作流程变化必须同步；普通实现细节不写入。
+- `GIT_WORKFLOW.md`：Issue、分支/worktree、测试、评审、PR、同步、发布和回滚的唯一详细流程。
+- `DEV_GUIDE.md`：当前可执行的本地环境与验证命令。
+- `docs/`：已经稳定的功能、接口、部署、法律和发布记录；目录职责见 `docs/README.md`。
+- `.agent/skills/`：全部仓库级 Agent Skill 的唯一可写真源；`.claude/skills` 与 `.codex/skills` 必须是指向 `../.agent/skills` 的相对软链接，禁止复制出多份 Skill。
+- 禁止提交 `docs/superpowers/`、`openspec/changes/`、临时 plan/spec、评审事实包、对话记录和任务草稿。OpenSpec 框架配置可以保留，生成的 change 资产必须本地保存或进入 Issue/PR 后删除。
+
+## 6. Pull Request 前门禁
+
+创建 Pull Request 前，以下条件必须全部满足：
+
+1. Issue 正文完整、仍为 open、PR 作者是 assignee。
+2. 分支已同步最新 `origin/main`，变更范围与 Issue 一致。
+3. 运行 `make pr-check`，所有适用测试、构建、lint、部署契约和安全检查真实通过。
+4. 用户可见或错误路径变更完成一次真实 smoke；涉及模型追踪时额外执行 `.agent/skills/sub2api-model-trace-e2e/` 对应 smoke。
+5. 使用仓库内 `.agent/skills/reviewing-code-changes/` 对完整 diff 执行评审。Reviewer 只读；主控修复已采纳的 P0/P1，重跑相关测试和定向复审，直到没有阻塞 finding。
+6. README 和长期文档已按第 5 节更新，工作文档和评审中间产物未被跟踪。
+7. PR 标题与正文使用中文，正文包含 `Closes #<issue>`、方案摘要、测试证据、评审结论、影响和回滚方式。
+
+测试通过不等于评审通过，静态评审也不等于运行验证。任一门禁失败、被跳过或缺少证据时，不得创建 PR 或声称可以合入。
+
+## 7. GitHub 与授权
+
+- GitHub 操作优先使用 `gh`，本地 Git 操作使用 `git`。
+- 用户未明确授权时，禁止 `git commit`、`git push`、`gh pr create`、合并、发布、删除分支或改写远端状态。
+- “实现/修改/修复”不等于提交授权；“提交”“推送”“创建 PR”只授权用户明确点名的动作。
+- 只允许对自己未合并的临时分支使用 `--force-with-lease`；禁止 `--force`。
+- PR 必须通过 GitHub `Code Quality`、Issue 归属检查、至少一名人工审批并解决全部讨论后才能合并。
+
+## 8. 项目专项规则
+
+- 模型请求追踪实现位于 `backend/internal/modeltrace/`，行为映射位于 `.agent/skills/sub2api-model-trace-e2e/references/otel-spec-mapping.md`。
+- 修改 Ent Schema 后运行 `go generate ./ent`；修改 Wire Provider 后运行 `go generate ./cmd/server`，并提交对应生成文件。
+- 修改 `frontend/package.json` 时同步更新 `frontend/pnpm-lock.yaml`。
+- 禁止在生产路径硬编码本地 endpoint；禁止在日志、文档、Issue 或 PR 中记录任何真实或本地测试凭据。

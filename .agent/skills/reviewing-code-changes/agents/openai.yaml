@@ -1,0 +1,4 @@
+interface:
+  display_name: "多角色代码评审"
+  short_description: "测试优先的多角色代码评审流程"
+  default_prompt: "使用 $reviewing-code-changes 评审我的 PR、暂存改动或全部本地改动。"

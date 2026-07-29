@@ -1,5 +1,4 @@
 docs/claude-relay-service/
-.codex
 
 # ===================
 # Go 后端
@@ -32,6 +31,10 @@ vendor/
 
 # Go 编译缓存
 backend/.gocache/
+
+# Python 生成缓存
+__pycache__/
+*.py[cod]
 
 # ===================
 # Node.js / Vue 前端
@@ -128,10 +131,12 @@ tests
 !backend/internal/modeltrace/tests/
 !backend/internal/modeltrace/tests/**
 CLAUDE.md
-.claude
+.claude/*
+!.claude/skills
 scripts
-!skills/sub2api-model-trace-e2e/scripts/
-!skills/sub2api-model-trace-e2e/scripts/**
+!.agent/
+!.agent/skills/
+!.agent/skills/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 !scripts/
@@ -141,14 +146,14 @@ scripts
 !scripts/codex_complex_real_scenarios.py
 !scripts/codex_complex_20turn_scenarios.py
 .code-review-state
-#openspec/
+/openspec/changes/
 code-reviews/
-AGENTS.md
 backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/README.md
 !docs/deployments/
 !docs/deployments/*.md
 !docs/PAYMENT.md
@@ -157,12 +162,12 @@ docs/*
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/BATCH_IMAGE_MVP.md
 !docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
-!docs/superpowers/
-!docs/superpowers/**
 !docs/legal/
 !docs/legal/*.md
 .serena/
-.codex/
+.codex/*
+!.codex/skills
+/skills/
 frontend/coverage/
 aicodex
 output/
