@@ -1,14 +1,14 @@
 # 4Sub2 Git 与 Agent 协作规范
 
-本文档是 `Alle-Group/sub2api` 的唯一详细协作流程。目标：每项变更可追溯到 Issue，在隔离分支中实现，经完整测试和独立评审后通过 Pull Request 合入；同时保持上游同步和生产发布可审计、可回滚。
+本文档是 `Alle-Group/sub2api` 的唯一详细协作流程。Issue、分支名、assignee 和 PR 标题用于建议性协作追踪；CI 只承担可执行测试、构建、安全、部署与 release 契约门禁，不校验这些协作元数据。
 
-## 1. 不可绕过的原则
+## 1. 协作原则与安全边界
 
-1. `main` 始终是已审核、已通过质量门禁、可发布的内部稳定主线。
-2. 任何仓库变更先有 Issue，再有分支和实现，最终通过 Pull Request 合入。
+1. `main` 始终是已通过可执行质量门禁、可发布的内部稳定主线。
+2. 建议通过 Issue、独立分支和 Pull Request 追踪仓库变更，但这些元数据不构成 CI 门禁。
 3. 禁止直接修改、提交或推送 `main`、`vendor/main`。
-4. 一个 Issue、一个分支、一个 Pull Request 只解决一个问题域；同一会话中属于当前问题域和验收目标的追加改动必须复用当前 Issue、分支和 Pull Request，只有可独立交付、风险边界不同或脱离当前目标的问题才新建 Issue。
-5. Agent 在独立 `git worktree` 中工作；人工开发至少使用独立分支。
+4. 建议一个 Issue、一个分支、一个 Pull Request 只解决一个问题域；同一会话中属于当前问题域和验收目标的追加改动应复用当前 Issue、分支和 Pull Request，只有可独立交付、风险边界不同或脱离当前目标的问题才新建 Issue。
+5. Agent 必须在独立 `git worktree` 中工作以保护用户工作区；人工开发建议使用独立分支。
 6. 测试、运行 smoke 和 AI 评审是不同证据，任何一项不能替代另一项。
 7. 服务器只部署明确的内部 annotated tag 和固定镜像，不部署浮动 `main` 或 `latest`。
 
@@ -37,7 +37,7 @@
 
 ## 3. 标准变更流程
 
-### 3.1 建立并认领 Issue
+### 3.1 建议建立并认领 Issue
 
 先搜索是否已有同一问题：
 
@@ -46,20 +46,20 @@ gh issue list --repo Alle-Group/sub2api --state open --limit 100
 gh issue view <number> --repo Alle-Group/sub2api
 ```
 
-复用现有 Issue 时，先认领并补全正文：
+复用现有 Issue 时，建议认领并补全正文：
 
 ```bash
 gh issue edit <number> --repo Alle-Group/sub2api --add-assignee @me
 ```
 
-没有对应 Issue 时，创建并将自己设为 assignee：
+没有对应 Issue 且需要长期追踪时，可创建并将自己设为 assignee：
 
 ```bash
 gh issue create --repo Alle-Group/sub2api --assignee @me \
   --title '<中文标题>' --body-file /tmp/sub2api-issue.md
 ```
 
-Issue 正文至少包含：
+Issue 正文建议包含：
 
 - 问题与用户/系统影响。
 - 目标和明确非目标。
@@ -67,9 +67,9 @@ Issue 正文至少包含：
 - 可判定的验收标准。
 - 上游、下游、数据、配置、安全、兼容性和回滚影响。
 
-Issue 不完整时不得开工。执行中发现方案或范围变化，先更新 Issue，再继续修改。
+Issue 是协作建议而非开工或 CI 门禁；使用 Issue 时应在方案或范围变化后及时更新，避免记录失真。
 
-### 3.2 从最新主线创建隔离工作区
+### 3.2 建议从最新主线创建隔离工作区
 
 Agent 的标准路径：
 
@@ -198,16 +198,16 @@ python3 .agent/skills/reviewing-code-changes/scripts/prepare_review_context.py \
 
 只有自己的未合并临时分支可以在 rebase 后使用 `git push --force-with-lease`；禁止 `git push --force`。首次推送使用 `git push -u origin <branch>`。
 
-Pull Request 标题必须遵循 Conventional Commits 形式 `type(scope): 中文描述`（scope 可选，`!` 表示破坏性变更），允许的 type：`feat fix hotfix sync docs style refactor perf test build ci chore revert otel`；CI 校验标题格式。正文必须使用中文，并包含：
+Pull Request 标题建议遵循 Conventional Commits 形式 `type(scope): 中文描述`（scope 可选，`!` 表示破坏性变更），常用 type：`feat fix hotfix sync docs style refactor perf test build ci chore revert otel`。CI 不校验标题、Issue 状态、assignee 或分支命名。正文建议使用中文，并包含：
 
-- `Closes #<issue>`；CI 会验证 Issue 为 open，且 PR 作者是 assignee。
+- 关联 Issue（如有，例如 `Closes #<issue>`）。
 - 问题、方案、范围和非目标。
 - 测试命令、退出结果、真实 smoke 证据和 skip/未验证项。
 - `reviewing-code-changes` 结论、已修复 finding 和剩余 P2 决策。
 - 数据库、配置、安全、兼容性、发布与回滚影响。
 - README/长期文档是否更新及原因。
 
-一个 PR 只解决一个 Issue。功能 PR 默认 squash merge；同步 PR 使用 merge commit。合并前必须满足：
+建议一个 PR 只解决一个问题域。功能 PR 默认 squash merge；同步 PR 使用 merge commit。合并前必须满足：
 
 - `Code Quality` 和全部 required checks 通过。
 - PR 作者可在其余合并条件满足后自行合并。
@@ -265,11 +265,11 @@ release-MAJOR.MINOR.PATCH
 
 ## 6. GitHub 仓库保护
 
-`main` 必须配置：
+`main` 建议配置：
 
 - 只能通过 Pull Request 合并。
-- required checks 至少包含分支/Issue 策略、仓库治理、后端、前端、部署契约和安全检查。
-- 至少 1 个审批，所有 review conversation 已解决。
+- required checks 只包含可执行测试、构建、安全和部署/release 契约，不包含分支名、Issue 关联或归属、PR 标题等协作策略。
+- 所有 review conversation 已解决；不强制非作者审批，PR 作者在其余条件满足后可以自行合并。
 - 禁止 force push 和删除，管理员同样遵守。
 
 文件内规则和 PR 模板不能替代 GitHub branch protection；仓库管理员应定期核对实际 ruleset 与本节一致。

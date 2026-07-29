@@ -650,7 +650,7 @@ func TestOllamaCloudUsageSaveAutoRefreshAndDeleteAreGroupScoped(t *testing.T) {
 	}
 }
 
-func TestOllamaCloudUsageRefreshSingleflightAndRunnerDeduplicateSharedGroup(t *testing.T) {
+func TestOllamaCloudUsageRefreshAndRunnerDeduplicateSharedGroup(t *testing.T) {
 	first := ollamaUsageAccount(91)
 	first.Credentials["api_key"] = "shared-key"
 	first.Extra[OllamaCloudUsageSessionExtraKey] = "cipher:wos-session=shared"
@@ -679,7 +679,7 @@ func TestOllamaCloudUsageRefreshSingleflightAndRunnerDeduplicateSharedGroup(t *t
 	errs := make(chan error, 2)
 	go func() { _, err := svc.Refresh(context.Background(), first.ID); errs <- err }()
 	<-started
-	go func() { _, err := svc.Refresh(context.Background(), second.ID); errs <- err }()
+	go func() { errs <- svc.RunDue(context.Background()) }()
 	close(release)
 	require.NoError(t, <-errs)
 	require.NoError(t, <-errs)
