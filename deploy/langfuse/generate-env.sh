@@ -10,6 +10,8 @@ fi
 host_ip="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -1)"
 [ -n "$host_ip" ] || host_ip="127.0.0.1"
 random_hex() { openssl rand -hex "$1"; }
+project_public_key="${LANGFUSE_PROJECT_PUBLIC_KEY:-pk-lf-$(random_hex 16)}"
+project_secret_key="${LANGFUSE_PROJECT_SECRET_KEY:-sk-lf-$(random_hex 16)}"
 
 sed \
   -e "s/SLAVE_SERVER_IP/$host_ip/g" \
@@ -22,8 +24,8 @@ sed \
   -e "s/NEXTAUTH_SECRET=GENERATE_ME/NEXTAUTH_SECRET=$(random_hex 32)/" \
   -e "s/LANGFUSE_INIT_ORG_ID=GENERATE_ME/LANGFUSE_INIT_ORG_ID=langfuse-org-$(random_hex 8)/" \
   -e "s/LANGFUSE_INIT_PROJECT_ID=GENERATE_ME/LANGFUSE_INIT_PROJECT_ID=langfuse-project-$(random_hex 8)/" \
-  -e "s/LANGFUSE_INIT_PROJECT_PUBLIC_KEY=GENERATE_ME/LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-$(random_hex 16)/" \
-  -e "s/LANGFUSE_INIT_PROJECT_SECRET_KEY=GENERATE_ME/LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-$(random_hex 16)/" \
+  -e "s/LANGFUSE_INIT_PROJECT_PUBLIC_KEY=GENERATE_ME/LANGFUSE_INIT_PROJECT_PUBLIC_KEY=$project_public_key/" \
+  -e "s/LANGFUSE_INIT_PROJECT_SECRET_KEY=GENERATE_ME/LANGFUSE_INIT_PROJECT_SECRET_KEY=$project_secret_key/" \
   -e "s/LANGFUSE_INIT_USER_PASSWORD=GENERATE_ME/LANGFUSE_INIT_USER_PASSWORD=$(random_hex 20)/" \
   .env.example > .env
 

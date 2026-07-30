@@ -6,9 +6,12 @@
 			idle 2m
 		}
 	}
+	https_port {$SUB2API_HTTPS_PORT:443}
 }
 
-# 修改为你的域名
+# 修改为你的域名。Xray 443 复用模式下，将 SUB2API_HTTPS_PORT 设置为 8443，
+# 让 Xray 将普通 HTTPS 回落到本机 Caddy；默认值仍保持 Caddy 直接监听 443，
+# 未启用 Xray 时无需额外环境变量。
 api.sub2api.com {
 	# This baseline assumes clients connect directly to Caddy. When Caddy is
 	# behind a CDN, configure explicit trusted proxy CIDRs and {client_ip} as

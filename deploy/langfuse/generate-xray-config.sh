@@ -36,14 +36,29 @@ ensure_default() {
   [ -n "$(env_value "$key")" ] || set_env_value "$key" "$default"
 }
 
-# Populate Xray settings when upgrading an existing SSH-tunnel deployment.
+migrate_default() {
+  key="$1"
+  old="$2"
+  new="$3"
+  [ "$(env_value "$key")" = "$old" ] || return 0
+  set_env_value "$key" "$new"
+}
+
+# Populate Xray settings when upgrading an existing deployment. Xray owns the
+# public 443 socket; normal HTTPS is sent to Caddy through the host gateway.
 ensure_default XRAY_IMAGE ghcr.io/xtls/xray-core:26.5.9
 ensure_default XRAY_SERVER_ADDRESS 38.244.20.220
-ensure_default XRAY_SERVER_PORT 31590
+ensure_default XRAY_SERVER_PORT 443
 ensure_default XRAY_PORTAL_BIND_IP 172.18.0.1
 ensure_default XRAY_PORTAL_PORT 3100
 ensure_default XRAY_REALITY_SERVER_NAME api.sub2api.com
-ensure_default XRAY_REALITY_TARGET api.sub2api.com:443
+ensure_default XRAY_REALITY_TARGET host.docker.internal:8443
+
+# The previous generated defaults used a dedicated 31590 listener and sent
+# failed REALITY handshakes back to the public 443 address. Migrate only those
+# exact defaults so an intentionally customized deployment is left untouched.
+migrate_default XRAY_SERVER_PORT 31590 443
+migrate_default XRAY_REALITY_TARGET api.sub2api.com:443 host.docker.internal:8443
 
 uuid="$(env_value XRAY_UUID)"
 private_key="$(env_value XRAY_REALITY_PRIVATE_KEY)"
