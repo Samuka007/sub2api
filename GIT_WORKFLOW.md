@@ -244,24 +244,25 @@ git fetch upstream
 git push origin upstream/main:refs/heads/vendor/main
 ```
 
-## 5. 发布与回滚
+## 5. 预发布、生产发布与回滚
 
-内部 tag 格式为无前导零的三段版本：
+候选和生产 tag 都必须无前导零；候选序号从 1 开始：
 
 ```text
+pre-release-MAJOR.MINOR.PATCH-rc.N
 release-MAJOR.MINOR.PATCH
 ```
 
 发布顺序：
 
-1. PR 合入 `main`。
-2. 确认同一 `origin/main` commit 的独立 `Code Quality` push run 全部通过。
-3. 在该 commit 创建带非空正文的 annotated tag 并推送。
-4. Release workflow 对 tag 固定 SHA 再次执行质量门禁，再生成 Release、归档和固定版本镜像。
-5. 记录当前生产镜像和 digest 后部署新镜像；等待健康检查并执行关键用户路径 smoke。
-6. 记录 Git tag、commit、镜像和 digest。失败时切回部署前固定镜像。
+1. PR 合入 `main`，确认同一 `origin/main` commit 的独立 `Code Quality` push run 全部通过。
+2. 在该 commit 创建带非空正文的 annotated `pre-release-*` tag 并推送。`Pre-release` workflow 对固定 SHA 再跑完整质量门禁，只发布 linux/amd64 GHCR 候选镜像和 GitHub Pre-release，不更新 `VERSION`、不生成生产 Release。
+3. 测试服务器必须拉取 Pre-release 页面记录的精确 `image@sha256:digest`，不得使用浮动 tag。使用 `standard` 模式和可计费测试账号执行真实上游 smoke；至少覆盖 Responses JSON、SSE、`/responses/compact`、WebSocket 多 turn，同一 `X-Client-Request-ID` 下逐 turn 核对 upstream response ID、`usage_logs.request_id`、`usage_billing_dedup`、余额或套餐用量变化，并覆盖上游失败、重试、并发和持续稳定性。
+4. 在关联 Issue 或 PR 记录候选 tag、commit、镜像 digest、测试窗口、请求与计费核对结果、稳定性结果、失败项和回滚演练。任一计费不闭合、测试被 skip、证据缺失或测试服务器不是候选 digest 时，不得创建生产 tag；修复后必须从新 commit 创建新的 `rc.N`。
+5. 验收通过后，只能在与已发布 Pre-release 相同的 commit 创建 annotated `release-*` tag。Release workflow 会验证同版本 GitHub Pre-release 存在、tag 为 annotated 且指向同一 commit，然后再次执行质量门禁并生成生产 Release、归档和固定版本镜像。
+6. 部署生产前记录当前镜像和 digest；部署新镜像后等待健康检查并执行关键用户路径 smoke，记录 Git tag、commit、镜像和 digest。失败时切回部署前固定镜像。
 
-生产不得使用 `latest`。数据库和 Redis 数据卷不随镜像回滚；涉及不可逆迁移时必须在发布前准备独立数据恢复方案。
+生产和测试服务器都不得使用 `latest`。数据库和 Redis 数据卷不随镜像回滚；涉及不可逆迁移时必须在预发布前准备独立数据恢复方案。Pre-release 镜像和 GitHub Pre-release 是不可变证据；失败的候选不得覆盖或复用 tag，必须递增 `rc.N`。
 
 ## 6. GitHub 仓库保护
 

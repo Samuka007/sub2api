@@ -40,6 +40,7 @@ jobs:
       tag_sha: ${{ steps.resolve.outputs.tag_sha }}
       release_mode: ${{ steps.resolve.outputs.release_mode }}
       release_runner: ${{ steps.resolve.outputs.release_runner }}
+      pre_release_tag: ${{ steps.resolve.outputs.pre_release_tag }}
     steps:
       - name: Checkout repository history
         uses: actions/checkout@v6
@@ -51,6 +52,7 @@ jobs:
         env:
           CANDIDATE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           SIMPLE_RELEASE_INPUT: ${{ inputs.simple_release }}
           SIMPLE_RELEASE_VARIABLE: ${{ vars.SIMPLE_RELEASE }}
@@ -97,6 +99,26 @@ jobs:
             exit 1
           fi
 
+          PRE_RELEASE_TAG=''
+          while IFS= read -r candidate; do
+            if [ "$(git cat-file -t "refs/tags/$candidate" 2>/dev/null || true)" != tag ]; then
+              continue
+            fi
+            if [ "$(git rev-parse "refs/tags/$candidate^{commit}")" != "$TAG_SHA" ]; then
+              continue
+            fi
+            if [ "$(gh release view "$candidate" --json isPrerelease --jq '.isPrerelease' 2>/dev/null || true)" != true ]; then
+              continue
+            fi
+            PRE_RELEASE_TAG=$candidate
+            break
+          done < <(git tag --list "pre-release-$VERSION-rc.*" --sort=-version:refname)
+          if [ -z "$PRE_RELEASE_TAG" ]; then
+            echo "Production release requires a published GitHub pre-release for the same version and commit"
+            echo "Expected an annotated pre-release-$VERSION-rc.N tag at $TAG_SHA"
+            exit 1
+          fi
+
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             if [ "$SIMPLE_RELEASE_INPUT" = true ]; then
               RELEASE_MODE=simple
@@ -122,6 +144,7 @@ jobs:
             echo "tag_sha=$TAG_SHA"
             echo "release_mode=$RELEASE_MODE"
             echo "release_runner=$RELEASE_RUNNER"
+            echo "pre_release_tag=$PRE_RELEASE_TAG"
           } >> "$GITHUB_OUTPUT"
 
   quality-gate:
@@ -334,6 +357,7 @@ jobs:
         env:
           RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}
           VERSION: ${{ needs.resolve-release.outputs.version }}
+          PRE_RELEASE_TAG: ${{ needs.resolve-release.outputs.pre_release_tag }}
           TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}
         run: |
           set -euo pipefail
@@ -341,6 +365,7 @@ jobs:
             echo 'Sub2API is an AI API gateway platform for distributing and managing subscription quotas.'
             echo
             cat release-tag-message.md
+            echo "Promoted from candidate: $PRE_RELEASE_TAG"
             echo
             echo 'Immutable GHCR image:'
             echo '```bash'

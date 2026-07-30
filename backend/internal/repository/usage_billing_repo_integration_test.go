@@ -80,6 +80,60 @@ func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	require.Equal(t, 1, dedupCount)
 }
 
+func TestUsageBillingRepositoryApply_CorrelatedResponsesTurnsChargeIndependently(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-responses-turns-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      100,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-responses-turns-" + uuid.NewString(),
+		Name:   "responses-turns",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name: "usage-billing-responses-turns-" + uuid.NewString(),
+		Type: service.AccountTypeAPIKey,
+	})
+
+	requestIDs := []string{"resp_turn_1_" + uuid.NewString(), "resp_turn_2_" + uuid.NewString()}
+	costs := []float64{1.25, 2.50}
+	for index, requestID := range requestIDs {
+		result, err := repo.Apply(ctx, &service.UsageBillingCommand{
+			RequestID:          requestID,
+			APIKeyID:           apiKey.ID,
+			UserID:             user.ID,
+			AccountID:          account.ID,
+			AccountType:        service.AccountTypeAPIKey,
+			Model:              "gpt-5.4",
+			InputTokens:        index + 2,
+			OutputTokens:       1,
+			BalanceCost:        costs[index],
+			RequestPayloadHash: service.HashUsageRequestPayload([]byte(fmt.Sprintf("codex-thread-123/turn-%d", index+1))),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, result.Applied)
+		require.NotNil(t, result.BalanceCharged)
+		require.InDelta(t, costs[index], *result.BalanceCharged, 0.000001)
+	}
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.InDelta(t, 96.25, balance, 0.000001)
+
+	var dedupCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM usage_billing_dedup WHERE api_key_id = $1 AND request_id IN ($2, $3)",
+		apiKey.ID, requestIDs[0], requestIDs[1],
+	).Scan(&dedupCount))
+	require.Equal(t, 2, dedupCount)
+}
+
 func TestUsageBillingRepositoryApply_CapsBalanceChargeAtAvailableBalance(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)

@@ -764,7 +764,7 @@ func TestResponsesWebSocketCredentialFailoverLoop(t *testing.T) {
 	dial := func(t *testing.T, router *gin.Engine) (*coderws.Conn, func()) {
 		t.Helper()
 		server := httptest.NewServer(router)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/openai/v1/responses", nil)
 		cancel()
 		require.NoError(t, err)

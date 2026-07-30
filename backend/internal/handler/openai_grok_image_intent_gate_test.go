@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,11 +14,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type imagePermissionGateAccountRepoStub struct {
+	service.AccountRepository
+}
+
+func (imagePermissionGateAccountRepoStub) ListSchedulableByPlatform(context.Context, string) ([]service.Account, error) {
+	return nil, nil
+}
+
 func TestOpenAIGatewayHandlerResponses_GrokPassiveImageToolDeclarationBypassesPermissionGate(t *testing.T) {
 	body := `{"model":"grok-4.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}],"tool_choice":"auto","input":"write code"}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformGrok, body)
 
-	require.NotEqual(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.NotContains(t, rec.Body.String(), service.ImageGenerationPermissionMessage())
 }
 
@@ -25,7 +34,7 @@ func TestOpenAIGatewayHandlerResponses_GrokResponsesLiteImageToolDeclarationBypa
 	body := `{"model":"grok-4.5","tool_choice":"auto","input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}]},{"type":"message","role":"user","content":"write code"}]}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformGrok, body)
 
-	require.NotEqual(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.NotContains(t, rec.Body.String(), service.ImageGenerationPermissionMessage())
 }
 
@@ -71,8 +80,8 @@ func TestOpenAIGatewayHandlerResponses_PassiveNamespaceDoesNotTrigger403(t *test
 	passiveNamespace := `{"model":"gpt-5.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}],"tool_choice":"auto","input":"write code"}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformOpenAI, passiveNamespace)
 
-	require.NotEqual(t, http.StatusForbidden, rec.Code,
-		"passive image_gen namespace with tool_choice=auto should not trigger 403 (#4447)")
+	require.Equal(t, http.StatusBadGateway, rec.Code,
+		"passive image_gen namespace with tool_choice=auto should continue to account selection (#4447)")
 }
 
 func runOpenAIResponsesImagePermissionGateTest(t *testing.T, platform string, body string) *httptest.ResponseRecorder {
@@ -97,14 +106,22 @@ func runOpenAIResponsesImagePermissionGateTest(t *testing.T, platform string, bo
 	})
 	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: userID, Concurrency: 1})
 
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingCache.Stop)
+	gatewayService := service.NewOpenAIGatewayService(
+		imagePermissionGateAccountRepoStub{}, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		service.NewBillingService(cfg, nil), nil, billingCache, nil,
+		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
+	)
 	h := &OpenAIGatewayHandler{
-		gatewayService:      &service.OpenAIGatewayService{},
-		billingCacheService: service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeSimple}, nil),
+		gatewayService:      gatewayService,
+		billingCacheService: billingCache,
 		apiKeyService:       &service.APIKeyService{},
 		concurrencyHelper: &ConcurrencyHelper{concurrencyService: service.NewConcurrencyService(
 			&helperConcurrencyCacheStub{userSeq: []bool{true}},
 		)},
-		cfg:          &config.Config{},
+		cfg:          cfg,
 		imageLimiter: &imageConcurrencyLimiter{},
 	}
 
