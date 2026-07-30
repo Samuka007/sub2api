@@ -47,9 +47,13 @@ func captureModelContent(raw []byte, originalBytes, limit int, policy capturePol
 		return ""
 	}
 
-	source := raw
+	// Normalize to valid UTF-8 at the capture boundary so every string written
+	// to an OTLP attribute is serializable. Replacement uses the single fixed
+	// U+FFFD marker (no original bytes leak), performed before truncation so
+	// later rune-boundary slicing never splits a multi-byte sequence.
+	source := []byte(normalizeUTF8(raw))
 	if len(source) > limit {
-		source = validUTF8Prefix(source, limit)
+		source = truncateUTF8(source, limit)
 	}
 	content := sanitizeStructuredContent(source, policy)
 	sourceTruncated := originalBytes > len(source)
@@ -57,7 +61,7 @@ func captureModelContent(raw []byte, originalBytes, limit int, policy capturePol
 		return string(content)
 	}
 
-	captured := validUTF8Prefix(content, limit)
+	captured := truncateUTF8(content, limit)
 	return string(captured) + truncationMarker(originalBytes, len(captured))
 }
 
@@ -128,7 +132,7 @@ func summarizeMultipartContent(raw []byte, originalBytes int, contentType, bound
 		if readErr != nil {
 			truncated = true
 		}
-		appendMultipartField(fields, name, string(validUTF8Prefix(value, len(value))))
+		appendMultipartField(fields, name, normalizeUTF8(truncateUTF8(value, len(value))))
 	}
 
 	summary["fields"] = sanitizeJSONValue(fields, "", "", policy)
@@ -262,7 +266,7 @@ func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
 	// plain-text and non-JSON content (text/plain responses, SSE, etc.)
 	// still gets URL/credential scrubbing, not just content that matched
 	// structured sanitization triggers.
-	return []byte(sanitizeUnstructuredText(string(validUTF8Prefix(raw, len(raw))), policy))
+	return []byte(sanitizeUnstructuredText(normalizeUTF8(raw), policy))
 }
 
 func needsStructuredSanitization(raw []byte) bool {
@@ -660,7 +664,7 @@ func sanitizeTraceError(msg string) string {
 		return match[:separator+1] + redactedValue
 	})
 	const maxErrorBytes = 512
-	return string(validUTF8Prefix([]byte(scrubbed), maxErrorBytes))
+	return truncateUTF8String(scrubbed, maxErrorBytes)
 }
 
 // sanitizeFormURLEncosed parses an application/x-www-form-urlencoded body,
@@ -731,25 +735,27 @@ func redactFormKV(body string) string {
 }
 
 // boundCapture applies the common byte-limit and truncation-marker logic to
-// already-sanitized content.
+// already-sanitized content. It normalizes to valid UTF-8 first so form-URL-
+// decoded values that contained invalid bytes are still serializable.
 func boundCapture(source []byte, originalBytes, limit int) string {
 	if originalBytes < len(source) {
 		originalBytes = len(source)
 	}
-	if len(source) == 0 {
+	normalized := []byte(normalizeUTF8(source))
+	if len(normalized) == 0 {
 		if originalBytes > 0 {
 			return truncationMarker(originalBytes, 0)
 		}
 		return ""
 	}
-	if len(source) > limit {
-		source = validUTF8Prefix(source, limit)
-		return string(source) + truncationMarker(originalBytes, len(source))
+	if len(normalized) > limit {
+		captured := truncateUTF8(normalized, limit)
+		return string(captured) + truncationMarker(originalBytes, len(captured))
 	}
-	if originalBytes > len(source) {
-		return string(source) + truncationMarker(originalBytes, len(source))
+	if originalBytes > len(normalized) {
+		return string(normalized) + truncationMarker(originalBytes, len(normalized))
 	}
-	return string(source)
+	return string(normalized)
 }
 
 func redactLineValue(match string) string {
@@ -760,18 +766,52 @@ func redactLineValue(match string) string {
 	return match[:separator+1] + redactedValue
 }
 
-func validUTF8Prefix(value []byte, limit int) []byte {
+// utf8Replacement is the fixed marker substituted for any invalid byte
+// sequence at the capture boundary. It is the conventional U+FFFD replacement
+// character: recognizable, does not expand original content, and never leaks
+// upstream bytes.
+const utf8Replacement = "\uFFFD"
+
+// normalizeUTF8 replaces invalid UTF-8 byte sequences in value with the fixed
+// replacement marker, guaranteeing every string written to an OTLP attribute
+// is valid UTF-8 regardless of upstream input or byte-level truncation.
+func normalizeUTF8(value []byte) string {
+	return strings.ToValidUTF8(string(value), utf8Replacement)
+}
+
+// truncateUTF8String bounds s to at most limit bytes on a UTF-8 rune boundary.
+// It assumes s is already valid UTF-8; when a multi-byte rune would cross the
+// boundary it is dropped to keep the result valid UTF-8.
+func truncateUTF8String(s string, limit int) string {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(s) <= limit {
+		return s
+	}
+	// Walk back to the largest rune start at or before limit so the cut never
+	// splits a multi-byte sequence.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// truncateUTF8 bounds value to at most limit bytes on a UTF-8 rune boundary.
+// It assumes value is already valid UTF-8 (callers normalize first).
+func truncateUTF8(value []byte, limit int) []byte {
 	if limit < 0 {
 		limit = 0
 	}
 	if len(value) <= limit {
 		return value
 	}
-	prefix := value[:limit]
-	for len(prefix) > 0 && !utf8.Valid(prefix) {
-		prefix = prefix[:len(prefix)-1]
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
 	}
-	return prefix
+	return value[:cut]
 }
 
 func truncationMarker(originalBytes, capturedBytes int) string {

@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -30,15 +32,22 @@ import (
 )
 
 const (
-	serviceName             = "sub2api"
-	tracerName              = "github.com/Wei-Shaw/sub2api/internal/modeltrace"
-	otlpTracesPathSuffix    = "/v1/traces"
-	otlpBasePath            = "/api/public/otel"
-	langfuseIngestionHdr    = "x-langfuse-ingestion-version"
-	defaultPromptBytes      = 1 << 20
-	defaultResponseBytes    = 1 << 20
-	defaultMediaBytes       = 1 << 20
-	defaultExportTimeout    = 10 * time.Second
+	serviceName          = "sub2api"
+	tracerName           = "github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	otlpTracesPathSuffix = "/v1/traces"
+	otlpBasePath         = "/api/public/otel"
+	langfuseIngestionHdr = "x-langfuse-ingestion-version"
+	defaultPromptBytes   = 1 << 20
+	defaultResponseBytes = 1 << 20
+	defaultMediaBytes    = 1 << 20
+	// defaultExportTimeout is the single-batch OTLP export deadline including the
+	// OTLP exporter's internal retry loop. It must cover the full retry window so
+	// a transiently refused Collector is retried instead of discarded. <=0 config
+	// values fall back to this.
+	defaultExportTimeout    = 60 * time.Second
+	defaultRetryInitial     = 5 * time.Second
+	defaultRetryMaxInterval = 30 * time.Second
+	defaultRetryMaxElapsed  = 55 * time.Second
 	maxCaptureBytes         = 8 << 20
 	defaultMaxQueueSize     = 256
 	defaultMaxExportBatch   = 16
@@ -52,13 +61,22 @@ type exportStats struct {
 	exportedSpans  atomic.Uint64
 	failedSpans    atomic.Uint64
 	panicCount     atomic.Uint64
-	lastLogNanos   atomic.Int64
-	source         string
-	version        int64
+	// failedByReason records the last terminal export failure per reason so
+	// operators can distinguish invalid_utf8, collector_refused, timeout,
+	// queue_full and other errors without re-logging upstream content.
+	failedInvalidUTF8      atomic.Uint64
+	failedCollectorRefused atomic.Uint64
+	failedTimeout          atomic.Uint64
+	failedQueueFull        atomic.Uint64
+	failedOther            atomic.Uint64
+	lastLogNanos           atomic.Int64
+	source                 string
+	version                int64
 }
 
 type exportStatsSnapshot struct {
-	Ended, Attempted, Exported, Failed, Panics, PendingOrDropped uint64
+	Ended, Attempted, Exported, Failed, Panics, PendingOrDropped                           uint64
+	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout, FailedQueueFull, FailedOther uint64
 }
 
 func (s *exportStats) snapshot() exportStatsSnapshot {
@@ -68,6 +86,9 @@ func (s *exportStats) snapshot() exportStatsSnapshot {
 	result := exportStatsSnapshot{
 		Ended: s.endedSpans.Load(), Attempted: s.attemptedSpans.Load(),
 		Exported: s.exportedSpans.Load(), Failed: s.failedSpans.Load(), Panics: s.panicCount.Load(),
+		FailedInvalidUTF8: s.failedInvalidUTF8.Load(), FailedCollectorRefused: s.failedCollectorRefused.Load(),
+		FailedTimeout: s.failedTimeout.Load(), FailedQueueFull: s.failedQueueFull.Load(),
+		FailedOther: s.failedOther.Load(),
 	}
 	if result.Ended > result.Attempted {
 		result.PendingOrDropped = result.Ended - result.Attempted
@@ -93,7 +114,129 @@ func (s *exportStats) log(result string, force bool) {
 		"ended_spans", stats.Ended, "attempted_spans", stats.Attempted,
 		"exported_spans", stats.Exported, "failed_spans", stats.Failed,
 		"export_panics", stats.Panics, "pending_or_dropped_spans", stats.PendingOrDropped,
+		"failed_invalid_utf8", stats.FailedInvalidUTF8,
+		"failed_collector_refused", stats.FailedCollectorRefused,
+		"failed_timeout", stats.FailedTimeout,
+		"failed_queue_full", stats.FailedQueueFull,
+		"failed_other", stats.FailedOther,
 	)
+}
+
+// classifyExportError maps a terminal OTLP export error to a coarse reason
+// bucket for observability. It intentionally inspects only error text markers
+// that contain no captured content or credentials; the upstream error string
+// is never logged and its body is not propagated onto span fields.
+const (
+	exportReasonInvalidUTF8      = "invalid_utf8"
+	exportReasonCollectorRefused = "collector_refused"
+	exportReasonTimeout          = "timeout"
+	exportReasonQueueFull        = "queue_full"
+	exportReasonOther            = "other"
+	retryableNetworkErrorMarker  = "modeltrace_retryable_network_error"
+)
+
+func classifyExportError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, retryableNetworkErrorMarker):
+		return exportReasonTimeout
+	case strings.Contains(msg, "invalid utf") || strings.Contains(msg, "invalidutf") || strings.Contains(msg, "malformed") || strings.Contains(msg, "rune error"):
+		return exportReasonInvalidUTF8
+	case strings.Contains(msg, "refused") || strings.Contains(msg, "high memory") || strings.Contains(msg, "resource exhausted") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "throttl") || strings.Contains(msg, "unavailable") || strings.Contains(msg, "503") || strings.Contains(msg, "429"):
+		return exportReasonCollectorRefused
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "context deadline") || strings.Contains(msg, "context canceled") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host"):
+		return exportReasonTimeout
+	case strings.Contains(msg, "queue") && strings.Contains(msg, "full"):
+		return exportReasonQueueFull
+	default:
+		return exportReasonOther
+	}
+}
+
+// retryableNetworkTransport converts transient RoundTrip failures into a
+// synthetic 503 response. otlptracehttp v1.37 retries retryable HTTP statuses,
+// but it only retries a transport error when url.Error.Temporary reports true;
+// connection-refused and abrupt Collector restarts no longer satisfy that
+// deprecated predicate on current Go releases.
+type retryableNetworkTransport struct {
+	base http.RoundTripper
+}
+
+func (t *retryableNetworkTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err == nil || request.Context().Err() != nil || !isRetryableNetworkError(err) {
+		return response, err
+	}
+	return &http.Response{
+		StatusCode:    http.StatusServiceUnavailable,
+		Status:        "503 Service Unavailable",
+		Header:        http.Header{},
+		Body:          io.NopCloser(strings.NewReader(retryableNetworkErrorMarker)),
+		ContentLength: int64(len(retryableNetworkErrorMarker)),
+		Request:       request,
+	}, nil
+}
+
+func (t *retryableNetworkTransport) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func isRetryableNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var operationError *net.OpError
+	if errors.As(err, &operationError) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Timeout()
+}
+
+func newRetryableOTLPHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	return &http.Client{
+		Transport: &retryableNetworkTransport{base: transport},
+		Timeout:   timeout,
+	}
+}
+
+func (s *exportStats) recordFailure(reason string, n uint64) {
+	if s == nil || n == 0 {
+		return
+	}
+	switch reason {
+	case exportReasonInvalidUTF8:
+		s.failedInvalidUTF8.Add(n)
+	case exportReasonCollectorRefused:
+		s.failedCollectorRefused.Add(n)
+	case exportReasonTimeout:
+		s.failedTimeout.Add(n)
+	case exportReasonQueueFull:
+		s.failedQueueFull.Add(n)
+	default:
+		s.failedOther.Add(n)
+	}
 }
 
 type failOpenExporter struct {
@@ -122,6 +265,14 @@ func (e failOpenExporter) ExportSpans(ctx context.Context, spans []sdktrace.Read
 	if e.stats != nil {
 		if err != nil {
 			e.stats.failedSpans.Add(uint64(len(spans)))
+			e.stats.recordFailure(classifyExportError(err), uint64(len(spans)))
+			// Log only the classified reason and counts. The upstream error may
+			// embed the endpoint, request URL or captured content; never log it.
+			slog.Warn("model trace export failed",
+				"source", e.stats.source, "config_version", e.stats.version,
+				"reason", classifyExportError(err), "spans", len(spans),
+				"failed_spans", e.stats.failedSpans.Load(),
+			)
 			e.stats.log("failure", false)
 		} else {
 			e.stats.exportedSpans.Add(uint64(len(spans)))
@@ -180,6 +331,9 @@ type generation struct {
 	provider             *sdktrace.TracerProvider
 	tracer               trace.Tracer
 	shutdown             func(context.Context) error
+	exportTimeout        time.Duration
+	exportRetry          config.ModelTracingExportRetryConfig
+	stats                *exportStats
 	refs                 sync.WaitGroup
 	closeOnce            sync.Once
 }
@@ -272,6 +426,12 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	cfg.PromptMaxBytes = prompt
 	cfg.ResponseMaxBytes = response
 	cfg.MediaMaxBytes = media
+	exportTimeout, retry, queueSize, batchSize, batchTimeout := resolveExportSettings(cfg)
+	cfg.ExportTimeoutSeconds = int(exportTimeout.Seconds())
+	cfg.ExportRetry = retry
+	cfg.ExportQueueSize = queueSize
+	cfg.ExportBatchSize = batchSize
+	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
 	g := &generation{cfg: cfg, source: source, version: version}
 	g.fingerprint = generationFingerprint(cfg, source, version)
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
@@ -293,8 +453,15 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 		otlptracehttp.WithEndpoint(endpoint),
 		otlptracehttp.WithURLPath(path),
 		otlptracehttp.WithHeaders(headers),
-		otlptracehttp.WithTimeout(defaultExportTimeout),
+		otlptracehttp.WithTimeout(exportTimeout),
+		otlptracehttp.WithHTTPClient(newRetryableOTLPHTTPClient(exportTimeout)),
 	}
+	exporterOpts = append(exporterOpts, otlptracehttp.WithRetry(otlptracehttp.RetryConfig{
+		Enabled:         retry.Enabled,
+		InitialInterval: time.Duration(retry.InitialIntervalSeconds) * time.Second,
+		MaxInterval:     time.Duration(retry.MaxIntervalSeconds) * time.Second,
+		MaxElapsedTime:  time.Duration(retry.MaxElapsedTimeSeconds) * time.Second,
+	}))
 	if insecure {
 		exporterOpts = append(exporterOpts, otlptracehttp.WithInsecure())
 	} else {
@@ -313,13 +480,16 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 		return nil, fmt.Errorf("modeltrace: build resource: %w", err)
 	}
 	stats := &exportStats{source: source, version: version}
+	g.stats = stats
 	batchProcessor := sdktrace.NewBatchSpanProcessor(
 		failOpenExporter{delegate: exporter, stats: stats},
-		sdktrace.WithMaxQueueSize(defaultMaxQueueSize),
-		sdktrace.WithMaxExportBatchSize(defaultMaxExportBatch),
-		sdktrace.WithBatchTimeout(defaultBatchTimeout),
-		sdktrace.WithExportTimeout(defaultExportTimeout),
+		sdktrace.WithMaxQueueSize(queueSize),
+		sdktrace.WithMaxExportBatchSize(batchSize),
+		sdktrace.WithBatchTimeout(batchTimeout),
+		sdktrace.WithExportTimeout(exportTimeout),
 	)
+	g.exportTimeout = exportTimeout
+	g.exportRetry = retry
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(&monitoredSpanProcessor{delegate: batchProcessor, stats: stats}),
 		sdktrace.WithResource(res),
@@ -363,6 +533,65 @@ func boundedSizes(cfg config.ModelTracingConfig) (int, int, int) {
 		m = maxCaptureBytes
 	}
 	return p, r, m
+}
+
+// resolveExportSettings fills documented defaults for the OTLP export-timeout,
+// retry backoff and BatchSpanProcessor queue/batch sizing so a transiently
+// refused Collector is retried within a bounded window instead of discarded
+// after one or two attempts.
+func resolveExportSettings(cfg config.ModelTracingConfig) (time.Duration, config.ModelTracingExportRetryConfig, int, int, time.Duration) {
+	timeout := time.Duration(cfg.ExportTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = defaultExportTimeout
+	}
+	retryConfigured := cfg.ExportRetry.InitialIntervalSeconds > 0 ||
+		cfg.ExportRetry.MaxIntervalSeconds > 0 ||
+		cfg.ExportRetry.MaxElapsedTimeSeconds > 0 ||
+		cfg.ExportRetry.Enabled
+	retry := cfg.ExportRetry
+	if retry.InitialIntervalSeconds <= 0 {
+		retry.InitialIntervalSeconds = int(defaultRetryInitial.Seconds())
+	}
+	if retry.MaxIntervalSeconds <= 0 {
+		retry.MaxIntervalSeconds = int(defaultRetryMaxInterval.Seconds())
+	}
+	if retry.MaxElapsedTimeSeconds <= 0 {
+		retry.MaxElapsedTimeSeconds = int(defaultRetryMaxElapsed.Seconds())
+	}
+	if retry.InitialIntervalSeconds > retry.MaxIntervalSeconds {
+		retry.InitialIntervalSeconds = retry.MaxIntervalSeconds
+	}
+	// Retry is enabled by default so transient Collector refusals recover within
+	// the export-timeout window; only an explicitly disabled retry stays off.
+	if !retryConfigured {
+		retry.Enabled = true
+	}
+	maxElapsed := time.Duration(retry.MaxElapsedTimeSeconds) * time.Second
+	if maxElapsed > 0 && maxElapsed >= timeout {
+		// Bound retries within the export-timeout window so the SDK does not
+		// start a retry that the processor will immediately cancel.
+		maxElapsed = timeout - time.Second
+		if maxElapsed < time.Second {
+			maxElapsed = time.Second
+		}
+		retry.MaxElapsedTimeSeconds = int(maxElapsed.Seconds())
+	}
+	queueSize := cfg.ExportQueueSize
+	if queueSize <= 0 {
+		queueSize = defaultMaxQueueSize
+	}
+	batchSize := cfg.ExportBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultMaxExportBatch
+	}
+	if batchSize > queueSize {
+		batchSize = queueSize
+	}
+	batchTimeout := time.Duration(cfg.ExportBatchTimeoutMs) * time.Millisecond
+	if batchTimeout <= 0 {
+		batchTimeout = defaultBatchTimeout
+	}
+	return timeout, retry, queueSize, batchSize, batchTimeout
 }
 
 func splitEndpoint(raw string) (host string, path string, insecure bool) {
@@ -520,7 +749,13 @@ func logGenerationApplied(g *generation) {
 		"enabled", g.enabled(), "source", g.source, "config_version", g.version,
 		"prompt_max_bytes", g.cfg.PromptMaxBytes, "response_max_bytes", g.cfg.ResponseMaxBytes,
 		"media_max_bytes", g.cfg.MediaMaxBytes, "capture_media_content", g.cfg.CaptureMediaContent,
-		"export_queue_size", defaultMaxQueueSize, "export_batch_size", defaultMaxExportBatch,
+		"export_timeout_seconds", g.cfg.ExportTimeoutSeconds,
+		"export_retry_enabled", g.cfg.ExportRetry.Enabled,
+		"export_retry_initial_seconds", g.cfg.ExportRetry.InitialIntervalSeconds,
+		"export_retry_max_interval_seconds", g.cfg.ExportRetry.MaxIntervalSeconds,
+		"export_retry_max_elapsed_seconds", g.cfg.ExportRetry.MaxElapsedTimeSeconds,
+		"export_queue_size", g.cfg.ExportQueueSize, "export_batch_size", g.cfg.ExportBatchSize,
+		"export_batch_timeout_ms", g.cfg.ExportBatchTimeoutMs,
 	)
 }
 

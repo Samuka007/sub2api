@@ -68,15 +68,15 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 	recorder.ctx = recording.WithRecorder(ctx, recorder)
 
 	attrs := []attribute.KeyValue{
-		attribute.String("langfuse.trace.name", "model.async.execution"),
-		attribute.String("langfuse.observation.input", captureModelContentWithType(input, len(input), cfg.PromptMaxBytes, metadata.ContentType, policy)),
+		otlpString("langfuse.trace.name", "model.async.execution"),
+		otlpString("langfuse.observation.input", captureModelContentWithType(input, len(input), cfg.PromptMaxBytes, metadata.ContentType, policy)),
 		attribute.Bool("modeltrace.async.continuation_matched", matches),
 	}
 	traceCorrelation := map[string]string{}
 	observationCorrelation := map[string]string{}
 	if metadata.TaskID != "" {
 		taskID := scrubURLsInString(metadata.TaskID)
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", taskID))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", taskID))
 		traceCorrelation["task_id"] = taskID
 		observationCorrelation["task_id"] = taskID
 	}
@@ -85,23 +85,23 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 	}
 	if !matches && validParent {
 		submissionTraceID := spanContext.TraceID().String()
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.submission_trace_id", submissionTraceID))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.submission_trace_id", submissionTraceID))
 		traceCorrelation["submission_trace_id"] = submissionTraceID
 		observationCorrelation["submission_trace_id"] = submissionTraceID
 	}
 	if metadata.Model != "" {
-		attrs = append(attrs, attribute.String("gen_ai.request.model", scrubURLsInString(metadata.Model)))
+		attrs = append(attrs, otlpString("gen_ai.request.model", scrubURLsInString(metadata.Model)))
 	}
 	if metadata.Operation != "" {
-		attrs = append(attrs, attribute.String("gen_ai.operation.name", metadata.Operation))
+		attrs = append(attrs, otlpString("gen_ai.operation.name", metadata.Operation))
 	}
 	if len(traceCorrelation) > 0 {
 		encoded, _ := json.Marshal(traceCorrelation)
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata", string(encoded)))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata", string(encoded)))
 	}
 	if len(observationCorrelation) > 0 {
 		encoded, _ := json.Marshal(observationCorrelation)
-		attrs = append(attrs, attribute.String("langfuse.observation.metadata", string(encoded)))
+		attrs = append(attrs, otlpString("langfuse.observation.metadata", string(encoded)))
 	}
 	span.SetAttributes(attrs...)
 	return &AsyncExecution{
@@ -128,8 +128,8 @@ func (e *AsyncExecution) End(status string, output []byte, err error) {
 		defer e.generation.Release()
 		cfg := e.generation.Config()
 		e.span.SetAttributes(
-			attribute.String("langfuse.observation.output", captureModelContent(output, len(output), cfg.ResponseMaxBytes, e.policy)),
-			attribute.String("modeltrace.async.status", status),
+			otlpString("langfuse.observation.output", captureModelContent(output, len(output), cfg.ResponseMaxBytes, e.policy)),
+			otlpString("modeltrace.async.status", status),
 		)
 		if err != nil {
 			sanitized := sanitizeTraceError(err.Error())

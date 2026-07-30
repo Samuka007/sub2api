@@ -129,19 +129,22 @@ func WriteConversationEvents(ctx context.Context, tracer trace.Tracer, events []
 		metadata, _ := json.Marshal(meta)
 
 		_, span := tracer.Start(ctx, event.Name, trace.WithSpanKind(trace.SpanKindInternal))
+		// Normalize stream/tool content to valid UTF-8 at the capture boundary
+		// so a corrupted upstream sequence cannot break OTLP serialization.
+		content := scrubURLsInString(normalizeUTF8([]byte(event.Content)))
 		attrs := []attribute.KeyValue{
-			attribute.String("langfuse.observation.type", "span"),
-			attribute.String("langfuse.observation.name", event.Name),
-			attribute.String("langfuse.observation.metadata", string(metadata)),
+			otlpString("langfuse.observation.type", "span"),
+			otlpString("langfuse.observation.name", event.Name),
+			otlpString("langfuse.observation.metadata", string(metadata)),
 		}
 		if event.SessionID != "" {
-			attrs = append(attrs, attribute.String("langfuse.session.id", scrubURLsInString(event.SessionID)))
+			attrs = append(attrs, otlpString("langfuse.session.id", scrubURLsInString(event.SessionID)))
 		}
 		switch event.Name {
 		case "chat.user", "chat.system", "chat.tool_result", "chat.compact", "chat.fork":
-			attrs = append(attrs, attribute.String("langfuse.observation.input", scrubURLsInString(event.Content)))
+			attrs = append(attrs, otlpString("langfuse.observation.input", content))
 		default:
-			attrs = append(attrs, attribute.String("langfuse.observation.output", scrubURLsInString(event.Content)))
+			attrs = append(attrs, otlpString("langfuse.observation.output", content))
 		}
 		span.SetAttributes(attrs...)
 		span.End()

@@ -115,6 +115,32 @@ type ModelTracingConfig struct {
 	ResponseMaxBytes    int    `mapstructure:"response_max_bytes"`
 	MediaMaxBytes       int    `mapstructure:"media_max_bytes"`
 	CaptureMediaContent bool   `mapstructure:"capture_media_content"`
+	// ExportTimeoutSeconds 是单批 OTLP 导出（含内部重试）的最大耗时阈值，
+	// 必须覆盖完整重试窗口，否则 Collector 短时拒绝后上游来不及重试即丢弃。
+	// <=0 时采用默认 60s。
+	ExportTimeoutSeconds int `mapstructure:"export_timeout_seconds"`
+	// ExportRetry 控制 OTLP exporter 对可重试错误的指数退避。这些阈值受
+	// ExportTimeoutSeconds 上界约束；超限后整批明确计入最终失败，保留有界。
+	ExportRetry ModelTracingExportRetryConfig `mapstructure:"export_retry"`
+	// ExportQueueSize 是 BatchSpanProcessor 的最大排队 spans 数；溢出后
+	// 最早入队的 spans 被丢弃并在 pending_or_dropped 中体现。<=0 采用默认。
+	ExportQueueSize int `mapstructure:"export_queue_size"`
+	// ExportBatchSize 是单批导出的最大 spans 数。<=0 采用默认。
+	ExportBatchSize int `mapstructure:"export_batch_size"`
+	// ExportBatchTimeoutMs 是 BatchSpanProcessor 强制 flush 间隔（毫秒）。<=0 采用默认。
+	ExportBatchTimeoutMs int `mapstructure:"export_batch_timeout_ms"`
+}
+
+// ModelTracingExportRetryConfig 描述 OTLP exporter 的有界指数退避。
+type ModelTracingExportRetryConfig struct {
+	// Enabled 关闭后单个 export 请求失败即计入最终失败，不再重试。
+	Enabled bool `mapstructure:"enabled"`
+	// InitialIntervalSeconds 首次失败后退避秒数。<=0 采用默认。
+	InitialIntervalSeconds int `mapstructure:"initial_interval_seconds"`
+	// MaxIntervalSeconds 退避上限秒数。<=0 采用默认。
+	MaxIntervalSeconds int `mapstructure:"max_interval_seconds"`
+	// MaxElapsedTimeSeconds 整批最多重试总耗时秒数，超出即丢弃。<=0 采用默认。
+	MaxElapsedTimeSeconds int `mapstructure:"max_elapsed_time_seconds"`
 }
 
 type LogConfig struct {
@@ -3675,6 +3701,14 @@ func setModelTracingDefaults() {
 	viper.SetDefault("model_tracing.response_max_bytes", 1<<20)
 	viper.SetDefault("model_tracing.media_max_bytes", 1<<20)
 	viper.SetDefault("model_tracing.capture_media_content", false)
+	viper.SetDefault("model_tracing.export_timeout_seconds", 60)
+	viper.SetDefault("model_tracing.export_retry.enabled", true)
+	viper.SetDefault("model_tracing.export_retry.initial_interval_seconds", 5)
+	viper.SetDefault("model_tracing.export_retry.max_interval_seconds", 30)
+	viper.SetDefault("model_tracing.export_retry.max_elapsed_time_seconds", 55)
+	viper.SetDefault("model_tracing.export_queue_size", 256)
+	viper.SetDefault("model_tracing.export_batch_size", 16)
+	viper.SetDefault("model_tracing.export_batch_timeout_ms", 1000)
 }
 
 // normalizeModelTracingConfig applies safe capture defaults and degrades an invalid
@@ -3695,12 +3729,57 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	if value.MediaMaxBytes <= 0 {
 		value.MediaMaxBytes = 1 << 20
 	}
+	if value.ExportTimeoutSeconds <= 0 {
+		value.ExportTimeoutSeconds = 60
+	}
+	normalizeModelTracingRetry(&value.ExportRetry)
+	if value.ExportQueueSize <= 0 {
+		value.ExportQueueSize = 256
+	}
+	if value.ExportBatchSize <= 0 {
+		value.ExportBatchSize = 16
+	}
+	if value.ExportBatchTimeoutMs <= 0 {
+		value.ExportBatchTimeoutMs = 1000
+	}
 	if !value.Enabled {
 		return
 	}
 	if value.PublicKey == "" || value.SecretKey == "" || ValidateModelTracingEndpoint(value.Endpoint) != nil {
 		value.Enabled = false
 		slog.Warn("invalid model_tracing deployment config; tracing disabled")
+	}
+}
+
+// normalizeModelTracingRetry fills documented OTLP retry defaults when unset.
+// Retry is enabled by default so transient Collector refusals can recover
+// within the configured export timeout window; an explicit Enabled=false is
+// respected to fail fast.
+func normalizeModelTracingRetry(retry *ModelTracingExportRetryConfig) {
+	if retry == nil {
+		return
+	}
+	configured := retry.InitialIntervalSeconds > 0 ||
+		retry.MaxIntervalSeconds > 0 ||
+		retry.MaxElapsedTimeSeconds > 0 ||
+		retry.Enabled
+	if retry.InitialIntervalSeconds <= 0 {
+		retry.InitialIntervalSeconds = 5
+	}
+	if retry.MaxIntervalSeconds <= 0 {
+		retry.MaxIntervalSeconds = 30
+	}
+	if retry.MaxElapsedTimeSeconds <= 0 {
+		retry.MaxElapsedTimeSeconds = 55
+	}
+	if retry.InitialIntervalSeconds > retry.MaxIntervalSeconds {
+		retry.InitialIntervalSeconds = retry.MaxIntervalSeconds
+	}
+	// Retry is enabled by default so transient Collector refusals recover within
+	// the export-timeout window. Only an explicit, fully-rejected retry config
+	// disables it.
+	if !configured {
+		retry.Enabled = true
 	}
 }
 

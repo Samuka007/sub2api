@@ -59,6 +59,20 @@ func TestLoadDisablesModelTracingForUnsafeEndpointComponents(t *testing.T) {
 	}
 }
 
+func TestLoadModelTracingExportDefaultsRemainBackwardCompatible(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 60, cfg.ModelTracing.ExportTimeoutSeconds)
+	require.Equal(t, ModelTracingExportRetryConfig{
+		Enabled: true, InitialIntervalSeconds: 5, MaxIntervalSeconds: 30, MaxElapsedTimeSeconds: 55,
+	}, cfg.ModelTracing.ExportRetry)
+	require.Equal(t, 256, cfg.ModelTracing.ExportQueueSize)
+	require.Equal(t, 16, cfg.ModelTracing.ExportBatchSize)
+	require.Equal(t, 1000, cfg.ModelTracing.ExportBatchTimeoutMs)
+}
+
 func TestLoadRedisUsernameFromEnvironment(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("REDIS_USERNAME", "app-user")

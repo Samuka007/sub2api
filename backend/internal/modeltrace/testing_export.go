@@ -163,6 +163,18 @@ func (s *TestingExportStats) Snapshot() TestingExportStatsSnapshot {
 	return s.inner.snapshot()
 }
 
+func TestingManagerExportStats(m *Manager) TestingExportStatsSnapshot {
+	if m == nil {
+		return TestingExportStatsSnapshot{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.active == nil || m.active.stats == nil {
+		return TestingExportStatsSnapshot{}
+	}
+	return m.active.stats.snapshot()
+}
+
 func TestingFailOpenExporter(delegate sdktrace.SpanExporter, stats *TestingExportStats) sdktrace.SpanExporter {
 	var inner *exportStats
 	if stats != nil {

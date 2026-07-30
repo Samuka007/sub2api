@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-29
+
+### Added
+
+- Add optional, dynamically reloadable model request tracing to self-hosted Langfuse over OTLP/HTTP, with bounded queues and retries, UTF-8-safe content limits, and fail-open Collector outage handling.
+
 ## 2026-07-28
 
 ### Fixed

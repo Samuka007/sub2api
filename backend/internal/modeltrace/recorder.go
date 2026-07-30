@@ -189,14 +189,14 @@ func (r *traceRecorder) RecordAsyncSubmission(taskID string, itemIDs []string) {
 	span := trace.SpanFromContext(r.ctx)
 	attrs := []attribute.KeyValue{attribute.Int("modeltrace.async.item_count", len(itemIDs))}
 	if taskID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.task_id", scrubURLsInString(taskID)))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", scrubURLsInString(taskID)))
 	}
 	if len(itemIDs) > 0 {
 		scrubbedIDs := make([]string, len(itemIDs))
 		for i, id := range itemIDs {
 			scrubbedIDs[i] = scrubURLsInString(id)
 		}
-		attrs = append(attrs, attribute.StringSlice("langfuse.trace.metadata.item_ids", scrubbedIDs))
+		attrs = append(attrs, otlpStringSlice("langfuse.trace.metadata.item_ids", scrubbedIDs))
 	}
 	span.SetAttributes(attrs...)
 }
@@ -222,17 +222,17 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 	}
 	metadataJSON, _ := json.Marshal(observationMetadata)
 	attrs := []attribute.KeyValue{
-		attribute.String("langfuse.observation.type", "generation"),
-		attribute.String("langfuse.observation.name", name),
-		attribute.String("langfuse.observation.input", captureModelContentWithType(input, len(input), r.promptMaxBytes, metadata.ContentType, r.capturePolicy)),
-		attribute.String("langfuse.observation.metadata", string(metadataJSON)),
+		otlpString("langfuse.observation.type", "generation"),
+		otlpString("langfuse.observation.name", name),
+		otlpString("langfuse.observation.input", captureModelContentWithType(input, len(input), r.promptMaxBytes, metadata.ContentType, r.capturePolicy)),
+		otlpString("langfuse.observation.metadata", string(metadataJSON)),
 		attribute.Int64("modeltrace.attempt.index", int64(index)),
 	}
 	if requestID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.request_id", requestID))
 	}
 	if r.identity.UserID > 0 {
-		attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(r.identity.UserID, 10)))
+		attrs = append(attrs, otlpString("langfuse.user.id", strconv.FormatInt(r.identity.UserID, 10)))
 	}
 	if r.identity.APIKeyID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", r.identity.APIKeyID))
@@ -241,26 +241,26 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", r.identity.GroupID))
 	}
 	if sessionID != "" {
-		attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
+		attrs = append(attrs, otlpString("langfuse.session.id", sessionID))
 	}
 	if metadata.Operation != "" {
-		attrs = append(attrs, attribute.String("gen_ai.operation.name", metadata.Operation))
+		attrs = append(attrs, otlpString("gen_ai.operation.name", metadata.Operation))
 	}
 	if metadata.Provider != "" {
-		attrs = append(attrs, attribute.String("gen_ai.provider.name", metadata.Provider))
+		attrs = append(attrs, otlpString("gen_ai.provider.name", metadata.Provider))
 	}
 	if metadata.UpstreamModel != "" {
 		model := scrubURLsInString(metadata.UpstreamModel)
 		attrs = append(attrs,
-			attribute.String("gen_ai.request.model", model),
-			attribute.String("langfuse.observation.model.name", model),
+			otlpString("gen_ai.request.model", model),
+			otlpString("langfuse.observation.model.name", model),
 		)
 	}
 	if metadata.AccountID > 0 {
 		attrs = append(attrs, attribute.Int64("modeltrace.account.id", metadata.AccountID))
 	}
 	if address := attemptServerAddress(metadata.Endpoint); address != "" {
-		attrs = append(attrs, attribute.String("server.address", address))
+		attrs = append(attrs, otlpString("server.address", address))
 	}
 	span.SetAttributes(attrs...)
 
@@ -371,17 +371,17 @@ func (r *traceRecorder) usageAttributes(facts recording.UsageFacts) []attribute.
 		attribute.Int("gen_ai.usage.input_tokens", facts.InputTokens),
 		attribute.Int("gen_ai.usage.output_tokens", facts.OutputTokens),
 		attribute.Int("gen_ai.usage.total_tokens", totalTokens),
-		attribute.String("langfuse.observation.usage_details", string(usageJSON)),
-		attribute.String("langfuse.observation.cost_details", string(costJSON)),
+		otlpString("langfuse.observation.usage_details", string(usageJSON)),
+		otlpString("langfuse.observation.cost_details", string(costJSON)),
 	}
 	if facts.RequestID != "" {
-		attrs = append(attrs, attribute.String("gen_ai.response.id", scrubURLsInString(facts.RequestID)))
+		attrs = append(attrs, otlpString("gen_ai.response.id", scrubURLsInString(facts.RequestID)))
 	}
 	if facts.Model != "" {
 		model := scrubURLsInString(facts.Model)
 		attrs = append(attrs,
-			attribute.String("gen_ai.response.model", model),
-			attribute.String("langfuse.observation.model.name", model),
+			otlpString("gen_ai.response.model", model),
+			otlpString("langfuse.observation.model.name", model),
 		)
 	}
 	if facts.AccountID > 0 {
@@ -394,7 +394,7 @@ func (r *traceRecorder) usageAttributes(facts recording.UsageFacts) []attribute.
 		attrs = append(attrs, attribute.Int(firstOutputMsAttribute, *facts.FirstTokenMs))
 	}
 	if r.identity.UserID > 0 {
-		attrs = append(attrs, attribute.String("langfuse.user.id", fmt.Sprintf("%d", r.identity.UserID)))
+		attrs = append(attrs, otlpString("langfuse.user.id", fmt.Sprintf("%d", r.identity.UserID)))
 	}
 	if r.identity.APIKeyID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", r.identity.APIKeyID))
@@ -556,13 +556,13 @@ func (a *traceAttempt) endCaptured(result recording.AttemptResult, originalOutpu
 		attrs := make([]attribute.KeyValue, 0, 3)
 		if result.Output != nil {
 			output := captureModelContent(result.Output, originalOutputBytes, a.responseMaxBytes, a.capturePolicy)
-			attrs = append(attrs, attribute.String("langfuse.observation.output", output))
+			attrs = append(attrs, otlpString("langfuse.observation.output", output))
 		}
 		if result.HTTPStatus > 0 {
 			attrs = append(attrs, attribute.Int("http.response.status_code", result.HTTPStatus))
 		}
 		if result.Err != nil {
-			attrs = append(attrs, attribute.String("error.type", fmt.Sprintf("%T", result.Err)))
+			attrs = append(attrs, otlpString("error.type", fmt.Sprintf("%T", result.Err)))
 		}
 		a.span.SetAttributes(attrs...)
 

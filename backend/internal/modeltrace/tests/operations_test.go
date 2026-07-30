@@ -24,7 +24,7 @@ func TestModelTraceOperationalSignals(t *testing.T) {
 		stats.AddEnded(3)
 		exporter := modeltrace.TestingFailOpenExporter(errorSpanExporter{}, stats)
 		require.Error(t, exporter.ExportSpans(context.Background(), []sdktrace.ReadOnlySpan{nil, nil}))
-		require.Equal(t, modeltrace.TestingExportStatsSnapshot{Ended: 3, Attempted: 2, Failed: 2, PendingOrDropped: 1}, stats.Snapshot())
+		require.Equal(t, modeltrace.TestingExportStatsSnapshot{Ended: 3, Attempted: 2, Failed: 2, PendingOrDropped: 1, FailedOther: 2}, stats.Snapshot())
 	})
 
 	t.Run("panic is counted without escaping", func(t *testing.T) {

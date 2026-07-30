@@ -182,25 +182,25 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			"session_conflict":      correlation.SessionConflict,
 		})
 		attrs := []attribute.KeyValue{
-			attribute.String("langfuse.trace.name", rootSpanName),
-			attribute.String("langfuse.observation.input", captureModelContent(t.input, t.inputBytes, t.recorder.promptMaxBytes, t.policy)),
-			attribute.String("langfuse.observation.output", captureModelContent(output, outputBytes, t.limit, t.policy)),
-			attribute.String("langfuse.trace.metadata", string(metadataJSON)),
-			attribute.String("langfuse.trace.metadata.connection_request_id", scrubURLsInString(t.metadata.ConnectionRequestID)),
-			attribute.String("langfuse.trace.metadata.turn_request_id", scrubURLsInString(t.metadata.TurnRequestID)),
+			otlpString("langfuse.trace.name", rootSpanName),
+			otlpString("langfuse.observation.input", captureModelContent(t.input, t.inputBytes, t.recorder.promptMaxBytes, t.policy)),
+			otlpString("langfuse.observation.output", captureModelContent(output, outputBytes, t.limit, t.policy)),
+			otlpString("langfuse.trace.metadata", string(metadataJSON)),
+			otlpString("langfuse.trace.metadata.connection_request_id", scrubURLsInString(t.metadata.ConnectionRequestID)),
+			otlpString("langfuse.trace.metadata.turn_request_id", scrubURLsInString(t.metadata.TurnRequestID)),
 			attribute.Int("langfuse.trace.metadata.turn_index", t.metadata.TurnIndex),
-			attribute.String("http.request.method", http.MethodGet),
-			attribute.String("url.path", t.metadata.Path),
-			attribute.String(streamStatusAttribute, stream.status),
+			otlpString("http.request.method", http.MethodGet),
+			otlpString("url.path", t.metadata.Path),
+			otlpString(streamStatusAttribute, stream.status),
 		}
 		if requestID != "" {
-			attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
+			attrs = append(attrs, otlpString("langfuse.trace.metadata.request_id", requestID))
 		}
 		if t.metadata.Model != "" {
-			attrs = append(attrs, attribute.String("modeltrace.client.request.model", scrubURLsInString(t.metadata.Model)))
+			attrs = append(attrs, otlpString("modeltrace.client.request.model", scrubURLsInString(t.metadata.Model)))
 		}
 		if t.metadata.Identity.UserID > 0 {
-			attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(t.metadata.Identity.UserID, 10)))
+			attrs = append(attrs, otlpString("langfuse.user.id", strconv.FormatInt(t.metadata.Identity.UserID, 10)))
 		}
 		if t.metadata.Identity.APIKeyID > 0 {
 			attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", t.metadata.Identity.APIKeyID))
@@ -209,17 +209,17 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", t.metadata.Identity.GroupID))
 		}
 		if sessionID != "" {
-			attrs = append(attrs, attribute.String("langfuse.session.id", sessionID))
+			attrs = append(attrs, otlpString("langfuse.session.id", sessionID))
 		}
 		attrs = appendCorrelationAttributes(attrs, correlation)
 		if stream.firstOutputMs != nil {
 			attrs = append(attrs, attribute.Int64(firstOutputMsAttribute, *stream.firstOutputMs))
 		}
 		if stream.errorStage != "" {
-			attrs = append(attrs, attribute.String(streamErrorStageAttribute, stream.errorStage))
+			attrs = append(attrs, otlpString(streamErrorStageAttribute, stream.errorStage))
 		}
 		if stream.errorType != "" {
-			attrs = append(attrs, attribute.String("error.type", stream.errorType))
+			attrs = append(attrs, otlpString("error.type", stream.errorType))
 		}
 		t.span.SetAttributes(attrs...)
 		if stream.status == streamStatusCompleted {

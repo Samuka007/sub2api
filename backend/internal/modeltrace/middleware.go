@@ -196,53 +196,53 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		captureMediaContent: cfg.CaptureMediaContent,
 	}
 	attrs := []attribute.KeyValue{
-		attribute.String("langfuse.trace.name", rootSpanName),
-		attribute.String("langfuse.observation.input", captureModelContentWithType(clientInput, clientInputBytes, cfg.PromptMaxBytes, c.GetHeader("Content-Type"), policy)),
-		attribute.String("langfuse.observation.output", captureModelContentWithType(clientOutput, clientOutputBytes, cfg.ResponseMaxBytes, s.response.Header().Get("Content-Type"), policy)),
-		attribute.String("http.request.method", c.Request.Method),
-		attribute.String("url.path", c.Request.URL.Path),
+		otlpString("langfuse.trace.name", rootSpanName),
+		otlpString("langfuse.observation.input", captureModelContentWithType(clientInput, clientInputBytes, cfg.PromptMaxBytes, c.GetHeader("Content-Type"), policy)),
+		otlpString("langfuse.observation.output", captureModelContentWithType(clientOutput, clientOutputBytes, cfg.ResponseMaxBytes, s.response.Header().Get("Content-Type"), policy)),
+		otlpString("http.request.method", c.Request.Method),
+		otlpString("url.path", c.Request.URL.Path),
 		attribute.Int64("http.response.status_code", int64(status)),
 	}
 	entry := resolveEntryFacts(c.Request.URL.Path, c.GetHeader("Content-Type"), clientInput)
 	traceTags := make([]string, 0, 2)
 	if entry.Protocol != "" {
 		attrs = append(attrs,
-			attribute.String("modeltrace.entry.protocol", entry.Protocol),
-			attribute.String("langfuse.trace.metadata.entry_protocol", entry.Protocol),
+			otlpString("modeltrace.entry.protocol", entry.Protocol),
+			otlpString("langfuse.trace.metadata.entry_protocol", entry.Protocol),
 		)
 		traceTags = append(traceTags, "entry_protocol:"+entry.Protocol)
 	}
 	if entry.ClientModel != "" {
 		model := scrubURLsInString(entry.ClientModel)
 		attrs = append(attrs,
-			attribute.String("modeltrace.client.request.model", model),
-			attribute.String("langfuse.trace.metadata.client_model", model),
+			otlpString("modeltrace.client.request.model", model),
+			otlpString("langfuse.trace.metadata.client_model", model),
 		)
 		traceTags = append(traceTags, "client_model:"+model)
 	}
 	if len(traceTags) > 0 {
-		attrs = append(attrs, attribute.StringSlice("langfuse.trace.tags", traceTags))
+		attrs = append(attrs, otlpStringSlice("langfuse.trace.tags", traceTags))
 	}
 	if isStream {
-		attrs = append(attrs, attribute.String(streamStatusAttribute, stream.status))
+		attrs = append(attrs, otlpString(streamStatusAttribute, stream.status))
 		if stream.firstOutputMs != nil {
 			attrs = append(attrs, attribute.Int64(firstOutputMsAttribute, *stream.firstOutputMs))
 		}
 		if stream.errorStage != "" {
-			attrs = append(attrs, attribute.String(streamErrorStageAttribute, stream.errorStage))
+			attrs = append(attrs, otlpString(streamErrorStageAttribute, stream.errorStage))
 		}
 		if stream.errorType != "" {
-			attrs = append(attrs, attribute.String("error.type", stream.errorType))
+			attrs = append(attrs, otlpString("error.type", stream.errorType))
 		}
 	}
 	s.recorder.setTraceCorrelation("", extractCorrelation(clientInput, c))
 	requestID, correlation := s.recorder.traceCorrelation()
 	session := correlation.SessionID
 	if requestID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.request_id", requestID))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.request_id", requestID))
 	}
 	if s.identity.UserID > 0 {
-		attrs = append(attrs, attribute.String("langfuse.user.id", strconv.FormatInt(s.identity.UserID, 10)))
+		attrs = append(attrs, otlpString("langfuse.user.id", strconv.FormatInt(s.identity.UserID, 10)))
 	}
 	if s.identity.APIKeyID > 0 {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", s.identity.APIKeyID))
@@ -251,7 +251,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", s.identity.GroupID))
 	}
 	if session != "" {
-		attrs = append(attrs, attribute.String("langfuse.session.id", session))
+		attrs = append(attrs, otlpString("langfuse.session.id", session))
 	}
 	attrs = appendCorrelationAttributes(attrs, correlation)
 	s.span.SetAttributes(attrs...)
@@ -411,17 +411,17 @@ func appendCorrelationAttributes(attrs []attribute.KeyValue, correlation Correla
 	)
 	if correlation.SessionSource != "" {
 		attrs = append(attrs,
-			attribute.String("modeltrace.correlation.session_source", correlation.SessionSource),
-			attribute.String("langfuse.trace.metadata.session_source", correlation.SessionSource),
+			otlpString("modeltrace.correlation.session_source", correlation.SessionSource),
+			otlpString("langfuse.trace.metadata.session_source", correlation.SessionSource),
 		)
 	}
 	if correlation.ThreadID != "" {
-		attrs = append(attrs, attribute.String("langfuse.trace.metadata.thread_id", correlation.ThreadID))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.thread_id", correlation.ThreadID))
 	}
 	if correlation.ThreadSource != "" {
 		attrs = append(attrs,
-			attribute.String("modeltrace.correlation.thread_source", correlation.ThreadSource),
-			attribute.String("langfuse.trace.metadata.thread_source", correlation.ThreadSource),
+			otlpString("modeltrace.correlation.thread_source", correlation.ThreadSource),
+			otlpString("langfuse.trace.metadata.thread_source", correlation.ThreadSource),
 		)
 	}
 	return attrs
