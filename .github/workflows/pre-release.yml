@@ -216,7 +216,8 @@ jobs:
           docker pull "$IMAGE"
           docker run --rm "$IMAGE" --version 2>&1 | tee image-version.txt
           grep -F "Sub2API $VERSION" image-version.txt
-          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{ .Manifest.Digest }}')
+          REPO_DIGEST=$(docker image inspect "$IMAGE" --format '{{ index .RepoDigests 0 }}')
+          DIGEST=${REPO_DIGEST##*@}
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "Invalid image digest: $DIGEST"
             exit 1
