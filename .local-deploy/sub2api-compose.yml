@@ -124,12 +124,13 @@ services:
       - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
 
       # =======================================================================
-      # Model Request Tracing (Langfuse OTLP)
+      # Model Request Tracing (OTLP)
       # The default deployment only joins sub2api-network. When tracing is
       # enabled, MODEL_TRACING_ENDPOINT must be reachable from that network
       # (for example, a public endpoint or an operator-provided network overlay).
       # =======================================================================
       - MODEL_TRACING_ENABLED=${MODEL_TRACING_ENABLED:-false}
+      - MODEL_TRACING_DESTINATION=${MODEL_TRACING_DESTINATION:-langfuse}
       - MODEL_TRACING_ENDPOINT=${MODEL_TRACING_ENDPOINT:-}
       - MODEL_TRACING_PUBLIC_KEY=${MODEL_TRACING_PUBLIC_KEY:-}
       - MODEL_TRACING_SECRET_KEY=${MODEL_TRACING_SECRET_KEY:-}

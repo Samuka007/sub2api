@@ -14,6 +14,7 @@ vi.mock('@/api/client', () => ({
 const config = {
   configured: false,
   enabled: false,
+  destination: 'langfuse' as const,
   endpoint: '',
   public_key: '',
   has_secret: false,
@@ -37,6 +38,7 @@ describe('model tracing admin API', () => {
     const payload = {
       expected_config_version: 0,
       enabled: false,
+      destination: 'langfuse' as const,
       endpoint: '',
       public_key: '',
       prompt_max_bytes: 1048576,

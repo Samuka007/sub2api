@@ -20,6 +20,7 @@ vi.mock('vue-i18n', () => ({
 const runtimeConfig = {
   configured: true,
   enabled: true,
+  destination: 'langfuse' as const,
   endpoint: 'https://langfuse.example.com/api/public/otel/v1/traces',
   public_key: 'pk-live',
   has_secret: true,
@@ -64,6 +65,7 @@ describe('ModelTracingSettings', () => {
     expect(updateConfig).toHaveBeenCalledWith({
       expected_config_version: 7,
       enabled: true,
+      destination: 'langfuse',
       endpoint: runtimeConfig.endpoint,
       public_key: runtimeConfig.public_key,
       prompt_max_bytes: 1048576,
@@ -100,5 +102,70 @@ describe('ModelTracingSettings', () => {
       expected_config_version: 7,
       secret_key: '',
     }))
+  })
+
+  it('saves a generic Collector destination without Langfuse credentials', async () => {
+    getConfig.mockResolvedValueOnce({
+      ...runtimeConfig,
+      destination: 'otlp_collector',
+      endpoint: 'http://collector.example.test:4318/v1/traces',
+      public_key: '',
+      has_secret: false,
+    })
+    const wrapper = mount(ModelTracingSettings)
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('[data-testid="model-tracing-destination"]').element.value)
+      .toBe('otlp_collector')
+    expect(wrapper.find('[data-testid="model-tracing-secret"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="model-tracing-save"]').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      destination: 'otlp_collector',
+      endpoint: 'http://collector.example.test:4318/v1/traces',
+      public_key: '',
+    }))
+    expect(updateConfig.mock.calls[0][0]).not.toHaveProperty('secret_key')
+  })
+
+  it('resets and switches to each destination standard path', async () => {
+    getConfig.mockResolvedValueOnce({
+      ...runtimeConfig,
+      destination: 'otlp_collector',
+      endpoint: 'http://collector.example.test:4318/custom/traces',
+      public_key: '',
+      has_secret: false,
+    })
+    const wrapper = mount(ModelTracingSettings)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="model-tracing-reset-path"]').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-endpoint"]').element.value)
+      .toBe('http://collector.example.test:4318/v1/traces')
+
+    await wrapper.get<HTMLSelectElement>('[data-testid="model-tracing-destination"]').setValue('langfuse')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-endpoint"]').element.value)
+      .toBe('http://collector.example.test:4318/api/public/otel/v1/traces')
+    expect(wrapper.find('[data-testid="model-tracing-secret"]').exists()).toBe(true)
+  })
+
+  it('preserves an explicit custom path when switching destinations', async () => {
+    getConfig.mockResolvedValueOnce({
+      ...runtimeConfig,
+      destination: 'otlp_collector',
+      endpoint: 'http://collector.example.test:4318/custom/traces',
+      public_key: '',
+      has_secret: false,
+    })
+    const wrapper = mount(ModelTracingSettings)
+    await flushPromises()
+
+    await wrapper.get<HTMLSelectElement>('[data-testid="model-tracing-destination"]').setValue('langfuse')
+
+    expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-endpoint"]').element.value)
+      .toBe('http://collector.example.test:4318/custom/traces')
   })
 })

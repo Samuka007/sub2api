@@ -53,6 +53,7 @@ func (h *AdminHandler) UpdateConfig(c *gin.Context) {
 		"user_id", subject.UserID,
 		"config_version", updated.ConfigVersion,
 		"enabled", updated.Enabled,
+		"destination", updated.Destination,
 	)
 	response.Success(c, updated)
 }

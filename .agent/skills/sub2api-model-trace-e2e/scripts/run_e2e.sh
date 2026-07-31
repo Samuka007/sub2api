@@ -165,7 +165,7 @@ TLS_FIXTURE_CODE=$(curl --noproxy '*' -sS --cacert "$GEMINI_TLS_DIR/ca.crt" \
 [[ "$TLS_FIXTURE_CODE" == "200" ]] || fail "Gemini TLS fixture verification failed (HTTP $TLS_FIXTURE_CODE)"
 
 # 3. 编译 sub2api linux/arm64（带 embed tag）
-log "compiling sub2api binary"
+log "compiling sub2api and E2E client binaries"
 rm -rf "$BIN_DIR/sub2api"
 colima ssh --profile "$COLIMA_PROFILE" -- docker run --rm \
   -e GOPROXY=https://goproxy.cn,direct \
@@ -178,8 +178,11 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run --rm \
   sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags embed -ldflags="-s -w -X main.Version=e2e-test" -o /out/sub2api ./cmd/server'
 [[ -x "$BIN_DIR/sub2api" ]] || fail "binary not produced at $BIN_DIR/sub2api"
 RAW_RST_CLIENT_BIN="$BIN_DIR/raw-http-rst-client"
-go build -o "$RAW_RST_CLIENT_BIN" "$SKILL_DIR/scripts/raw_http_rst_client.go"
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$RAW_RST_CLIENT_BIN" "$SKILL_DIR/scripts/raw_http_rst_client.go"
 [[ -x "$RAW_RST_CLIENT_BIN" ]] || fail "raw TCP RST client was not produced at $RAW_RST_CLIENT_BIN"
+RESPONSES_WS_CLIENT_BIN="$BIN_DIR/responses-ws-client"
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$RESPONSES_WS_CLIENT_BIN" "$SKILL_DIR/scripts/responses_ws_client.go"
+[[ -x "$RESPONSES_WS_CLIENT_BIN" ]] || fail "Responses WebSocket client was not produced at $RESPONSES_WS_CLIENT_BIN"
 
 # 4. 启动 sub2api（AUTO_SETUP，--network host 共享 VM 127.0.0.1）
 log "starting sub2api server"
@@ -209,6 +212,7 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e \
   -e TOTP_ENCRYPTION_KEY="$TOTP_ENCRYPTION_KEY" \
   -e RUN_MODE=simple \
   -e MODEL_TRACING_ENABLED=true \
+  -e MODEL_TRACING_DESTINATION=langfuse \
   -e MODEL_TRACING_ENDPOINT="$LANGFUSE_TRACE_ENDPOINT" \
   -e MODEL_TRACING_PUBLIC_KEY="$LANGFUSE_PK" \
   -e MODEL_TRACING_SECRET_KEY="$LANGFUSE_SK" \
@@ -323,7 +327,7 @@ echo "$PRESERVE_RESPONSE" | jq -e '
   .data.response_max_bytes == 3072
 ' >/dev/null || fail "non-secret update did not preserve the stored secret"
 
-STALE_STATUS=$(curl -sS -o "$CONFIG_RESPONSE_FILE" -w '%{http_code}' -X PUT \
+STALE_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "$PRESERVE_SECRET_CONFIG" "$CONFIG_URL")
 [[ "$STALE_STATUS" == "409" ]] || fail "stale config version returned HTTP $STALE_STATUS, want 409"
@@ -525,6 +529,16 @@ SUCCESS_ACCOUNT_PAYLOAD=$(jq -nc --argjson group_id "$FAILOVER_GROUP_ID" '{
 SUCCESS_ACCOUNT_ID=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "$SUCCESS_ACCOUNT_PAYLOAD" http://localhost:8080/api/v1/admin/accounts | jq -r '.data.id')
 [[ -n "$SUCCESS_ACCOUNT_ID" && "$SUCCESS_ACCOUNT_ID" != "null" ]] || fail "success Anthropic account creation failed"
+SCHEDULER_OUTBOX_TARGET=$(docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc \
+  "SELECT COALESCE(MAX(id), 0) FROM scheduler_outbox WHERE account_id IN ($FAIL_ACCOUNT_ID, $SUCCESS_ACCOUNT_ID)")
+SCHEDULER_OUTBOX_WATERMARK=""
+for _ in {1..100}; do
+  SCHEDULER_OUTBOX_WATERMARK=$(docker exec sub2api-deps-redis-1 redis-cli GET sched:outbox:watermark)
+  [[ "$SCHEDULER_OUTBOX_WATERMARK" =~ ^[0-9]+$ ]] && (( SCHEDULER_OUTBOX_WATERMARK >= SCHEDULER_OUTBOX_TARGET )) && break
+  sleep 0.1
+done
+[[ "$SCHEDULER_OUTBOX_WATERMARK" =~ ^[0-9]+$ ]] && (( SCHEDULER_OUTBOX_WATERMARK >= SCHEDULER_OUTBOX_TARGET )) || fail "failover account scheduler snapshots were not published"
+log "failover account scheduler snapshots published"
 
 ALL_FAIL_REQUEST_ID="e2e-all-fail-$RUN_ID"
 ALL_FAIL_SESSION_ID="e2e-all-fail-session-$RUN_ID"
@@ -613,7 +627,7 @@ SLOW_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.slow')
 update_success_account_endpoint "http://127.0.0.1:18081/slow"
 CLIENT_DISCONNECT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.out"
 CLIENT_DISCONNECT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.err"
-if "$RAW_RST_CLIENT_BIN" \
+if colima ssh --profile "$COLIMA_PROFILE" -- "$RAW_RST_CLIENT_BIN" \
   -addr 127.0.0.1:8080 \
   -token "$FAILOVER_APIKEY" \
   -request-id "$CLIENT_DISCONNECT_REQUEST_ID" \
@@ -807,7 +821,7 @@ WS_ACCOUNT_ID=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-
 WS_CLIENT_URL="ws://127.0.0.1:8080/v1/responses"
 WS_CLIENT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-client.err"
 WS_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.ws_turns')
-WS_MULTI_CLIENT_OUTPUT=$(go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_MULTI_CONNECTION_ID" --mode multi 2>"$WS_CLIENT_ERROR_FILE") \
+WS_MULTI_CLIENT_OUTPUT=$(colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_MULTI_CONNECTION_ID" --mode multi 2>"$WS_CLIENT_ERROR_FILE") \
   || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket multi-turn client failed"; }
 [[ "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=1 response_id=resp_e2e_ws_"* && "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=2 response_id=resp_e2e_ws_"* ]] \
   || fail "Responses WebSocket multi-turn client output mismatch"
@@ -816,7 +830,7 @@ WS_SWITCH_READY_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.ready"
 WS_SWITCH_CONTINUE_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.continue"
 WS_SWITCH_CLIENT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.out"
 rm -f "$WS_SWITCH_READY_FILE" "$WS_SWITCH_CONTINUE_FILE" "$WS_SWITCH_CLIENT_OUTPUT_FILE"
-go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_SWITCH_CONNECTION_ID" --mode pause \
+colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_SWITCH_CONNECTION_ID" --mode pause \
   --ready-file "$WS_SWITCH_READY_FILE" --continue-file "$WS_SWITCH_CONTINUE_FILE" >"$WS_SWITCH_CLIENT_OUTPUT_FILE" 2>"$WS_CLIENT_ERROR_FILE" &
 WS_SWITCH_CLIENT_PID=$!
 for _ in {1..100}; do
@@ -832,7 +846,7 @@ WS_SWITCH_CLIENT_OUTPUT=$(<"$WS_SWITCH_CLIENT_OUTPUT_FILE")
   || fail "Responses WebSocket config-switch client output mismatch"
 apply_runtime_tracing_config 10 true "$LANGFUSE_TRACE_ENDPOINT"
 
-WS_DISCONNECT_CLIENT_OUTPUT=$(go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
+WS_DISCONNECT_CLIENT_OUTPUT=$(colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
   || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket disconnect client failed"; }
 [[ "$WS_DISCONNECT_CLIENT_OUTPUT" == *"WS_DISCONNECTED connection_request_id=$WS_DISCONNECT_CONNECTION_ID partial_response_id=resp_e2e_ws_disconnect"* ]] \
   || fail "Responses WebSocket disconnect client did not close after partial output"

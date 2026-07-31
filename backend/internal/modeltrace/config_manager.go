@@ -53,6 +53,7 @@ type ConfigSnapshot struct {
 type RuntimeConfig struct {
 	Configured          bool      `json:"configured"`
 	Enabled             bool      `json:"enabled"`
+	Destination         string    `json:"destination"`
 	Endpoint            string    `json:"endpoint"`
 	PublicKey           string    `json:"public_key"`
 	SecretKeyEncrypted  string    `json:"secret_key_encrypted,omitempty"`
@@ -69,6 +70,7 @@ type RuntimeConfig struct {
 type PublicConfig struct {
 	Configured          bool      `json:"configured"`
 	Enabled             bool      `json:"enabled"`
+	Destination         string    `json:"destination"`
 	Endpoint            string    `json:"endpoint"`
 	PublicKey           string    `json:"public_key"`
 	HasSecret           bool      `json:"has_secret"`
@@ -87,6 +89,7 @@ type PublicConfig struct {
 type UpdateConfigRequest struct {
 	ExpectedConfigVersion int64   `json:"expected_config_version"`
 	Enabled               bool    `json:"enabled"`
+	Destination           string  `json:"destination"`
 	Endpoint              string  `json:"endpoint"`
 	PublicKey             string  `json:"public_key"`
 	SecretKey             *string `json:"secret_key"`
@@ -248,8 +251,9 @@ func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool, 
 	if json.Unmarshal([]byte(raw), &stored) != nil || !stored.Configured {
 		return ConfigSnapshot{}, false, nil
 	}
+	destination := config.NormalizeModelTracingDestination(stored.Destination)
 	secret := ""
-	if stored.SecretKeyEncrypted != "" {
+	if stored.SecretKeyEncrypted != "" && destination != config.ModelTracingDestinationOTLPCollector {
 		if m.encryptor == nil {
 			return ConfigSnapshot{}, false, nil
 		}
@@ -259,7 +263,8 @@ func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool, 
 		}
 	}
 	value, ok := normalizeConfig(config.ModelTracingConfig{
-		Enabled: stored.Enabled, Endpoint: stored.Endpoint, PublicKey: stored.PublicKey, SecretKey: secret,
+		Enabled: stored.Enabled, Destination: destination, Endpoint: stored.Endpoint,
+		PublicKey: stored.PublicKey, SecretKey: secret,
 		PromptMaxBytes: stored.PromptMaxBytes, ResponseMaxBytes: stored.ResponseMaxBytes,
 		MediaMaxBytes: stored.MediaMaxBytes, CaptureMediaContent: stored.CaptureMediaContent,
 	})
@@ -293,25 +298,29 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 		return PublicConfig{}, infraerrors.Conflict("MODEL_TRACE_CONFIG_CONFLICT", "model tracing config was updated by another administrator")
 	}
 
-	secretCiphertext, secretPlaintext, err := m.resolveSecretForUpdate(current, request.SecretKey, request.Enabled)
+	destination := config.NormalizeModelTracingDestination(request.Destination)
+	if !config.IsSupportedModelTracingDestination(destination) {
+		return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "model tracing destination must be langfuse or otlp_collector")
+	}
+	secretCiphertext, secretPlaintext, err := m.resolveSecretForUpdate(current, request.SecretKey, request.Enabled, destination)
 	if err != nil {
 		return PublicConfig{}, err
 	}
 	value, ok := normalizeConfig(config.ModelTracingConfig{
-		Enabled: request.Enabled, Endpoint: strings.TrimSpace(request.Endpoint),
+		Enabled: request.Enabled, Destination: destination, Endpoint: strings.TrimSpace(request.Endpoint),
 		PublicKey: strings.TrimSpace(request.PublicKey), SecretKey: secretPlaintext,
 		PromptMaxBytes: request.PromptMaxBytes, ResponseMaxBytes: request.ResponseMaxBytes,
 		MediaMaxBytes: request.MediaMaxBytes, CaptureMediaContent: request.CaptureMediaContent,
 	})
 	if !ok {
-		return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "enabled model tracing requires a valid endpoint, public key, and secret")
+		return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "enabled model tracing requires a supported destination and valid endpoint; Langfuse also requires public and secret keys")
 	}
 	next := RuntimeConfig{
-		Configured: true, Enabled: value.Enabled, Endpoint: value.Endpoint, PublicKey: value.PublicKey,
-		SecretKeyEncrypted: secretCiphertext, PromptMaxBytes: value.PromptMaxBytes,
-		ResponseMaxBytes: value.ResponseMaxBytes, MediaMaxBytes: value.MediaMaxBytes,
-		CaptureMediaContent: value.CaptureMediaContent, ConfigVersion: current.ConfigVersion + 1,
-		UpdatedAt: m.now().UTC(), UpdatedBy: actorID,
+		Configured: true, Enabled: value.Enabled, Destination: value.Destination,
+		Endpoint: value.Endpoint, PublicKey: value.PublicKey, SecretKeyEncrypted: secretCiphertext,
+		PromptMaxBytes: value.PromptMaxBytes, ResponseMaxBytes: value.ResponseMaxBytes,
+		MediaMaxBytes: value.MediaMaxBytes, CaptureMediaContent: value.CaptureMediaContent,
+		ConfigVersion: current.ConfigVersion + 1, UpdatedAt: m.now().UTC(), UpdatedBy: actorID,
 	}
 	var prepared *generation
 	if m.runtime != nil {
@@ -379,13 +388,16 @@ func (m *ConfigManager) readStoredRuntime(ctx context.Context) (RuntimeConfig, s
 	return stored, raw, nil
 }
 
-func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested *string, enabled bool) (ciphertext, plaintext string, err error) {
+func (m *ConfigManager) resolveSecretForUpdate(current RuntimeConfig, requested *string, enabled bool, destination string) (ciphertext, plaintext string, err error) {
 	if requested != nil {
 		plaintext = *requested
 		if plaintext == "" {
 			return "", "", nil
 		}
 		return m.encryptNewSecret(plaintext)
+	}
+	if destination == config.ModelTracingDestinationOTLPCollector {
+		return current.SecretKeyEncrypted, "", nil
 	}
 	if current.SecretKeyEncrypted != "" {
 		if !enabled {
@@ -424,7 +436,8 @@ func publicFromSnapshot(snapshot ConfigSnapshot) PublicConfig {
 	value := snapshot.Config
 	return PublicConfig{
 		Configured: snapshot.Source == ConfigSourceRuntime, Enabled: value.Enabled,
-		Endpoint: sanitizeEndpointForDisplay(value.Endpoint), PublicKey: value.PublicKey, HasSecret: value.SecretKey != "",
+		Destination: value.Destination, Endpoint: sanitizeEndpointForDisplay(value.Endpoint),
+		PublicKey: value.PublicKey, HasSecret: value.SecretKey != "",
 		PromptMaxBytes: value.PromptMaxBytes, ResponseMaxBytes: value.ResponseMaxBytes,
 		MediaMaxBytes: value.MediaMaxBytes, CaptureMediaContent: value.CaptureMediaContent,
 		Source: snapshot.Source, ConfigVersion: snapshot.ConfigVersion,
@@ -434,7 +447,8 @@ func publicFromSnapshot(snapshot ConfigSnapshot) PublicConfig {
 
 func publicFromRuntime(stored RuntimeConfig) PublicConfig {
 	return PublicConfig{
-		Configured: true, Enabled: stored.Enabled, Endpoint: sanitizeEndpointForDisplay(stored.Endpoint), PublicKey: stored.PublicKey,
+		Configured: true, Enabled: stored.Enabled, Destination: stored.Destination,
+		Endpoint: sanitizeEndpointForDisplay(stored.Endpoint), PublicKey: stored.PublicKey,
 		HasSecret: stored.SecretKeyEncrypted != "", PromptMaxBytes: stored.PromptMaxBytes,
 		ResponseMaxBytes: stored.ResponseMaxBytes, MediaMaxBytes: stored.MediaMaxBytes,
 		CaptureMediaContent: stored.CaptureMediaContent, Source: ConfigSourceRuntime,
@@ -443,7 +457,8 @@ func publicFromRuntime(stored RuntimeConfig) PublicConfig {
 }
 
 func normalizeConfig(value config.ModelTracingConfig) (config.ModelTracingConfig, bool) {
-	value.Endpoint = strings.TrimSpace(value.Endpoint)
+	value.Destination = config.NormalizeModelTracingDestination(value.Destination)
+	value.Endpoint = config.NormalizeModelTracingEndpoint(value.Destination, value.Endpoint)
 	value.PromptMaxBytes, value.ResponseMaxBytes, value.MediaMaxBytes = boundedSizes(value)
 	if !value.Enabled {
 		// Disabled snapshots cannot start an exporter. Canonicalize an old
@@ -451,7 +466,10 @@ func normalizeConfig(value config.ModelTracingConfig) (config.ModelTracingConfig
 		value.Endpoint = sanitizeEndpointForDisplay(value.Endpoint)
 		return value, true
 	}
-	if config.ValidateModelTracingEndpoint(value.Endpoint) != nil || value.PublicKey == "" || value.SecretKey == "" {
+	if !config.IsSupportedModelTracingDestination(value.Destination) || config.ValidateModelTracingEndpoint(value.Endpoint) != nil {
+		return config.ModelTracingConfig{}, false
+	}
+	if value.Destination == config.ModelTracingDestinationLangfuse && (value.PublicKey == "" || value.SecretKey == "") {
 		return config.ModelTracingConfig{}, false
 	}
 	return value, true

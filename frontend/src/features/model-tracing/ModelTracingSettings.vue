@@ -48,6 +48,23 @@
       <div class="grid gap-5 md:grid-cols-2">
         <label class="block md:col-span-2">
           <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.modelTracing.destination') }}
+          </span>
+          <select
+            v-model="draft.destination"
+            data-testid="model-tracing-destination"
+            class="input mt-1 w-full"
+          >
+            <option value="langfuse">{{ t('admin.modelTracing.destinationLangfuse') }}</option>
+            <option value="otlp_collector">{{ t('admin.modelTracing.destinationCollector') }}</option>
+          </select>
+          <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+            {{ t(draft.destination === 'langfuse' ? 'admin.modelTracing.destinationLangfuseHint' : 'admin.modelTracing.destinationCollectorHint') }}
+          </span>
+        </label>
+
+        <label class="block md:col-span-2">
+          <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.modelTracing.endpoint') }}
           </span>
           <input
@@ -56,21 +73,31 @@
             type="url"
             autocomplete="url"
             class="input mt-1 w-full"
-            placeholder="https://langfuse.example.com/api/public/otel/v1/traces"
+            :placeholder="draft.destination === 'langfuse' ? 'https://langfuse.example.com/api/public/otel/v1/traces' : 'http://collector.example.com:4318/v1/traces'"
           />
-          <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
-            {{ t('admin.modelTracing.endpointHint') }}
-          </span>
+          <div class="mt-1 flex items-start justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
+            <span>
+              {{ t(draft.destination === 'langfuse' ? 'admin.modelTracing.endpointHintLangfuse' : 'admin.modelTracing.endpointHintCollector') }}
+            </span>
+            <button
+              type="button"
+              data-testid="model-tracing-reset-path"
+              class="shrink-0 font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+              @click="resetEndpointPath"
+            >
+              {{ t('admin.modelTracing.resetStandardPath') }}
+            </button>
+          </div>
         </label>
 
-        <label class="block">
+        <label v-if="draft.destination === 'langfuse'" class="block">
           <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.modelTracing.publicKey') }}
           </span>
           <input v-model.trim="draft.publicKey" type="text" autocomplete="off" class="input mt-1 w-full" />
         </label>
 
-        <label class="block">
+        <label v-if="draft.destination === 'langfuse'" class="block">
           <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.modelTracing.secretKey') }}
           </span>
@@ -88,7 +115,7 @@
         </label>
       </div>
 
-      <label v-if="config?.has_secret" class="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-900/60 dark:bg-red-950/20">
+      <label v-if="draft.destination === 'langfuse' && config?.has_secret" class="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-900/60 dark:bg-red-950/20">
         <input
           v-model="draft.clearSecret"
           data-testid="model-tracing-clear-secret"
@@ -159,21 +186,26 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import Toggle from '@/components/common/Toggle.vue'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 import { getConfig, updateConfig } from './api'
-import type { ModelTracingConfig, UpdateModelTracingConfig } from './types'
+import type { ModelTracingConfig, ModelTracingDestination, UpdateModelTracingConfig } from './types'
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+const STANDARD_PATHS: Record<ModelTracingDestination, string> = {
+  langfuse: '/api/public/otel/v1/traces',
+  otlp_collector: '/v1/traces',
+}
 
 type ByteLimitKey = 'promptMaxBytes' | 'responseMaxBytes' | 'mediaMaxBytes'
 
 interface ConfigDraft {
   enabled: boolean
+  destination: ModelTracingDestination
   endpoint: string
   publicKey: string
   secretKey: string
@@ -209,6 +241,7 @@ function applyConfig(value: ModelTracingConfig) {
   config.value = value
   draft.value = {
     enabled: value.enabled,
+    destination: value.destination,
     endpoint: value.endpoint,
     publicKey: value.public_key,
     secretKey: '',
@@ -233,7 +266,34 @@ async function loadConfig() {
   }
 }
 
+function resetEndpointPath() {
+  if (!draft.value) return
+  const raw = draft.value.endpoint.trim()
+  if (!raw) return
+  try {
+    const endpoint = new URL(raw)
+    endpoint.pathname = STANDARD_PATHS[draft.value.destination]
+    endpoint.search = ''
+    endpoint.hash = ''
+    draft.value.endpoint = endpoint.toString()
+  } catch {
+    // Keep invalid input editable; backend validation reports it on save.
+  }
+}
+
+watch(() => draft.value?.destination, (destination, previous) => {
+  if (!draft.value || !destination || !previous || destination === previous) return
+  try {
+    const endpoint = new URL(draft.value.endpoint.trim())
+    if (endpoint.pathname !== STANDARD_PATHS[previous]) return
+  } catch {
+    return
+  }
+  resetEndpointPath()
+})
+
 function hasUsableSecret(value: ConfigDraft): boolean {
+  if (value.destination === 'otlp_collector') return true
   if (value.clearSecret) return false
   return value.secretKey.length > 0 || Boolean(config.value?.has_secret)
 }
@@ -247,7 +307,7 @@ async function saveConfig() {
   const value = draft.value
   message.value = ''
 
-  if (value.enabled && (!value.endpoint || !value.publicKey || !hasUsableSecret(value))) {
+  if (value.enabled && (!value.endpoint || (value.destination === 'langfuse' && (!value.publicKey || !hasUsableSecret(value))))) {
     messageKind.value = 'error'
     message.value = t('admin.modelTracing.requiredWhenEnabled')
     return
@@ -256,6 +316,7 @@ async function saveConfig() {
   const payload: UpdateModelTracingConfig = {
     expected_config_version: config.value.config_version,
     enabled: value.enabled,
+    destination: value.destination,
     endpoint: value.endpoint,
     public_key: value.publicKey,
     prompt_max_bytes: positiveInteger(value.promptMaxBytes),

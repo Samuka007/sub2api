@@ -104,9 +104,48 @@ type Config struct {
 	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
 }
 
-// ModelTracingConfig 模型请求 OTEL/Langfuse 追踪配置（默认关闭）。
+const (
+	ModelTracingDestinationLangfuse      = "langfuse"
+	ModelTracingDestinationOTLPCollector = "otlp_collector"
+	ModelTracingLangfuseDefaultPath      = "/api/public/otel/v1/traces"
+	ModelTracingOTLPCollectorDefaultPath = "/v1/traces"
+)
+
+func NormalizeModelTracingDestination(raw string) string {
+	destination := strings.ToLower(strings.TrimSpace(raw))
+	if destination == "" {
+		return ModelTracingDestinationLangfuse
+	}
+	return destination
+}
+
+func IsSupportedModelTracingDestination(destination string) bool {
+	return destination == ModelTracingDestinationLangfuse || destination == ModelTracingDestinationOTLPCollector
+}
+func ModelTracingDefaultPath(destination string) string {
+	if NormalizeModelTracingDestination(destination) == ModelTracingDestinationOTLPCollector {
+		return ModelTracingOTLPCollectorDefaultPath
+	}
+	return ModelTracingLangfuseDefaultPath
+}
+
+// NormalizeModelTracingEndpoint adds the destination's standard OTLP trace path
+// only when the administrator supplied an origin without a path. Explicit custom
+// paths, including "/", remain unchanged.
+func NormalizeModelTracingEndpoint(destination, raw string) string {
+	endpoint := strings.TrimSpace(raw)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.Path != "" {
+		return endpoint
+	}
+	u.Path = ModelTracingDefaultPath(destination)
+	return u.String()
+}
+
+// ModelTracingConfig 模型请求 OTLP 追踪配置（默认关闭）。
 type ModelTracingConfig struct {
 	Enabled             bool   `mapstructure:"enabled"`
+	Destination         string `mapstructure:"destination"`
 	Endpoint            string `mapstructure:"endpoint"`
 	PublicKey           string `mapstructure:"public_key"`
 	SecretKey           string `mapstructure:"secret_key"`
@@ -3693,6 +3732,7 @@ func warnIfInsecureURL(field, raw string) {
 
 func setModelTracingDefaults() {
 	viper.SetDefault("model_tracing.enabled", false)
+	viper.SetDefault("model_tracing.destination", ModelTracingDestinationLangfuse)
 	viper.SetDefault("model_tracing.endpoint", "")
 	viper.SetDefault("model_tracing.public_key", "")
 	viper.SetDefault("model_tracing.secret_key", "")
@@ -3716,7 +3756,8 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	if value == nil {
 		return
 	}
-	value.Endpoint = strings.TrimSpace(value.Endpoint)
+	value.Destination = NormalizeModelTracingDestination(value.Destination)
+	value.Endpoint = NormalizeModelTracingEndpoint(value.Destination, value.Endpoint)
 	value.PublicKey = strings.TrimSpace(value.PublicKey)
 	value.SecretKey = strings.TrimSpace(value.SecretKey)
 	if value.PromptMaxBytes <= 0 {
@@ -3744,7 +3785,10 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	if !value.Enabled {
 		return
 	}
-	if value.PublicKey == "" || value.SecretKey == "" || ValidateModelTracingEndpoint(value.Endpoint) != nil {
+	validDestination := IsSupportedModelTracingDestination(value.Destination)
+	requiresCredentials := value.Destination == ModelTracingDestinationLangfuse
+	if !validDestination || ValidateModelTracingEndpoint(value.Endpoint) != nil ||
+		(requiresCredentials && (value.PublicKey == "" || value.SecretKey == "")) {
 		value.Enabled = false
 		slog.Warn("invalid model_tracing deployment config; tracing disabled")
 	}

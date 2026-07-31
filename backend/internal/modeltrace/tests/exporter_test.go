@@ -86,6 +86,86 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 		}
 	})
 
+	t.Run("Langfuse base endpoint uses the standard trace path", func(t *testing.T) {
+		paths := make(chan string, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.Path
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
+			Enabled: true, Endpoint: server.URL, PublicKey: "public", SecretKey: "secret",
+		})
+		if err != nil {
+			t.Fatalf("modeltrace.NewManager rejected Langfuse base endpoint: %v", err)
+		}
+		_, span := manager.Tracer().Start(context.Background(), "langfuse-default-path")
+		span.End()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("shutdown exporter: %v", err)
+		}
+
+		select {
+		case got := <-paths:
+			if got != "/api/public/otel/v1/traces" {
+				t.Fatalf("Langfuse export path = %q, want standard path", got)
+			}
+		default:
+			t.Fatal("Langfuse endpoint received no OTLP request")
+		}
+	})
+
+	t.Run("collector exports without Langfuse authentication headers", func(t *testing.T) {
+		type receivedRequest struct {
+			path          string
+			authorization string
+			ingestion     string
+		}
+		requests := make(chan receivedRequest, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests <- receivedRequest{
+				path:          r.URL.Path,
+				authorization: r.Header.Get("Authorization"),
+				ingestion:     r.Header.Get("x-langfuse-ingestion-version"),
+			}
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
+			Enabled:     true,
+			Destination: config.ModelTracingDestinationOTLPCollector,
+			Endpoint:    server.URL,
+		})
+		if err != nil {
+			t.Fatalf("modeltrace.NewManager rejected collector without Langfuse credentials: %v", err)
+		}
+		_, span := manager.Tracer().Start(context.Background(), "collector-no-auth")
+		span.End()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("shutdown exporter: %v", err)
+		}
+
+		select {
+		case got := <-requests:
+			if got.path != "/v1/traces" {
+				t.Fatalf("collector export path = %q, want standard path", got.path)
+			}
+			if got.authorization != "" || got.ingestion != "" {
+				t.Fatalf("collector received Langfuse headers: Authorization=%q ingestion=%q", got.authorization, got.ingestion)
+			}
+		default:
+			t.Fatal("collector received no OTLP request")
+		}
+	})
+
 	t.Run("HTTPS keeps standard certificate verification", func(t *testing.T) {
 		previousErrorHandler := otel.GetErrorHandler()
 		exportErrors := make(chan error, 1)

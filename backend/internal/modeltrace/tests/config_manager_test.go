@@ -58,6 +58,7 @@ func decodeModelTraceRuntime(t *testing.T, store *modelTraceSettingsStore) model
 func TestModelTraceConfigUsesDeploymentOnly(t *testing.T) {
 	deployment := config.ModelTracingConfig{
 		Enabled:             true,
+		Destination:         config.ModelTracingDestinationLangfuse,
 		Endpoint:            "https://langfuse.example.test/api/public/otel",
 		PublicKey:           "deployment-public",
 		SecretKey:           "deployment-secret",
@@ -242,6 +243,82 @@ func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 	conflictRecorder := httptest.NewRecorder()
 	router.ServeHTTP(conflictRecorder, httptest.NewRequest(http.MethodPut, "/api/v1/admin/model-tracing/config", bytes.NewReader(body)))
 	require.Equal(t, http.StatusConflict, conflictRecorder.Code)
+}
+
+func TestModelTraceConfigAdminAPIAcceptsCollectorWithoutLangfuseCredentials(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &modelTraceSettingsStore{}
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true)
+	handler := modeltrace.NewAdminHandler(manager)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+		c.Set(string(middleware.ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	router.PUT("/api/v1/admin/model-tracing/config", handler.UpdateConfig)
+
+	body := bytes.NewBufferString(`{
+		"expected_config_version": 0,
+		"enabled": true,
+		"destination": "otlp_collector",
+		"endpoint": "http://collector.example.test:4318/v1/traces",
+		"public_key": "",
+		"prompt_max_bytes": 100,
+		"response_max_bytes": 200,
+		"media_max_bytes": 300,
+		"capture_media_content": false
+	}`)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/v1/admin/model-tracing/config", body))
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"destination":"otlp_collector"`)
+	require.Contains(t, recorder.Body.String(), `"has_secret":false`)
+	require.Contains(t, store.value, `"destination":"otlp_collector"`)
+}
+
+func TestModelTraceConfigCollectorDoesNotRequireDeploymentSecretEncryption(t *testing.T) {
+	store := &modelTraceSettingsStore{}
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{
+		Enabled: true, Endpoint: "https://langfuse.example.test",
+		PublicKey: "deployment-public", SecretKey: "deployment-secret",
+	}, store, nil, false)
+
+	got, err := manager.Save(context.Background(), modeltrace.UpdateConfigRequest{
+		ExpectedConfigVersion: 0,
+		Enabled:               true,
+		Destination:           config.ModelTracingDestinationOTLPCollector,
+		Endpoint:              "http://collector.example.test:4318",
+		PromptMaxBytes:        100,
+		ResponseMaxBytes:      200,
+		MediaMaxBytes:         300,
+	}, 99)
+	require.NoError(t, err)
+	require.Equal(t, "http://collector.example.test:4318/v1/traces", got.Endpoint)
+	require.False(t, got.HasSecret)
+	require.Empty(t, decodeModelTraceRuntime(t, store).SecretKeyEncrypted)
+}
+
+func TestModelTraceConfigCollectorLoadsWithoutDecryptingPreservedLangfuseSecret(t *testing.T) {
+	raw, err := json.Marshal(modeltrace.RuntimeConfig{
+		Configured: true, Enabled: true,
+		Destination:        config.ModelTracingDestinationOTLPCollector,
+		Endpoint:           "http://collector.example.test:4318",
+		SecretKeyEncrypted: "unreadable-preserved-secret",
+		PromptMaxBytes:     100, ResponseMaxBytes: 200, MediaMaxBytes: 300,
+		ConfigVersion: 7,
+	})
+	require.NoError(t, err)
+	manager := modeltrace.NewConfigManager(config.ModelTracingConfig{}, &modelTraceSettingsStore{value: string(raw)}, nil, false)
+
+	got := manager.Resolve(context.Background())
+
+	require.Equal(t, modeltrace.ConfigSourceRuntime, got.Source)
+	require.True(t, got.Config.Enabled)
+	require.Equal(t, config.ModelTracingDestinationOTLPCollector, got.Config.Destination)
+	require.Equal(t, "http://collector.example.test:4318/v1/traces", got.Config.Endpoint)
+	require.Empty(t, got.Config.SecretKey)
 }
 
 func TestModelTraceConfigRejectsEndpointCredentialsQueriesAndFragments(t *testing.T) {

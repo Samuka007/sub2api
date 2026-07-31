@@ -104,9 +104,10 @@ services:
       - SETUP_MIGRATION_TIMEOUT_SECONDS=${SETUP_MIGRATION_TIMEOUT_SECONDS:-0}
 
       # =======================================================================
-      # Model Request Tracing (Langfuse OTLP, Optional)
+      # Model Request Tracing (OTLP, Optional)
       # =======================================================================
       - MODEL_TRACING_ENABLED=${MODEL_TRACING_ENABLED:-false}
+      - MODEL_TRACING_DESTINATION=${MODEL_TRACING_DESTINATION:-langfuse}
       - MODEL_TRACING_ENDPOINT=${MODEL_TRACING_ENDPOINT:-}
       - MODEL_TRACING_PUBLIC_KEY=${MODEL_TRACING_PUBLIC_KEY:-}
       - MODEL_TRACING_SECRET_KEY=${MODEL_TRACING_SECRET_KEY:-}

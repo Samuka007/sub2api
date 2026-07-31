@@ -1,8 +1,10 @@
 export type ModelTracingConfigSource = 'disabled' | 'deployment' | 'runtime'
+export type ModelTracingDestination = 'langfuse' | 'otlp_collector'
 
 export interface ModelTracingConfig {
   configured: boolean
   enabled: boolean
+  destination: ModelTracingDestination
   endpoint: string
   public_key: string
   has_secret: boolean
@@ -19,6 +21,7 @@ export interface ModelTracingConfig {
 export interface UpdateModelTracingConfig {
   expected_config_version: number
   enabled: boolean
+  destination: ModelTracingDestination
   endpoint: string
   public_key: string
   secret_key?: string

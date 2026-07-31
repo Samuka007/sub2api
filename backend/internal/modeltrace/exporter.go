@@ -430,6 +430,8 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	cfg.ExportQueueSize = queueSize
 	cfg.ExportBatchSize = batchSize
 	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
+	cfg.Destination = config.NormalizeModelTracingDestination(cfg.Destination)
+	cfg.Endpoint = config.NormalizeModelTracingEndpoint(cfg.Destination, cfg.Endpoint)
 	g := &generation{cfg: cfg, source: source, version: version}
 	g.fingerprint = generationFingerprint(cfg, source, version)
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
@@ -438,21 +440,28 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	if err := config.ValidateModelTracingEndpoint(cfg.Endpoint); err != nil {
 		return nil, fmt.Errorf("modeltrace: invalid endpoint: %w", err)
 	}
-	if cfg.PublicKey == "" || cfg.SecretKey == "" {
-		return nil, errors.New("modeltrace: public_key and secret_key required when enabled")
+	switch cfg.Destination {
+	case config.ModelTracingDestinationLangfuse:
+		if cfg.PublicKey == "" || cfg.SecretKey == "" {
+			return nil, errors.New("modeltrace: public_key and secret_key required for Langfuse")
+		}
+	case config.ModelTracingDestinationOTLPCollector:
+	default:
+		return nil, fmt.Errorf("modeltrace: unsupported destination %q", cfg.Destination)
 	}
 
 	endpoint, path, insecure := splitEndpoint(cfg.Endpoint)
-	headers := map[string]string{
-		"Authorization":      "Basic " + base64.StdEncoding.EncodeToString([]byte(cfg.PublicKey+":"+cfg.SecretKey)),
-		langfuseIngestionHdr: "4",
-	}
 	exporterOpts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(endpoint),
 		otlptracehttp.WithURLPath(path),
-		otlptracehttp.WithHeaders(headers),
 		otlptracehttp.WithTimeout(exportTimeout),
 		otlptracehttp.WithHTTPClient(newRetryableOTLPHTTPClient(exportTimeout)),
+	}
+	if cfg.Destination == config.ModelTracingDestinationLangfuse {
+		exporterOpts = append(exporterOpts, otlptracehttp.WithHeaders(map[string]string{
+			"Authorization":      "Basic " + base64.StdEncoding.EncodeToString([]byte(cfg.PublicKey+":"+cfg.SecretKey)),
+			langfuseIngestionHdr: "4",
+		}))
 	}
 	exporterOpts = append(exporterOpts, otlptracehttp.WithRetry(otlptracehttp.RetryConfig{
 		Enabled:         retry.Enabled,
@@ -743,7 +752,7 @@ func logGenerationApplied(g *generation) {
 		return
 	}
 	slog.Info("model trace configuration applied",
-		"enabled", g.enabled(), "source", g.source, "config_version", g.version,
+		"enabled", g.enabled(), "destination", g.cfg.Destination, "source", g.source, "config_version", g.version,
 		"prompt_max_bytes", g.cfg.PromptMaxBytes, "response_max_bytes", g.cfg.ResponseMaxBytes,
 		"media_max_bytes", g.cfg.MediaMaxBytes, "capture_media_content", g.cfg.CaptureMediaContent,
 		"export_timeout_seconds", g.cfg.ExportTimeoutSeconds,

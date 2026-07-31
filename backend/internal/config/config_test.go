@@ -59,6 +59,20 @@ func TestLoadDisablesModelTracingForUnsafeEndpointComponents(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesModelTracingCollectorWithoutLangfuseCredentials(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	viper.Set("model_tracing.enabled", true)
+	viper.Set("model_tracing.destination", "otlp_collector")
+	viper.Set("model_tracing.endpoint", "http://collector.example.test:4318")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.ModelTracing.Enabled)
+	require.Equal(t, "http://collector.example.test:4318/v1/traces", cfg.ModelTracing.Endpoint)
+	require.Empty(t, cfg.ModelTracing.PublicKey)
+	require.Empty(t, cfg.ModelTracing.SecretKey)
+}
+
 func TestLoadModelTracingExportDefaultsRemainBackwardCompatible(t *testing.T) {
 	resetViperWithJWTSecret(t)
 
