@@ -6,8 +6,7 @@
     "expected_behavior": "启动 Langfuse + sub2api deps + 编译并启动 sub2api，先验证部署/运行时配置闭环，再发匿名、未知 Key、已鉴权控制面、有效 Key 503、disabled Key 401 五类请求；ClickHouse 中前三类均为 0 Trace，后两类各为 1 条 Trace/1 个根 SPAN 且没有虚构 GENERATION，最终输出 VERIFY_OK",
     "assertions": [
       "stdout 最后三行为 trace_id、1、VERIFY_OK",
-      "部署配置响应不含 secret；有效运行时配置版本递增，非秘密更新保留 secret，过期版本返回 409",
-      "远端非回环 HTTP endpoint 更新返回 400，旧配置保持不变",
+      "完整 OTLP Trace endpoint 原样生效且不追加路径；部署配置响应不含 secret；有效运行时配置版本递增，非秘密更新保留 secret，过期版本返回 409",
       "匿名请求、未知 API Key、已鉴权 /v1/models 控制面均导出 0 Trace",
       "有效 Key 的 503 与 disabled Key 的 401 各导出 1 条 Trace/1 个 ERROR 根 SPAN且没有 GENERATION",
       "有效 Key trace metadata 含正确 api_key_id、group_id、request_id，session_id 与请求一致",

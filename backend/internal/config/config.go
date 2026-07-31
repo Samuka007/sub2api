@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -3783,9 +3782,9 @@ func normalizeModelTracingRetry(retry *ModelTracingExportRetryConfig) {
 	}
 }
 
-// ValidateModelTracingEndpoint accepts HTTPS targets and loopback-only HTTP
-// targets. Credentials and URL suffix components are forbidden because the
-// endpoint is used as an OTLP transport authority and base path.
+// ValidateModelTracingEndpoint accepts complete HTTP or HTTPS OTLP trace
+// endpoints. Credentials, queries, and fragments remain forbidden so secrets
+// cannot be smuggled into transport URLs or exposed through configuration APIs.
 func ValidateModelTracingEndpoint(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -3810,17 +3809,5 @@ func ValidateModelTracingEndpoint(raw string) error {
 	if u.Fragment != "" {
 		return errors.New("endpoint must not include a fragment")
 	}
-	host := u.Hostname()
-	if strings.EqualFold(u.Scheme, "http") && !isModelTracingLoopbackHost(host) {
-		return fmt.Errorf("http endpoint must be loopback, got %q", host)
-	}
 	return nil
-}
-
-func isModelTracingLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

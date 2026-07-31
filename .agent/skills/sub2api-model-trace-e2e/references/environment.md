@@ -117,21 +117,19 @@ docker buildx build --load \
 
 E2E compose 故意使用 `langfuse:3` 做 fresh compatibility smoke；持久部署不能继续依赖该浮动标签。启动后必须同时核对 health version、OCI version/revision 和 RepoDigest，再把 Web/Worker digest 写入部署 compose。本次已验证的 `3.223.0` 仅是观测证据，不代表未来 `:3` 仍指向同一镜像。
 
-明文 OTLP endpoint 仍受 loopback 规则约束。原生 Linux 部署可让 Sub2API 使用 `network_mode: host`，Langfuse Web 仅映射宿主 `127.0.0.1:3000:3000`，然后配置 `MODEL_TRACING_ENDPOINT=http://127.0.0.1:3000`；外部 UI 必须经带认证的 HTTPS 反向代理访问，不得把明文 `3000` 暴露到所有接口。Sub2API 的 PostgreSQL/Redis 应映射到独立回环端口（参考 `15432`/`16379`），避免与 Langfuse 的 `5432`/`6379` 冲突。
+明文 OTLP endpoint 允许用于受控内网或本机 Collector；生产是否使用 HTTP 必须由部署方结合网络隔离决定。原生 Linux 部署可让 Sub2API 使用 `network_mode: host`，Langfuse Web 仅映射宿主 `127.0.0.1:3000:3000`，然后配置完整端点 `MODEL_TRACING_ENDPOINT=http://127.0.0.1:3000/api/public/otel/v1/traces`。外部 UI 仍应经带认证的 HTTPS 反向代理访问，不得把明文 `3000` 暴露到所有接口。
 
 新初始化管理员的余额可能为 0。已识别请求若返回 `403 INSUFFICIENT_BALANCE`，说明请求尚未到达“无上游账号”的 503 路径，不能据此判断 tracing 失败。部署 smoke 可以临时提高测试用户余额，但必须在 trap 中恢复原值，并删除测试 API key/group；随后仍需以 503、唯一根 Span 和 ClickHouse 实际行作为通过条件。
 
 ## Endpoint 校验规则
 
-sub2api 的 `config.validModelTracingEndpoint`（`backend/internal/config/config.go`）强制：
-- `https://` 永远允许
-- `http://` 仅允许 host 为 `localhost` 或字面量回环 IP（`127.0.0.1`/`::1`）
-- 其他 scheme 拒绝
+sub2api 的 `ValidateModelTracingEndpoint`（`backend/internal/config/config.go`）强制：
+- 允许完整的 `http://` 或 `https://` OTLP Trace endpoint，包括远程 HTTP Collector
+- 不自动追加 `/api/public/otel`、`/v1/traces` 或删除末尾 `/`
+- 拒绝 userinfo、query、fragment 和其他 scheme
 - **不**提供 `InsecureSkipVerify` 或跳过证书校验开关
 
-因此 e2e 必须用 `MODEL_TRACING_ENDPOINT=http://127.0.0.1:3000`，**禁止** `http://host.docker.internal:3000`（非字面回环会被拒）或 `http://sub2api-langfuse-langfuse-web-1:3000`（非 loopback）。
-
-这就是 `run_e2e.sh` 用 `--network host` + `127.0.0.1` 的原因：让 sub2api 容器内 127.0.0.1 等于 VM 的 127.0.0.1，从而既符合 endpoint 校验又能访问 Langfuse 暴露的 3000 端口。
+E2E 使用完整端点 `http://127.0.0.1:3000/api/public/otel/v1/traces`。`--network host` 让 sub2api 容器可访问 VM 回环地址上的 Langfuse；这是测试网络拓扑选择，不再是 endpoint validator 的限制。
 
 ## 默认内容上限门禁
 
@@ -181,7 +179,7 @@ sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_
 | 现象 | 原因 | 解法 |
 |------|------|------|
 | `config file creation failed: open /data/config.yaml: no such file or directory` | `DATA_DIR` 没挂卷 | `docker volume create sub2api-e2e-data` + `-v sub2api-e2e-data:/data` |
-| `invalid model_tracing deployment config; tracing disabled` | endpoint 非 loopback | 改用 `http://127.0.0.1:3000` + `--network host` |
+| `invalid model_tracing deployment config; tracing disabled` | endpoint 不是合法的完整 HTTP(S) URL，或含 userinfo/query/fragment | 改为完整 OTLP Trace endpoint，例如 `http://127.0.0.1:3000/api/public/otel/v1/traces` |
 | `database connection failed: pq: password authentication failed for user "postgres"` | AUTO_SETUP 用 `DATABASE_*` 环境变量，不是 `DB_*` | 全部用 `DATABASE_HOST`/`DATABASE_PORT`/`DATABASE_USER`/... |
 | `NeedsSetup=false` 跳过 AUTO_SETUP | 上次写的 config.yaml 还在 /data 卷里 | `docker volume rm sub2api-e2e-data` 或脚本里 `DROP SCHEMA public CASCADE` 重置 |
 | API Key 响应里 `key: "[openai_token_redacted]"` | sub2api 对 OpenAI 平台 group 的 key 做了 redact 展示 | 直接 `docker exec` 进 PG 用 `UPDATE api_keys SET key='sk-...'` 改成可鉴权值 |

@@ -17,18 +17,18 @@ import (
 )
 
 func TestModelTraceEndpointTransport(t *testing.T) {
-	t.Run("accepts only HTTPS or loopback HTTP", func(t *testing.T) {
+	t.Run("accepts complete HTTP or HTTPS endpoints", func(t *testing.T) {
 		tests := []struct {
 			name      string
 			endpoint  string
 			wantError bool
 		}{
-			{name: "remote HTTPS", endpoint: "https://langfuse.example.com"},
-			{name: "localhost HTTP", endpoint: "http://localhost:3000"},
-			{name: "IPv4 loopback HTTP", endpoint: "http://127.0.0.1:3000"},
-			{name: "IPv6 loopback HTTP", endpoint: "http://[::1]:3000"},
-			{name: "remote domain HTTP", endpoint: "http://langfuse.example.com", wantError: true},
-			{name: "remote IP HTTP", endpoint: "http://192.0.2.10:3000", wantError: true},
+			{name: "remote HTTPS", endpoint: "https://langfuse.example.com/api/public/otel/v1/traces"},
+			{name: "localhost HTTP", endpoint: "http://localhost:3000/custom/traces"},
+			{name: "IPv4 loopback HTTP", endpoint: "http://127.0.0.1:3000/custom/traces"},
+			{name: "IPv6 loopback HTTP", endpoint: "http://[::1]:3000/custom/traces"},
+			{name: "remote domain HTTP", endpoint: "http://collector.example.com:4318/v1/traces"},
+			{name: "remote IP HTTP", endpoint: "http://192.0.2.10:4318/custom/traces"},
 			{name: "userinfo", endpoint: "https://user:credential-canary@langfuse.example.com/api/public/otel", wantError: true},
 			{name: "query", endpoint: "https://langfuse.example.com/api/public/otel?token=query-canary", wantError: true},
 			{name: "fragment", endpoint: "https://langfuse.example.com/api/public/otel#fragment-canary", wantError: true},
@@ -49,35 +49,40 @@ func TestModelTraceEndpointTransport(t *testing.T) {
 		}
 	})
 
-	t.Run("remote HTTP is rejected before OTLP export", func(t *testing.T) {
-		var requests atomic.Int32
-		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			requests.Add(1)
+	t.Run("exports to the configured HTTP path without rewriting it", func(t *testing.T) {
+		const configuredPath = "/custom/collector/traces/"
+		paths := make(chan string, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths <- r.URL.Path
+			w.Header().Set("Content-Type", "application/x-protobuf")
 			w.WriteHeader(http.StatusOK)
 		}))
-		defer proxy.Close()
-
-		t.Setenv("HTTP_PROXY", proxy.URL)
-		t.Setenv("http_proxy", proxy.URL)
-		t.Setenv("NO_PROXY", "")
-		t.Setenv("no_proxy", "")
+		defer server.Close()
 
 		manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
 			Enabled:   true,
-			Endpoint:  "http://192.0.2.10:4318",
+			Endpoint:  server.URL + configuredPath,
 			PublicKey: "public",
 			SecretKey: "secret",
 		})
-		if err == nil {
-			_, span := manager.Tracer().Start(context.Background(), "must-not-export")
-			span.End()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			_ = manager.Shutdown(shutdownCtx)
-			t.Error("modeltrace.NewManager accepted a remote plaintext endpoint")
+		if err != nil {
+			t.Fatalf("modeltrace.NewManager rejected HTTP endpoint: %v", err)
 		}
-		if got := requests.Load(); got != 0 {
-			t.Fatalf("remote HTTP rejection emitted %d OTLP requests, want 0", got)
+		_, span := manager.Tracer().Start(context.Background(), "exact-endpoint")
+		span.End()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("shutdown exporter: %v", err)
+		}
+
+		select {
+		case got := <-paths:
+			if got != configuredPath {
+				t.Fatalf("export path = %q, want configured path %q", got, configuredPath)
+			}
+		default:
+			t.Fatal("configured HTTP endpoint received no OTLP request")
 		}
 	})
 

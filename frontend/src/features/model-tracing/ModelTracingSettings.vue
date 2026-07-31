@@ -56,7 +56,7 @@
             type="url"
             autocomplete="url"
             class="input mt-1 w-full"
-            placeholder="https://langfuse.example.com/api/public/otel"
+            placeholder="https://langfuse.example.com/api/public/otel/v1/traces"
           />
           <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
             {{ t('admin.modelTracing.endpointHint') }}

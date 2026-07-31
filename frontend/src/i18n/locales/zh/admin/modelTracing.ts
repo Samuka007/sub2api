@@ -5,7 +5,7 @@ export default {
     enabled: '启用模型追踪',
     enabledHint: '默认关闭。启用时必须配置端点和项目凭证。',
     endpoint: 'OTLP 端点',
-    endpointHint: '填写 Langfuse OTLP 基础端点，例如 https://langfuse.example.com/api/public/otel。',
+    endpointHint: '填写完整的 OTLP Trace 端点；系统不会追加路径。Langfuse：https://langfuse.example.com/api/public/otel/v1/traces；Collector：http://collector.example.com:4318/v1/traces。',
     publicKey: 'Public Key',
     secretKey: 'Secret Key',
     secretConfigured: 'Secret 已配置；留空会保留当前值，页面不会回显密文。',

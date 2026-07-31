@@ -453,7 +453,7 @@ func newSequencedOTLPServer(t *testing.T, statuses ...int) *sequencedOTLPServer 
 		if r.Method != http.MethodPost {
 			collector.errors = append(collector.errors, "method="+r.Method)
 		}
-		if r.URL.Path != "/api/public/otel/v1/traces" {
+		if r.URL.Path != "/api/public/otel" {
 			collector.errors = append(collector.errors, "path="+r.URL.Path)
 		}
 		if status == http.StatusOK {
