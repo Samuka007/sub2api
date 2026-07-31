@@ -1007,6 +1007,10 @@ jwt:
 model_tracing:
   # Disabled by default. See docs/MODEL_TRACING.md before production rollout.
   # 默认关闭；生产灰度前请阅读 docs/MODEL_TRACING.md。
+  # Complete OTLP trace endpoint; no path is appended.
+  # 完整 OTLP Trace 端点；系统不会追加路径。
+  # Langfuse example: https://langfuse.example.com/api/public/otel/v1/traces
+  # Collector example: http://collector.example.com:4318/v1/traces
   enabled: false
   endpoint: ""
   public_key: ""

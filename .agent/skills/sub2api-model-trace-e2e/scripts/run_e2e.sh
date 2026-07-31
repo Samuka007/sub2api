@@ -13,7 +13,7 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
 
 COLIMA_PROFILE="${COLIMA_PROFILE:-swebench}"
 DOCKER_HOST_SOCK="${DOCKER_HOST_SOCK:-$HOME/.config/colima/${COLIMA_PROFILE}/docker.sock}"
@@ -27,6 +27,7 @@ SUB2API_PORT="${SUB2API_PORT:-18080}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@e2e.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin12345}"
 LANGFUSE_URL="${LANGFUSE_URL:-http://127.0.0.1:3000}"
+LANGFUSE_TRACE_ENDPOINT="${LANGFUSE_TRACE_ENDPOINT:-$LANGFUSE_URL/api/public/otel/v1/traces}"
 LANGFUSE_PK="${LANGFUSE_PK:-pk-lf-local}"
 LANGFUSE_SK="${LANGFUSE_SK:-sk-lf-local}"
 TOTP_ENCRYPTION_KEY="${TOTP_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
@@ -208,7 +209,7 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e \
   -e TOTP_ENCRYPTION_KEY="$TOTP_ENCRYPTION_KEY" \
   -e RUN_MODE=simple \
   -e MODEL_TRACING_ENABLED=true \
-  -e MODEL_TRACING_ENDPOINT="$LANGFUSE_URL" \
+  -e MODEL_TRACING_ENDPOINT="$LANGFUSE_TRACE_ENDPOINT" \
   -e MODEL_TRACING_PUBLIC_KEY="$LANGFUSE_PK" \
   -e MODEL_TRACING_SECRET_KEY="$LANGFUSE_SK" \
   -e MODEL_TRACING_CAPTURE_MEDIA_CONTENT=false \
@@ -261,10 +262,9 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   -d "{\"phrase\":\"$PHRASE\",\"language\":\"en\"}" \
   http://localhost:8080/api/v1/admin/compliance/accept >/dev/null
 
-# 5.1 验证部署默认、运行时整体更新、secret 三态、CAS 与传输安全
+# 5.1 验证完整 endpoint、部署默认、运行时整体更新、secret 三态与 CAS
 log "verifying runtime model tracing configuration"
 CONFIG_URL="http://localhost:8080/api/v1/admin/model-tracing/config"
-CONFIG_RESPONSE_FILE="$REPO_ROOT/.e2e-tmp/model-tracing-config-response.json"
 
 DEPLOYMENT_CONFIG=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$CONFIG_URL")
 echo "$DEPLOYMENT_CONFIG" | jq -e '
@@ -280,23 +280,13 @@ echo "$DEPLOYMENT_CONFIG" | jq -e '
   (.data | has("secret_key_encrypted") | not)
 ' >/dev/null || fail "deployment model tracing config is not public or effective"
 [[ "$DEPLOYMENT_CONFIG" != *"$LANGFUSE_SK"* ]] || fail "deployment config response leaked secret material"
+DEPLOYMENT_ENDPOINT=$(echo "$DEPLOYMENT_CONFIG" | jq -r '.data.endpoint')
+[[ "$DEPLOYMENT_ENDPOINT" == "$LANGFUSE_TRACE_ENDPOINT" ]] \
+  || fail "deployment endpoint changed: got $DEPLOYMENT_ENDPOINT"
 
-INVALID_CONFIG=$(jq -nc \
-  --arg endpoint "http://192.0.2.10:4318" \
-  --arg public_key "$LANGFUSE_PK" \
-  --arg secret_key "$LANGFUSE_SK" \
-  '{expected_config_version:0,enabled:true,endpoint:$endpoint,public_key:$public_key,secret_key:$secret_key,prompt_max_bytes:1048576,response_max_bytes:1048576,media_max_bytes:1048576,capture_media_content:false}')
-INVALID_STATUS=$(curl -sS -o "$CONFIG_RESPONSE_FILE" -w '%{http_code}' -X PUT \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "$INVALID_CONFIG" "$CONFIG_URL")
-[[ "$INVALID_STATUS" == "400" ]] || fail "remote plaintext endpoint returned HTTP $INVALID_STATUS, want 400"
-
-AFTER_INVALID=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$CONFIG_URL")
-echo "$AFTER_INVALID" | jq -e '.data.source == "deployment" and .data.config_version == 0' >/dev/null \
-  || fail "invalid update changed the effective model tracing config"
 
 RUNTIME_CONFIG=$(jq -nc \
-  --arg endpoint "$LANGFUSE_URL" \
+  --arg endpoint "$LANGFUSE_TRACE_ENDPOINT" \
   --arg public_key "$LANGFUSE_PK" \
   --arg secret_key "$LANGFUSE_SK" \
   '{expected_config_version:0,enabled:true,endpoint:$endpoint,public_key:$public_key,secret_key:$secret_key,prompt_max_bytes:4096,response_max_bytes:4096,media_max_bytes:4096,capture_media_content:false}')
@@ -314,9 +304,12 @@ echo "$RUNTIME_RESPONSE" | jq -e '
   (.data | has("secret_key_encrypted") | not)
 ' >/dev/null || fail "valid runtime model tracing update was not applied atomically"
 [[ "$RUNTIME_RESPONSE" != *"$LANGFUSE_SK"* ]] || fail "runtime update response leaked secret material"
+RUNTIME_ENDPOINT=$(echo "$RUNTIME_RESPONSE" | jq -r '.data.endpoint')
+[[ "$RUNTIME_ENDPOINT" == "$LANGFUSE_TRACE_ENDPOINT" ]] \
+  || fail "runtime endpoint changed: got $RUNTIME_ENDPOINT"
 
 PRESERVE_SECRET_CONFIG=$(jq -nc \
-  --arg endpoint "$LANGFUSE_URL" \
+  --arg endpoint "$LANGFUSE_TRACE_ENDPOINT" \
   --arg public_key "$LANGFUSE_PK" \
   '{expected_config_version:1,enabled:true,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:2048,response_max_bytes:3072,media_max_bytes:4096,capture_media_content:false}')
 PRESERVE_RESPONSE=$(curl -fsS -X PUT \
@@ -447,7 +440,7 @@ DISABLED_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
 # 6.1 小上限截断完成后恢复默认 1 MiB，并发送接近但不超过上限的真实 Prompt。
 log "restoring runtime limits to the 1 MiB deployment defaults"
 DEFAULT_LIMIT_CONFIG=$(jq -nc \
-  --arg endpoint "$LANGFUSE_URL" \
+  --arg endpoint "$LANGFUSE_TRACE_ENDPOINT" \
   --arg public_key "$LANGFUSE_PK" \
   '{expected_config_version:2,enabled:true,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:1048576,response_max_bytes:1048576,media_max_bytes:1048576,capture_media_content:false}')
 DEFAULT_LIMIT_RESPONSE=$(curl -fsS -X PUT \
@@ -680,7 +673,7 @@ for i in {1..50}; do
   sleep 0.1
 done
 (( HOLD_READY >= 1 )) || fail "in-flight request did not reach hold fixture"
-apply_runtime_tracing_config 3 false "$LANGFUSE_URL"
+apply_runtime_tracing_config 3 false "$LANGFUSE_TRACE_ENDPOINT"
 curl -fsS -X POST http://localhost:18081/control/hold/release >/dev/null
 wait "$HOLD_PID"
 HOLD_CODE=$(<"$HOLD_CODE_FILE")
@@ -693,7 +686,7 @@ POST_DISABLE_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"new request while tracing disabled"}]}' \
   -o /dev/null -w '%{http_code}')
 [[ "$POST_DISABLE_CODE" == "200" ]] || fail "post-disable business request returned HTTP $POST_DISABLE_CODE, want 200"
-apply_runtime_tracing_config 4 true "$LANGFUSE_URL"
+apply_runtime_tracing_config 4 true "$LANGFUSE_TRACE_ENDPOINT"
 log "in-flight snapshot verified: old_request=completed new_request=untraced"
 
 # 6.6 真实 OTLP 500 与慢导出器不得改变完整业务响应、上游调用、Usage 或计费。
@@ -736,7 +729,7 @@ FAIL_OPEN_UPSTREAM_AFTER=$(curl -fsS http://localhost:18081/stats | jq -r '.fail
 FAIL_OPEN_BASELINE_USAGE=$(wait_fail_open_usage_after "$FAIL_OPEN_BASELINE_CURSOR")
 
 EXPORT_FAIL_REQUEST_ID="e2e-export-fail-$RUN_ID"
-apply_runtime_tracing_config 5 true "http://127.0.0.1:18081/otlp-500"
+apply_runtime_tracing_config 5 true "http://127.0.0.1:18081/otlp-500/v1/traces"
 update_success_account_endpoint "http://127.0.0.1:18081/fail-open-500"
 EXPORT_FAIL_UPSTREAM_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
 EXPORT_FAIL_CURSOR=$(usage_log_cursor)
@@ -759,10 +752,10 @@ for i in {1..100}; do
   sleep 0.1
 done
 (( OTLP_ERROR_COUNT >= 1 )) || fail "OTLP-500 fixture did not receive an export"
-apply_runtime_tracing_config 6 true "$LANGFUSE_URL"
+apply_runtime_tracing_config 6 true "$LANGFUSE_TRACE_ENDPOINT"
 
 SLOW_EXPORT_REQUEST_ID="e2e-export-slow-$RUN_ID"
-apply_runtime_tracing_config 7 true "http://127.0.0.1:18081/otlp-slow"
+apply_runtime_tracing_config 7 true "http://127.0.0.1:18081/otlp-slow/v1/traces"
 update_success_account_endpoint "http://127.0.0.1:18081/fail-open-slow"
 SLOW_EXPORT_UPSTREAM_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.fail_open')
 SLOW_EXPORT_CURSOR=$(usage_log_cursor)
@@ -790,7 +783,7 @@ for i in {1..100}; do
   sleep 0.1
 done
 (( OTLP_SLOW_COUNT >= 1 )) || fail "slow OTLP fixture did not receive an export"
-apply_runtime_tracing_config 8 true "$LANGFUSE_URL"
+apply_runtime_tracing_config 8 true "$LANGFUSE_TRACE_ENDPOINT"
 log "export fail-open verified: otlp_500=$OTLP_ERROR_COUNT slow_exports=$OTLP_SLOW_COUNT business_ms=$SLOW_ELAPSED_MS upstream_calls=1 usage_billing=stable"
 
 # 6.7 真实 Responses WebSocket：同一连接多回合、回合间配置切换和客户端断连。
@@ -831,13 +824,13 @@ for _ in {1..100}; do
   sleep 0.1
 done
 [[ -f "$WS_SWITCH_READY_FILE" ]] || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket first turn did not complete before config switch"; }
-apply_runtime_tracing_config 9 false "$LANGFUSE_URL"
+apply_runtime_tracing_config 9 false "$LANGFUSE_TRACE_ENDPOINT"
 : >"$WS_SWITCH_CONTINUE_FILE"
 wait "$WS_SWITCH_CLIENT_PID" || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket second turn failed after config switch"; }
 WS_SWITCH_CLIENT_OUTPUT=$(<"$WS_SWITCH_CLIENT_OUTPUT_FILE")
 [[ "$WS_SWITCH_CLIENT_OUTPUT" == *"turn_index=1 response_id=resp_e2e_ws_"* && "$WS_SWITCH_CLIENT_OUTPUT" == *"turn_index=2 response_id=resp_e2e_ws_"* ]] \
   || fail "Responses WebSocket config-switch client output mismatch"
-apply_runtime_tracing_config 10 true "$LANGFUSE_URL"
+apply_runtime_tracing_config 10 true "$LANGFUSE_TRACE_ENDPOINT"
 
 WS_DISCONNECT_CLIENT_OUTPUT=$(go run "$SKILL_DIR/scripts/responses_ws_client.go" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
   || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket disconnect client failed"; }

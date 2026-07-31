@@ -5,7 +5,7 @@ export default {
     enabled: 'Enable model tracing',
     enabledHint: 'Disabled by default. When enabled, endpoint and project credentials are required.',
     endpoint: 'OTLP endpoint',
-    endpointHint: 'Use the Langfuse OTLP base endpoint, for example https://langfuse.example.com/api/public/otel.',
+    endpointHint: 'Enter the complete OTLP trace endpoint; no path is appended. Langfuse: https://langfuse.example.com/api/public/otel/v1/traces. Collector: http://collector.example.com:4318/v1/traces.',
     publicKey: 'Public key',
     secretKey: 'Secret key',
     secretConfigured: 'A secret is configured. Leave this field empty to keep it unchanged.',

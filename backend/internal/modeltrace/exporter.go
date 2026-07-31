@@ -34,8 +34,6 @@ import (
 const (
 	serviceName          = "sub2api"
 	tracerName           = "github.com/Wei-Shaw/sub2api/internal/modeltrace"
-	otlpTracesPathSuffix = "/v1/traces"
-	otlpBasePath         = "/api/public/otel"
 	langfuseIngestionHdr = "x-langfuse-ingestion-version"
 	defaultPromptBytes   = 1 << 20
 	defaultResponseBytes = 1 << 20
@@ -597,7 +595,7 @@ func resolveExportSettings(cfg config.ModelTracingConfig) (time.Duration, config
 func splitEndpoint(raw string) (host string, path string, insecure bool) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return raw, otlpBasePath + otlpTracesPathSuffix, false
+		return raw, "/", false
 	}
 	host = u.Host
 	if u.Port() == "" {
@@ -607,11 +605,10 @@ func splitEndpoint(raw string) (host string, path string, insecure bool) {
 			host = net.JoinHostPort(u.Hostname(), "443")
 		}
 	}
-	path = strings.TrimRight(u.Path, "/")
+	path = u.Path
 	if path == "" {
-		path = otlpBasePath
+		path = "/"
 	}
-	path = path + otlpTracesPathSuffix
 	insecure = strings.EqualFold(u.Scheme, "http")
 	return
 }

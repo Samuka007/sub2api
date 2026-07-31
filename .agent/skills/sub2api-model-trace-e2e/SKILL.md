@@ -26,7 +26,7 @@ description: |
 4. **不主动提交**。脚本只启动容器、编译、发请求、查 ClickHouse；不 `git commit`、不 `git push`、不 `gh pr create`，除非用户明确要求。
 5. **503 是预期 HTTP 状态**。e2e 环境不配真实上游 LLM 账号，因此 `/v1/chat/completions` 返回 503 属正常；trace 仍要落 Langfuse，这是 fail-open 旁路的验证点，不要尝试修复 503。
 6. **不可写只读路径**。`scripts/run_e2e.sh` 编译 sub2api 时只挂载 `backend/` 只读到容器，不允许修改仓库代码；只允许写 `.e2e-bin/`、`.e2e-tmp/` 和 docker volume。
-7. **配置闭环必须先于 Trace 验证**。完整 smoke 必须先验证部署来源公开响应不含 secret、远端明文 HTTP 更新被拒绝、有效运行时整体更新成功、非秘密更新保留 secret、过期 config version 返回 409 且旧配置不变；任一断言失败不得继续用最终 Trace 掩盖。
+7. **配置闭环必须先于 Trace 验证**。完整 smoke 必须先验证部署来源公开响应不含 secret、完整 OTLP Trace endpoint 原样生效且不追加路径、有效运行时整体更新成功、非秘密更新保留 secret、过期 config version 返回 409 且旧配置不变；任一断言失败不得继续用最终 Trace 掩盖。
 
 优先级：可观察证据 > 本地隔离与凭据保护 > GitHub 远端规约 > 不主动写入。低优先级不得绕过高优先级。
 
@@ -65,10 +65,10 @@ description: |
    ```bash
    bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
    ```
-4. 脚本内部顺序为：启动 Langfuse 与 sub2api 依赖 → 编译并启动服务 → 验证部署/运行时配置闭环 → 建立身份和本地 provider fixtures → 覆盖匿名/未知/控制面、503 单根、截断与媒体、disabled、1 MiB 边界、session/cache-key、429→200、所有尝试失败、SSE、进行中配置快照、500/慢 exporter fail-open、Gemini batch → 查询真实 Langfuse ClickHouse 并执行 cardinality、父子、状态和秘密零泄漏断言。
+4. 脚本内部顺序为：启动 Langfuse 与 sub2api 依赖 → 编译并启动服务 → 验证完整 endpoint、部署/运行时配置闭环 → 建立身份和本地 provider fixtures → 覆盖匿名/未知/控制面、503 单根、截断与媒体、disabled、1 MiB 边界、session/cache-key、429→200、所有尝试失败、SSE、进行中配置快照、500/慢 exporter fail-open、Gemini batch → 查询真实 Langfuse ClickHouse 并执行 cardinality、父子、状态和秘密零泄漏断言。
 5. 成功的合并命令输出必须包含 `trace_id`、整数 `1`、`VERIFY_OK` 和末尾的 `full-scale e2e passed`；失败时 stderr 含 `[e2e][ERROR]` 行，按行内容定位失败阶段，不自动缩窄覆盖重试。
 6. 验证通过后向用户报告：
-   - 配置来源、版本、secret 不回显/保留、CAS 冲突与远端 HTTP 拒绝结果
+   - 配置来源、版本、完整 endpoint 原样生效、secret 不回显/保留与 CAS 冲突结果
    - trace_id、根 span name、user_id、session_id、请求/身份元数据
    - 匿名、未知 Key、控制面均为 0 Trace；disabled Key 为 1 个 ERROR 根 Span
    - 明确标注 HTTP 503/401 均为预期，且身份建立前不导出 Prompt/Response
@@ -78,7 +78,7 @@ description: |
 
 **失败分支**：
 - Langfuse health 不通：检查 `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`。本地偶发镜像拉取超时可重试；远端 Linux 出现 DNS、代理、Buildx 或 Corepack 错误时，按 `references/environment.md` 的“远端 Linux 构建与持久部署”逐层验证，不要直接换不可信镜像。
-- sub2api 启动失败：`docker logs sub2api-e2e` 看 `Failed to initialize application`，常见是 DB 连接（检查 15432 占用）或 `invalid model_tracing deployment config`（检查 endpoint 必须是符合 loopback 规则的 URL）。
+- sub2api 启动失败：`docker logs sub2api-e2e` 看 `Failed to initialize application`，常见是 DB 连接（检查 15432 占用）或 endpoint 不是完整的可达 OTLP Trace URL。
 - trace 不落库：检查 sub2api 日志中的 `modeltrace` error 和 ClickHouse `system.errors`；脚本自身负责 bounded wait，不用手工 sleep 冒充稳定性。
 - ClickHouse 查询语法错：用 `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "DESCRIBE traces"` 核对列名；Langfuse v3 的 `metadata` 是 `Map`，`session_id` 是 `Nullable(String)`。
 

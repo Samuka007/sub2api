@@ -20,7 +20,7 @@ vi.mock('vue-i18n', () => ({
 const runtimeConfig = {
   configured: true,
   enabled: true,
-  endpoint: 'https://langfuse.example.com/api/public/otel',
+  endpoint: 'https://langfuse.example.com/api/public/otel/v1/traces',
   public_key: 'pk-live',
   has_secret: true,
   prompt_max_bytes: 1048576,
@@ -52,6 +52,8 @@ describe('ModelTracingSettings', () => {
     expect(wrapper.text()).not.toContain('deployment-secret')
     expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-endpoint"]').element.value)
       .toBe(runtimeConfig.endpoint)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-endpoint"]').attributes('placeholder'))
+      .toBe('https://langfuse.example.com/api/public/otel/v1/traces')
     expect(wrapper.get<HTMLInputElement>('[data-testid="model-tracing-secret"]').element.value)
       .toBe('')
 

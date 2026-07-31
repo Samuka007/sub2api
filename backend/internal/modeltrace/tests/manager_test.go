@@ -70,7 +70,7 @@ func newFakeOTLPServer(t *testing.T) *fakeOTLPServer {
 		if r.Method != http.MethodPost {
 			fake.errors = append(fake.errors, fmt.Sprintf("method=%s", r.Method))
 		}
-		if r.URL.Path != "/api/public/otel/v1/traces" {
+		if r.URL.Path != "/api/public/otel" {
 			fake.errors = append(fake.errors, fmt.Sprintf("path=%s", r.URL.Path))
 		}
 		wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(testPublicKey+":"+testSecretKey))
