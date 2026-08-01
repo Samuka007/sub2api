@@ -154,6 +154,23 @@ func RegisterGatewayRoutes(
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Videos API is not supported for this platform"}})
 	}
+	// Responses wildcard subpaths are appended to an authenticated upstream URL.
+	// Reject everything outside the closed allowlist before scheduling or forwarding.
+	guardResponsesSubpath := func(next gin.HandlerFunc) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			if !service.IsForwardableOpenAIResponsesRequestPath(c) {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalPolicyDenied)
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+					"error": gin.H{
+						"type":    "not_found_error",
+						"message": "Unsupported responses subpath",
+					},
+				})
+				return
+			}
+			next(c)
+		}
+	}
 	messagesHandler := func(c *gin.Context) {
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.Messages(c)
@@ -208,7 +225,7 @@ func RegisterGatewayRoutes(
 		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, messagesHandler)
 		gateway.POST("/live", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.Live)
 		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
-		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))
 		gateway.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 		gateway.POST("/chat/completions", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, chatCompletionsHandler)
 		gateway.POST("/embeddings", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, embeddingsHandler)
@@ -257,7 +274,7 @@ func RegisterGatewayRoutes(
 
 	// Root aliases: candidates install Candidate before the applicable body limit and auth chain.
 	r.POST("/responses", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
-	r.POST("/responses/*subpath", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+	r.POST("/responses/*subpath", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))
 	r.POST("/alpha/search", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	r.POST("/chat/completions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, chatCompletionsHandler)
 	r.POST("/embeddings", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, embeddingsHandler)
@@ -280,7 +297,7 @@ func RegisterGatewayRoutes(
 		codexDirect := r.Group("/backend-api/codex", clientRequestID, opsErrorLogger, modelTraceCandidate)
 		codexDirect.POST("/realtime/calls", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.Live)
 		codexDirect.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
-		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
+		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))
 		codexDirect.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	}
 	{
