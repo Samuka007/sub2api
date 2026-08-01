@@ -52,7 +52,7 @@ if [ -z "$image" ]; then
   cp -R backend/resources "$tmp_dir/backend/resources"
   printf '#!/bin/sh\nexit 0\n' >"$tmp_dir/sub2api"
   chmod +x "$tmp_dir/sub2api"
-  docker build --quiet -f "$tmp_dir/Dockerfile.goreleaser" -t "$image" "$tmp_dir" >/dev/null
+  docker build -f "$tmp_dir/Dockerfile.goreleaser" -t "$image" "$tmp_dir"
 fi
 
 docker run --rm --entrypoint /bin/sh --user 1000:1000 "$image" -ec \

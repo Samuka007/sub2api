@@ -62,6 +62,8 @@ jobs:
         run: /bin/sh deploy/test-caddyfile-cache.sh
       - name: Test Docker Compose security contract
         run: /bin/sh deploy/tests/docker-compose-security-test.sh
+      - name: Test Docker runtime resource build diagnostics
+        run: /bin/sh deploy/tests/docker-runtime-resources-output-test.sh
       - name: Test Docker runtime resource contract
         run: /bin/sh deploy/tests/docker-runtime-resources-test.sh
       - name: Test model IQ Compose environment
