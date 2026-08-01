@@ -206,6 +206,7 @@ func RegisterGatewayRoutes(
 
 		// Model execution candidates.
 		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, messagesHandler)
+		gateway.POST("/live", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.Live)
 		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
 		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
 		gateway.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
@@ -226,6 +227,7 @@ func RegisterGatewayRoutes(
 		gateway := r.Group("/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic)
 		gateway.GET("/models", modelsHandler)
 		gateway.GET("/usage", h.Gateway.Usage)
+		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		gateway.GET("/responses", responsesWebSocketHandler)
 		gateway.GET("/images/tasks/:task_id", h.AsyncImage.Get)
 		gateway.GET("/images/batches", h.BatchImage.List)
@@ -276,12 +278,14 @@ func RegisterGatewayRoutes(
 	// Codex direct aliases.
 	{
 		codexDirect := r.Group("/backend-api/codex", clientRequestID, opsErrorLogger, modelTraceCandidate)
+		codexDirect.POST("/realtime/calls", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.Live)
 		codexDirect.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
 		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, responsesHandler)
 		codexDirect.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	}
 	{
 		codexDirect := r.Group("/backend-api/codex", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic)
+		codexDirect.GET("/:call_id", h.OpenAIGateway.LiveSideband)
 		codexDirect.GET("/responses", responsesWebSocketHandler)
 		codexDirect.GET("/models", h.OpenAIGateway.CodexModels)
 	}

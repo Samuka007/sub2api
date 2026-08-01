@@ -15,6 +15,7 @@ func RegisterUserRoutes(
 	jwtAuth middleware.JWTAuthMiddleware,
 	auditLog middleware.AuditLogMiddleware,
 	settingService *service.SettingService,
+	panelRateLimiter *middleware.PanelRateLimiter,
 ) {
 	// Public homepage announcements are filtered to global popup notices by the service.
 	v1.GET("/public/announcements", h.Announcement.ListPublic)
@@ -22,6 +23,8 @@ func RegisterUserRoutes(
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
 	authenticated.Use(middleware.BackendModeUserGuard(settingService))
+	// 面板全局按用户限流：防止单个账号高频刷接口打爆数据库
+	authenticated.Use(panelRateLimiter.Global())
 	// 用户管理面变更类操作入审计（含 TOTP 启用/禁用、step-up 验证、密码修改等安全事件）
 	authenticated.Use(gin.HandlerFunc(auditLog))
 	{
@@ -40,7 +43,7 @@ func RegisterUserRoutes(
 			user.POST("/account-bindings/email", h.User.BindEmailIdentity)
 			user.DELETE("/account-bindings/:provider", h.User.UnbindIdentity)
 			user.POST("/auth-identities/bind/start", h.User.StartIdentityBinding)
-			user.GET("/api-keys/:id/usage/daily", h.Usage.GetMyAPIKeyDailyUsage)
+			user.GET("/api-keys/:id/usage/daily", panelRateLimiter.Heavy(), h.Usage.GetMyAPIKeyDailyUsage)
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
 
 			// 通知邮箱管理
@@ -90,8 +93,9 @@ func RegisterUserRoutes(
 			channels.GET("/group-pricing", h.AvailableChannel.GroupPricing)
 		}
 
-		// 使用记录
+		// 使用记录（聚合统计属重查询，叠加更严格的按用户限流）
 		usage := authenticated.Group("/usage")
+		usage.Use(panelRateLimiter.Heavy())
 		{
 			usage.GET("", h.Usage.List)
 			usage.GET("/errors", h.Usage.ListErrors)

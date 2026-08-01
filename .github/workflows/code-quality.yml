@@ -58,6 +58,8 @@ jobs:
           for script in deploy/tests/*.sh; do
             /bin/bash -n "$script"
           done
+      - name: Test Caddy cache configuration
+        run: /bin/sh deploy/test-caddyfile-cache.sh
       - name: Test model IQ Compose environment
         run: /bin/bash deploy/tests/model-iq-compose-env-test.sh
       - name: Test install GitHub token handling

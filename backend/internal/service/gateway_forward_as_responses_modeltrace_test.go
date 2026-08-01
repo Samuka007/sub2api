@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +31,7 @@ func TestModelTraceResponsesConversionSSEComplete(t *testing.T) {
 		``,
 	}, "\n")))}
 
-	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now())
+	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "response.completed")
@@ -56,7 +57,7 @@ func TestModelTraceResponsesConversionSSEUpstreamError(t *testing.T) {
 		err: upstreamErr,
 	}}
 
-	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now())
+	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err, "existing response semantics stay fail-open after partial output")
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "partial")
@@ -75,7 +76,7 @@ func TestModelTraceResponsesConversionSSECancelled(t *testing.T) {
 	c.Request = c.Request.WithContext(cancelled)
 	resp := &http.Response{Header: http.Header{"x-request-id": []string{"rid_cancelled"}}, Body: io.NopCloser(strings.NewReader(""))}
 
-	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now())
+	result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "gpt-client", "claude-test", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, capture.started)
