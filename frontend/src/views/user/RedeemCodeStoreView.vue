@@ -1,6 +1,16 @@
 <template>
   <AppLayout>
     <div class="mx-auto max-w-6xl space-y-5">
+      <div
+        class="space-y-3 border-y-2 border-red-500 bg-red-50 px-4 py-5 text-center text-red-800 dark:border-red-500 dark:bg-red-950/40 dark:text-red-200"
+        role="alert"
+        data-testid="vpn-access-warning"
+      >
+        <p class="text-xl font-black leading-tight sm:text-2xl">必须关vpn才能访问！！！</p>
+        <p class="text-xl font-black leading-tight sm:text-2xl">必须关vpn才能访问！！！</p>
+        <p class="text-xl font-black leading-tight sm:text-2xl">必须关vpn才能访问！！！</p>
+      </div>
+
       <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 class="mb-2 text-2xl font-bold text-gray-950 dark:text-white">兑换码直购</h1>
@@ -285,10 +295,7 @@
                   @click="selectChannel(channel.id)"
                 >
                   <Icon name="creditCard" size="md" class="shrink-0" />
-                  <span class="min-w-0">
-                    <span class="block truncate text-sm font-semibold">{{ channel.show_name }}</span>
-                    <span class="mt-0.5 block text-xs opacity-70">费率 {{ channel.rate }}%</span>
-                  </span>
+                  <span class="min-w-0 truncate text-sm font-semibold">{{ paymentChannelDisplayName(channel.show_name) }}</span>
                 </button>
               </div>
             </fieldset>
@@ -463,6 +470,10 @@ function errorMessage(error: unknown): string {
     return ''
   }
   return error instanceof Error ? error.message : '请求失败，请稍后重试'
+}
+
+function paymentChannelDisplayName(name: string): string {
+  return name.replace(/\s*[（(]\s*费率低\s*[）)]\s*$/, '').trim()
 }
 
 async function loadProducts(): Promise<void> {
