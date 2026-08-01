@@ -347,6 +347,7 @@ func TestGatewayRoutesResponsesSubpathRejectsNonConformingSubpaths(t *testing.T)
 		`/v1/responses/..\..\x`,
 		"/v1/responses/%3fa=b",
 		"/v1/responses/x%23frag",
+		"/v1/responses/compact%20",
 		"/v1/responses/compact%2f..",
 	} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-5"}`))
@@ -356,6 +357,51 @@ func TestGatewayRoutesResponsesSubpathRejectsNonConformingSubpaths(t *testing.T)
 		router.ServeHTTP(w, req)
 		require.Equal(t, http.StatusNotFound, w.Code, "path=%s must be rejected at the edge", path)
 		require.Contains(t, w.Body.String(), "Unsupported responses subpath", "path=%s", path)
+	}
+}
+
+func TestGatewayRoutesResponsesSubpathFrameworkBoundaries(t *testing.T) {
+	router := newGatewayRoutesTestRouter()
+	for _, base := range []string{
+		"/v1/responses",
+		"/responses",
+		"/backend-api/codex/responses",
+	} {
+		t.Run(base+" rejects empty segment", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, base+"//compact", strings.NewReader(`{"model":"gpt-5"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+			require.Equal(t, http.StatusNotFound, w.Code)
+			require.Contains(t, w.Body.String(), "Unsupported responses subpath")
+		})
+
+		t.Run(base+" rejects repeated empty trailing segment", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, base+"/compact//", strings.NewReader(`{"model":"gpt-5"}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+			require.Equal(t, http.StatusNotFound, w.Code)
+			require.Contains(t, w.Body.String(), "Unsupported responses subpath")
+		})
+
+		for _, suffix := range []string{
+			"/foo/responses/compact",
+			"/compact/",
+		} {
+			t.Run(base+suffix+" reaches Responses handler", func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, base+suffix, strings.NewReader(`{"model":"gpt-5"}`))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+
+				router.ServeHTTP(w, req)
+				require.Equal(t, http.StatusInternalServerError, w.Code)
+				require.Contains(t, w.Body.String(), "User context not found")
+				require.NotContains(t, w.Body.String(), "Unsupported responses subpath")
+			})
+		}
 	}
 }
 

@@ -55,6 +55,9 @@ for script in deploy/apple-container.sh deploy/install.sh deploy/tests/*.sh; do
 done
 
 step "Apple container deployment contract" /bin/bash deploy/tests/apple-container-test.sh
+step "Caddy cache configuration contract" /bin/sh deploy/test-caddyfile-cache.sh
+step "Docker Compose security contract" /bin/sh deploy/tests/docker-compose-security-test.sh
+step "Docker runtime resource contract" /bin/sh deploy/tests/docker-runtime-resources-test.sh
 step "Model IQ Compose contract" /bin/bash deploy/tests/model-iq-compose-env-test.sh
 step "Install GitHub token contract" /bin/bash deploy/tests/install-github-token-test.sh
 step "Model tracing Compose contract" /bin/bash deploy/tests/model-tracing-compose-test.sh

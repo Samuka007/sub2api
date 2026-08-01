@@ -45,7 +45,7 @@ func entryProtocol(path string) string {
 		return "anthropic.messages"
 	case strings.HasSuffix(path, "/chat/completions"):
 		return "openai.chat_completions"
-	case strings.HasSuffix(path, "/responses"):
+	case strings.HasSuffix(path, "/responses"), strings.Contains(path, "/responses/"):
 		return "openai.responses"
 	case path == "/v1/live", path == "/backend-api/codex/realtime/calls":
 		return "openai.live"

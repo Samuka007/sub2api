@@ -17,6 +17,21 @@ func TestResolveEntryFacts(t *testing.T) {
 		require.Equal(t, "gpt-client", facts.ClientModel)
 	})
 
+	t.Run("Responses subpaths keep the Responses protocol", func(t *testing.T) {
+		for _, path := range []string{
+			"/v1/responses/compact",
+			"/responses/compact",
+			"/backend-api/codex/responses/compact",
+			"/v1/responses/foo/responses/compact",
+		} {
+			facts := modeltrace.TestingResolveEntryFacts(path, "application/json", []byte(`{"model":"gpt-client"}`))
+			require.Equal(t, "openai.responses", facts.Protocol, "path=%s", path)
+		}
+
+		facts := modeltrace.TestingResolveEntryFacts("/v1/notresponses/compact", "application/json", []byte(`{"model":"gpt-client"}`))
+		require.Empty(t, facts.Protocol)
+	})
+
 	t.Run("Live JSON model comes from session", func(t *testing.T) {
 		facts := modeltrace.TestingResolveEntryFacts("/v1/live", "application/json", []byte(`{"sdp":"offer","session":{"model":"gpt-realtime"}}`))
 		require.Equal(t, "openai.live", facts.Protocol)

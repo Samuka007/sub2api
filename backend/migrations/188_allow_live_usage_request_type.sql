@@ -3,4 +3,4 @@ ALTER TABLE usage_logs
 
 ALTER TABLE usage_logs
     ADD CONSTRAINT usage_logs_request_type_check
-    CHECK (request_type >= 0 AND request_type <= 5);
+    CHECK (request_type >= 0 AND request_type <= 5) NOT VALID;

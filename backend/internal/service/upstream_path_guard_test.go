@@ -3,6 +3,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -84,17 +85,21 @@ func TestSanitizedUpstreamPathSuffixRejectsNonConformingSegments(t *testing.T) {
 }
 
 func TestSanitizedUpstreamPathSuffixEnforcesBounds(t *testing.T) {
-	longSegment := "/"
-	for i := 0; i < maxUpstreamPathSegmentLen+1; i++ {
-		longSegment += "a"
-	}
-	_, ok := sanitizedUpstreamPathSuffix(longSegment)
+	maxLengthSegment := "/" + strings.Repeat("a", maxUpstreamPathSegmentLen)
+	got, ok := sanitizedUpstreamPathSuffix(maxLengthSegment)
+	require.True(t, ok, "segment at the length limit must be accepted")
+	require.Equal(t, maxLengthSegment, got)
+
+	longSegment := "/" + strings.Repeat("a", maxUpstreamPathSegmentLen+1)
+	_, ok = sanitizedUpstreamPathSuffix(longSegment)
 	require.False(t, ok, "over-long segment must be rejected")
 
-	deep := ""
-	for i := 0; i <= maxUpstreamPathSegments; i++ {
-		deep += "/a"
-	}
+	maxDepth := strings.Repeat("/a", maxUpstreamPathSegments)
+	got, ok = sanitizedUpstreamPathSuffix(maxDepth)
+	require.True(t, ok, "suffix at the depth limit must be accepted")
+	require.Equal(t, maxDepth, got)
+
+	deep := strings.Repeat("/a", maxUpstreamPathSegments+1)
 	_, ok = sanitizedUpstreamPathSuffix(deep)
 	require.False(t, ok, "over-deep suffix must be rejected")
 }
@@ -114,6 +119,7 @@ func TestOpenAIResponsesRequestPathSuffixRejectsNonConformingSubpaths(t *testing
 		`/v1/responses/..\..\x`,
 		"/v1/responses/%3fa=b",
 		"/v1/responses/x%23frag",
+		"/v1/responses/compact%20",
 		"/v1/responses//double",
 	}
 	for _, path := range nonConformingPaths {
@@ -134,6 +140,7 @@ func TestOpenAIResponsesRequestPathSuffixRejectsNonConformingSubpaths(t *testing
 	for path, want := range map[string]string{
 		"/v1/responses":                        "",
 		"/v1/responses/compact":                "/compact",
+		"/v1/responses/foo/responses/compact":  "/foo/responses/compact",
 		"/responses/compact/":                  "/compact",
 		"/backend-api/codex/responses/compact": "/compact",
 	} {

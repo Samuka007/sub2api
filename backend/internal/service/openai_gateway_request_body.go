@@ -388,22 +388,31 @@ func rawOpenAIResponsesRequestPathSuffix(c *gin.Context) string {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return ""
 	}
-	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
-	if normalizedPath == "" {
-		return ""
+	return OpenAIResponsesRequestPathSuffix(c.Request.URL.Path)
+}
+
+// OpenAIResponsesRequestPathSuffix returns the suffix after the first complete
+// /responses path segment. It intentionally does not normalize whitespace or
+// other characters; callers must validate the returned suffix before use.
+func OpenAIResponsesRequestPathSuffix(rawPath string) string {
+	path := strings.TrimSuffix(rawPath, "/")
+	const marker = "/responses"
+	for offset := 0; offset < len(path); {
+		relative := strings.Index(path[offset:], marker)
+		if relative < 0 {
+			return ""
+		}
+		idx := offset + relative
+		end := idx + len(marker)
+		if end == len(path) {
+			return ""
+		}
+		if path[end] == '/' {
+			return path[end:]
+		}
+		offset = end
 	}
-	idx := strings.LastIndex(normalizedPath, "/responses")
-	if idx < 0 {
-		return ""
-	}
-	suffix := normalizedPath[idx+len("/responses"):]
-	if suffix == "" || suffix == "/" {
-		return ""
-	}
-	if !strings.HasPrefix(suffix, "/") {
-		return ""
-	}
-	return suffix
+	return ""
 }
 
 func appendOpenAIResponsesRequestPathSuffix(baseURL, suffix string) string {

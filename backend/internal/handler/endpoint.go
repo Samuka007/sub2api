@@ -227,19 +227,7 @@ func DeriveUpstreamEndpoint(inbound, rawRequestPath, platform string) string {
 // request path, e.g. "/openai/v1/responses/compact" → "/compact".
 // Returns "" when there is no meaningful suffix.
 func responsesSubpathSuffix(rawPath string) string {
-	trimmed := strings.TrimRight(strings.TrimSpace(rawPath), "/")
-	idx := strings.LastIndex(trimmed, "/responses")
-	if idx < 0 {
-		return ""
-	}
-	suffix := trimmed[idx+len("/responses"):]
-	if suffix == "" || suffix == "/" {
-		return ""
-	}
-	if !strings.HasPrefix(suffix, "/") {
-		return ""
-	}
-	return suffix
+	return service.OpenAIResponsesRequestPathSuffix(rawPath)
 }
 
 // ──────────────────────────────────────────────────────────

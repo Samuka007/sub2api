@@ -5,12 +5,75 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMigrationsRunner_AcceptsPublishedMigration188ChecksumOnUpgrade(t *testing.T) {
+	const (
+		migrationName     = "188_allow_live_usage_request_type.sql"
+		publishedChecksum = "0233dba07a75bd9c740402a64e3af75c2a3884dfc8c4b63145df115e716fd35e"
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	databaseName := fmt.Sprintf("sub2api_m188_upgrade_%d", time.Now().UnixNano())
+	_, err := integrationDB.ExecContext(ctx, `CREATE DATABASE `+quotePostgresIdentifier(databaseName))
+	require.NoError(t, err)
+
+	upgradeDSN, err := postgresDSNWithDatabase(integrationPostgresDSN, databaseName)
+	require.NoError(t, err)
+	upgradeDB, err := openSQLWithRetry(ctx, upgradeDSN, 30*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = upgradeDB.Close()
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer dropCancel()
+		_, _ = integrationDB.ExecContext(dropCtx, `DROP DATABASE IF EXISTS `+quotePostgresIdentifier(databaseName)+` WITH (FORCE)`)
+	})
+
+	require.NoError(t, ApplyMigrations(ctx, upgradeDB))
+	_, err = upgradeDB.ExecContext(ctx, `ALTER TABLE usage_logs VALIDATE CONSTRAINT usage_logs_request_type_check`)
+	require.NoError(t, err)
+	_, err = upgradeDB.ExecContext(ctx, `UPDATE schema_migrations SET checksum = $1 WHERE filename = $2`, publishedChecksum, migrationName)
+	require.NoError(t, err)
+
+	require.NoError(t, ApplyMigrations(ctx, upgradeDB))
+
+	var recordedChecksum string
+	require.NoError(t, upgradeDB.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE filename = $1`, migrationName).Scan(&recordedChecksum))
+	require.Equal(t, publishedChecksum, recordedChecksum, "compatibility must not rewrite the historical migration ledger")
+
+	var validated bool
+	require.NoError(t, upgradeDB.QueryRowContext(ctx, `
+SELECT convalidated
+FROM pg_constraint
+WHERE conrelid = 'usage_logs'::regclass
+  AND conname = 'usage_logs_request_type_check'`).Scan(&validated))
+	require.True(t, validated, "an existing database that ran the published migration must retain its validated constraint")
+}
+
+func postgresDSNWithDatabase(dsn, databaseName string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + databaseName
+	return parsed.String(), nil
+}
+
+func quotePostgresIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
 
 func TestMigrationsRunner_ConcurrentInstancesSerializeOnSessionLock(t *testing.T) {
 	const instances = 2
@@ -45,6 +108,15 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	// users: columns required by repository queries
 	requireColumn(t, tx, "users", "username", "character varying", 100, false)
 	requireColumn(t, tx, "users", "notes", "text", 0, false)
+	requireIndexDefinitionContains(
+		t,
+		tx,
+		"users",
+		"idx_users_email_dot_stripped",
+		"replace(lower(TRIM(BOTH FROM email)), '.'::text, ''::text)",
+		"text_pattern_ops",
+		"WHERE (deleted_at IS NULL)",
+	)
 
 	// accounts: schedulable and rate-limit fields
 	requireColumn(t, tx, "accounts", "notes", "text", 0, true)
@@ -76,6 +148,7 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "usage_logs", "video_count", "integer", 0, false)
 	requireColumn(t, tx, "usage_logs", "video_resolution", "character varying", 10, true)
 	requireColumn(t, tx, "usage_logs", "video_duration_seconds", "integer", 0, true)
+	requireConstraintNotValidated(t, tx, "usage_logs", "usage_logs_request_type_check")
 	requireConstraintDefinitionContains(
 		t,
 		tx,
@@ -162,6 +235,77 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "user_allowed_groups", "created_at", "timestamp with time zone", 0, false)
 }
 
+func TestMigrationsRunner_PasskeySchemaEnforcesIdentityIntegrity(t *testing.T) {
+	tx := testTx(t)
+
+	requireColumn(t, tx, "passkey_user_handles", "user_id", "bigint", 0, false)
+	requireColumn(t, tx, "passkey_user_handles", "user_handle", "bytea", 0, false)
+	requireColumn(t, tx, "passkey_credentials", "user_id", "bigint", 0, false)
+	requireColumn(t, tx, "passkey_credentials", "credential_id", "bytea", 0, false)
+	requireColumn(t, tx, "passkey_credentials", "name", "character varying", 100, false)
+	requireColumn(t, tx, "passkey_credentials", "credential_data", "jsonb", 0, false)
+	requireForeignKeyOnDelete(t, tx, "passkey_user_handles", "user_id", "users", "CASCADE")
+	requireForeignKeyOnDelete(t, tx, "passkey_credentials", "user_id", "users", "CASCADE")
+	requireIndex(t, tx, "passkey_credentials", "passkey_credentials_user_id_idx")
+	requireIndex(t, tx, "passkey_credentials", "passkey_credentials_last_used_at_idx")
+
+	insertUser := func(tx *sql.Tx, email string) int64 {
+		t.Helper()
+		var userID int64
+		err := tx.QueryRowContext(context.Background(), `
+INSERT INTO users (email, password_hash, role, status, balance, concurrency)
+VALUES ($1, 'hash', 'user', 'active', 0, 1)
+RETURNING id`, email).Scan(&userID)
+		require.NoError(t, err)
+		return userID
+	}
+
+	assertUniqueViolation := func(err error) {
+		t.Helper()
+		var pqErr *pq.Error
+		require.Error(t, err)
+		require.True(t, errors.As(err, &pqErr), "expected PostgreSQL constraint error, got %T: %v", err, err)
+		require.Equal(t, pq.ErrorCode("23505"), pqErr.Code)
+	}
+
+	userOne := insertUser(tx, "passkey-schema-one@example.com")
+	userTwo := insertUser(tx, "passkey-schema-two@example.com")
+	sharedHandle := []byte("0123456789abcdef0123456789abcdef")
+	_, err := tx.ExecContext(context.Background(), `
+INSERT INTO passkey_user_handles (user_id, user_handle) VALUES ($1, $2)`, userOne, sharedHandle)
+	require.NoError(t, err)
+
+	require.NoError(t, execSavepoint(tx, "duplicate_handle"))
+	_, err = tx.ExecContext(context.Background(), `
+INSERT INTO passkey_user_handles (user_id, user_handle) VALUES ($1, $2)`, userTwo, sharedHandle)
+	assertUniqueViolation(err)
+	require.NoError(t, rollbackSavepoint(tx, "duplicate_handle"))
+
+	_, err = tx.ExecContext(context.Background(), `
+INSERT INTO passkey_user_handles (user_id, user_handle) VALUES ($1, $2)`, userTwo, []byte("fedcba9876543210fedcba9876543210"))
+	require.NoError(t, err)
+	credentialID := []byte("credential-id-one")
+	_, err = tx.ExecContext(context.Background(), `
+INSERT INTO passkey_credentials (user_id, credential_id, credential_data)
+VALUES ($1, $2, '{}'::jsonb)`, userOne, credentialID)
+	require.NoError(t, err)
+
+	require.NoError(t, execSavepoint(tx, "duplicate_credential"))
+	_, err = tx.ExecContext(context.Background(), `
+INSERT INTO passkey_credentials (user_id, credential_id, credential_data)
+VALUES ($1, $2, '{}'::jsonb)`, userTwo, credentialID)
+	assertUniqueViolation(err)
+	require.NoError(t, rollbackSavepoint(tx, "duplicate_credential"))
+
+	_, err = tx.ExecContext(context.Background(), "DELETE FROM users WHERE id = $1", userOne)
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM passkey_user_handles WHERE user_id = $1", userOne).Scan(&count))
+	require.Zero(t, count)
+	require.NoError(t, tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM passkey_credentials WHERE user_id = $1", userOne).Scan(&count))
+	require.Zero(t, count)
+}
+
 func TestMigrationsRunner_AuthIdentityAndPaymentSchemaStayAligned(t *testing.T) {
 	tx := testTx(t)
 
@@ -189,6 +333,36 @@ func TestMigrationsRunner_AuthIdentityAndPaymentSchemaStayAligned(t *testing.T) 
 	requireIndex(t, tx, "payment_orders", "paymentorder_out_trade_no")
 	requirePartialUniqueIndexDefinition(t, tx, "payment_orders", "paymentorder_out_trade_no", "out_trade_no", "WHERE")
 	requireIndexAbsent(t, tx, "payment_orders", "paymentorder_out_trade_no_unique")
+}
+
+func execSavepoint(tx *sql.Tx, name string) error {
+	_, err := tx.ExecContext(context.Background(), "SAVEPOINT "+name)
+	return err
+}
+
+func rollbackSavepoint(tx *sql.Tx, name string) error {
+	_, err := tx.ExecContext(context.Background(), "ROLLBACK TO SAVEPOINT "+name)
+	return err
+}
+
+func requireIndexDefinitionContains(t *testing.T, tx *sql.Tx, table, index string, fragments ...string) {
+	t.Helper()
+
+	var definition string
+	err := tx.QueryRowContext(context.Background(), `
+SELECT pg_get_indexdef(i.indexrelid)
+FROM pg_class idx
+JOIN pg_index i ON i.indexrelid = idx.oid
+JOIN pg_class tbl ON tbl.oid = i.indrelid
+JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+WHERE ns.nspname = 'public'
+  AND tbl.relname = $1
+  AND idx.relname = $2
+`, table, index).Scan(&definition)
+	require.NoError(t, err, "query index definition for %s.%s", table, index)
+	for _, fragment := range fragments {
+		require.Contains(t, definition, fragment, "index %s definition: %s", index, definition)
+	}
 }
 
 func requireIndex(t *testing.T, tx *sql.Tx, table, index string) {
@@ -279,6 +453,23 @@ LIMIT 1
 `, table, column, refTable).Scan(&actual)
 	require.NoError(t, err, "query foreign key action for %s.%s -> %s", table, column, refTable)
 	require.Equal(t, expected, actual, "unexpected ON DELETE action for %s.%s -> %s", table, column, refTable)
+}
+
+func requireConstraintNotValidated(t *testing.T, tx *sql.Tx, table, constraint string) {
+	t.Helper()
+
+	var validated bool
+	err := tx.QueryRowContext(context.Background(), `
+SELECT c.convalidated
+FROM pg_constraint c
+JOIN pg_class tbl ON tbl.oid = c.conrelid
+JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+WHERE ns.nspname = 'public'
+  AND tbl.relname = $1
+  AND c.conname = $2
+`, table, constraint).Scan(&validated)
+	require.NoError(t, err, "query validation state for %s.%s", table, constraint)
+	require.False(t, validated, "expected constraint %s.%s to remain NOT VALID", table, constraint)
 }
 
 func requireConstraintDefinitionContains(t *testing.T, tx *sql.Tx, table, constraint string, fragments ...string) {

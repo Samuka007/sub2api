@@ -50,6 +50,44 @@ func TestBatchImageRepository_CreateJobAndDuplicates(t *testing.T) {
 	require.True(t, errors.Is(err, service.ErrBatchImageJobExists))
 }
 
+func TestBatchImageRepository_SessionIDPersistence(t *testing.T) {
+	ctx := context.Background()
+	tx := testTx(t)
+	repo := newBatchImageRepositoryWithSQL(tx)
+	sessionID := "session-" + batchImageTestID(t, "roundtrip")
+
+	withSession, err := repo.CreateBatchImageJob(ctx, service.CreateBatchImageJobParams{
+		BatchID:   batchImageTestID(t, "session-present"),
+		UserID:    1001,
+		Provider:  service.BatchImageProviderGeminiAPI,
+		Model:     "gemini-2.5-flash-image",
+		ItemCount: 1,
+		SessionID: &sessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, withSession.SessionID)
+	require.Equal(t, sessionID, *withSession.SessionID)
+
+	got, err := repo.GetBatchImageJobByBatchID(ctx, withSession.BatchID)
+	require.NoError(t, err)
+	require.NotNil(t, got.SessionID)
+	require.Equal(t, sessionID, *got.SessionID)
+
+	withoutSession, err := repo.CreateBatchImageJob(ctx, service.CreateBatchImageJobParams{
+		BatchID:   batchImageTestID(t, "session-absent"),
+		UserID:    1001,
+		Provider:  service.BatchImageProviderGeminiAPI,
+		Model:     "gemini-2.5-flash-image",
+		ItemCount: 1,
+	})
+	require.NoError(t, err)
+	require.Nil(t, withoutSession.SessionID)
+
+	gotWithoutSession, err := repo.GetBatchImageJobByBatchID(ctx, withoutSession.BatchID)
+	require.NoError(t, err)
+	require.Nil(t, gotWithoutSession.SessionID)
+}
+
 func TestBatchImageRepository_InvalidProvider(t *testing.T) {
 	tx := testTx(t)
 	repo := newBatchImageRepositoryWithSQL(tx)
