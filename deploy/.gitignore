@@ -23,3 +23,12 @@ redis_data/
 4sub-prod-images-*.tar.gz
 sub2api-*.tar
 sub2api-*.tar.gz
+
+langfuse/backups/
+# Retain this ignore rule until operators have removed legacy SSH credentials.
+langfuse/reverse-tunnel.log
+langfuse/.reverse-tunnel.pid
+langfuse/.ssh-tunnel/
+langfuse/.xray/
+langfuse/.xray-generation.lock
+langfuse/main-server-xray/config.json

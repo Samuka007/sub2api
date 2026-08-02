@@ -1,0 +1,61 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": ["reverse-in"],
+        "outboundTag": "langfuse-only"
+      }
+    ]
+  },
+  "outbounds": [
+    {
+      "protocol": "blackhole",
+      "tag": "blocked-default"
+    },
+    {
+      "protocol": "freedom",
+      "tag": "langfuse-only",
+      "settings": {
+        "redirect": "langfuse-web:3000",
+        "finalRules": [
+          {
+            "action": "allow",
+            "network": "tcp",
+            "port": 3000
+          },
+          {
+            "action": "block"
+          }
+        ]
+      }
+    },
+    {
+      "protocol": "vless",
+      "tag": "portal-connection",
+      "settings": {
+        "address": "__XRAY_SERVER_ADDRESS__",
+        "port": __XRAY_SERVER_PORT__,
+        "encryption": "none",
+        "id": "__XRAY_UUID__",
+        "flow": "xtls-rprx-vision",
+        "reverse": {
+          "tag": "reverse-in"
+        }
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "__XRAY_REALITY_SERVER_NAME__",
+          "fingerprint": "chrome",
+          "password": "__XRAY_REALITY_PUBLIC_KEY__",
+          "shortId": "__XRAY_REALITY_SHORT_ID__",
+          "spiderX": "/"
+        }
+      }
+    }
+  ]
+}

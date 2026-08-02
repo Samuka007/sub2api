@@ -171,6 +171,7 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+exports/
 
 # Local archives and frontend tool caches
 /archives/

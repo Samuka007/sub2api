@@ -50,6 +50,11 @@ if ! printf '%s\n' "$normalized_config" | grep -Eq '^reverse_proxy localhost:808
 	exit 1
 fi
 
+if ! printf '%s\n' "$normalized_config" | grep -Fqx 'https_port {$SUB2API_HTTPS_PORT:443}'; then
+	echo "Caddyfile must default to public 443 while allowing the Xray fallback listener override" >&2
+	exit 1
+fi
+
 if printf '%s\n' "$normalized_config" | grep -Eq '^import([[:space:]]|$)'; then
 	echo "Caddyfile must not import configuration outside this canonical policy check" >&2
 	exit 1
