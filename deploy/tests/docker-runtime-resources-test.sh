@@ -52,7 +52,12 @@ if [ -z "$image" ]; then
   cp -R backend/resources "$tmp_dir/backend/resources"
   printf '#!/bin/sh\nexit 0\n' >"$tmp_dir/sub2api"
   chmod +x "$tmp_dir/sub2api"
-  docker build -f "$tmp_dir/Dockerfile.goreleaser" -t "$image" "$tmp_dir"
+  docker build \
+    --build-arg "ALPINE_IMAGE=${SUB2API_ALPINE_IMAGE:-alpine:3.21}" \
+    --build-arg "POSTGRES_IMAGE=${SUB2API_POSTGRES_IMAGE:-postgres:18-alpine}" \
+    -f "$tmp_dir/Dockerfile.goreleaser" \
+    -t "$image" \
+    "$tmp_dir"
 fi
 
 docker run --rm --entrypoint /bin/sh --user 1000:1000 "$image" -ec \

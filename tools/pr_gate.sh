@@ -54,7 +54,11 @@ for script in deploy/apple-container.sh deploy/install.sh deploy/tests/*.sh; do
   /bin/bash -n "${script}"
 done
 
-step "Apple container deployment contract" /bin/bash deploy/tests/apple-container-test.sh
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  step "Apple container deployment contract" /bin/bash deploy/tests/apple-container-test.sh
+else
+  printf '\n==> Apple container deployment contract (skipped: requires macOS)\n'
+fi
 step "Caddy cache configuration contract" /bin/sh deploy/test-caddyfile-cache.sh
 step "Docker Compose security contract" /bin/sh deploy/tests/docker-compose-security-test.sh
 step "Docker runtime resource build diagnostics" /bin/sh deploy/tests/docker-runtime-resources-output-test.sh
