@@ -8,11 +8,19 @@
 2. 主服务器 Xray Portal 独占公网 `443`；普通 HTTPS 连接经 REALITY 失败回落转发到主机内部 Caddy `8443`，因此主站域名和请求仍由 Caddy 处理。
 3. 主服务器 Caddy 将受信任的 `/api/public/otel*` 请求交给 host-network OTEL Collector 的 `172.28.0.1:4318`。
 4. Collector 将批处理后的追踪导出到 `xray-portal` 的 Docker 网桥地址 `172.18.0.1:3100`。
-5. Portal 把流量送入反向链路；从服务器 Bridge 只允许链路流量落到 `langfuse-web:3000`，默认出站为 `blackhole`。
+5. Portal 把流量送入反向链路；从服务器 Bridge 只允许链路流量落到 `langfuse-ingest:3000`，默认出站为 `blackhole`。
 
 数据库、Redis、ClickHouse、MinIO 均不映射宿主机端口。
 
 Compose 不设置 CPU、容器内存、Node.js heap 或 Redis `maxmemory` 上限，与 Langfuse 官方 Compose 的资源策略一致。容量规划应保证至少满足官方最低要求，并根据 Worker CPU 使用率横向扩容；不要通过压低队列并发来适配资源充足的生产主机。
+
+## Langfuse 读写隔离
+
+Compose 将管理 UI/Public API 与 OTLP ingestion 拆成两个 Web 进程：`langfuse-web` 继续绑定宿主回环端口并负责数据库迁移，`langfuse-ingest` 不发布宿主端口，等待前者健康后接管 Xray反向链路中的 OTLP流量。Worker和 ingestion使用主 ClickHouse连接；UI支持的读查询通过内部 `clickhouse-read-proxy` 使用专用 `langfuse_read` 用户。
+
+`langfuse_read` 使用 `readonly=2`，允许 Langfuse发送必要的 query settings；资源类 settings 同时设置正数下限和最大 constraints，超过执行时间、内存、扫描量、结果集、线程、临时磁盘或用户并发上限的请求直接失败，零值不能表示“不限”。默认单查询执行上限为 10 秒、内存 4 GiB、线程 4，全体读查询用户内存上限为 32 GiB、并发上限为 8。代理另有每秒 20 请求、burst 40 和 12 秒 upstream timeout。
+
+read proxy不发布宿主端口，以非 root、只读根文件系统和移除 capabilities的方式运行。它清除来访 ClickHouse认证并注入独立的 `CLICKHOUSE_READ_PASSWORD`；access log只记录状态和耗时，error log提升为 `crit`，避免普通 upstream故障记录 URI、查询参数或 SQL。查询归属通过 `system.query_log.user = 'langfuse_read'` 识别，不依赖可能被 Langfuse覆盖的 `log_comment`。
 
 ## 初次生成
 
@@ -34,7 +42,7 @@ LANGFUSE_PUBLIC_URL=https://langfuse.example.com ./generate-env.sh
 
 默认镜像均通过国内镜像站拉取并固定到不可变 digest。普通 `./manage.sh start` 不会拉取或升级镜像；只有显式执行 `./manage.sh pull` 才会下载配置中固定的镜像。变更镜像 digest 前应先完成备份、预发布验证和回滚演练。
 
-已有 `.env` 的旧隧道部署直接运行以下命令即可补充 Xray 参数并迁移旧的默认端口，不会重置 Langfuse 密钥：
+已有 `.env` 的旧隧道部署直接运行以下命令即可补充 Xray 参数、读代理镜像和独立读密码，并迁移旧的默认端口；现有 Langfuse/数据库密钥和命名卷不会被重置：
 
 ~~~sh
 ./generate-xray-config.sh
@@ -68,7 +76,7 @@ docker compose pull
 docker compose up -d --pull never --force-recreate
 ~~~
 
-主服务器需要允许 `443/tcp` 入站。Compose 将宿主机 `443` 映射到容器内非特权的 `31590`，避免给 rootless Xray 增加绑定特权端口的能力。`3100` 只绑定到 `172.18.0.1`，不暴露在公网；Caddy 回落端口为内部 `8443`。两端使用经南京大学 GHCR 镜像站代理并固定 digest 的 Xray `26.5.9`，不得单独修改其中一端。该版本提供用于仅放行 `langfuse-web:3000` 的 Freedom `finalRules`，并已通过真实 VLESS Reverse + REALITY 双端链路 smoke。更新生成配置后必须用上面的 `--force-recreate` 重建 Portal；从服务器的 `./xray-tunnel.sh start` 也会强制重建 Bridge，确保 bind mount 切换到原子替换后的新文件。
+主服务器需要允许 `443/tcp` 入站。Compose 将宿主机 `443` 映射到容器内非特权的 `31590`，避免给 rootless Xray 增加绑定特权端口的能力。`3100` 只绑定到 `172.18.0.1`，不暴露在公网；Caddy 回落端口为内部 `8443`。两端使用经南京大学 GHCR 镜像站代理并固定 digest 的 Xray `26.5.9`，不得单独修改其中一端。该版本提供用于仅放行 `langfuse-ingest:3000` 的 Freedom `finalRules`，并已通过真实 VLESS Reverse + REALITY 双端链路 smoke。更新生成配置后必须用上面的 `--force-recreate` 重建 Portal；从服务器的 `./xray-tunnel.sh start` 也会强制重建 Bridge，确保 bind mount 切换到原子替换后的新文件。
 
 为 `LANGFUSE_PUBLIC_URL` 配置独立域名，并在主服务器 Caddy 中通过网桥端口提供 TLS 入口，例如：
 
@@ -98,7 +106,7 @@ DNS、证书和域名必须与 `LANGFUSE_PUBLIC_URL` 一致。不要把从服务
 ./deploy/tests/langfuse-xray-e2e-smoke.sh
 ~~~
 
-第一个脚本通过国内镜像拉起包含全部依赖的临时 Langfuse Compose 栈并验证健康接口；第二个脚本创建带进程后缀的临时 Docker 网络和三个临时容器，验证 `Portal:3100 -> VLESS Reverse + REALITY -> Bridge -> langfuse-web:3000`。两者均自动清理且不占用固定宿主机端口。
+第一个脚本通过国内镜像拉起包含全部依赖的临时 Langfuse Compose 栈并验证 UI、ingestion和 Worker健康状态；第二个脚本创建带进程后缀的临时 Docker 网络和三个临时容器，验证 `Portal:3100 -> VLESS Reverse + REALITY -> Bridge -> langfuse-ingest:3000`。两者均自动清理且不占用固定宿主机端口。
 
 Xray Bridge 属于 Compose 项目并设置 `restart: unless-stopped`，Docker 或 NAS 重启后会自动恢复。常用链路命令：
 
@@ -138,5 +146,5 @@ MinIO 当前仅供容器内部使用，文本追踪不受影响。需要浏览�
 
 - 公网反向链路使用 VLESS Reverse、XTLS Vision 和 REALITY，不使用明文 VLESS。
 - Xray UUID 只用于反向链路，不能复用于普通代理客户端。
-- Bridge 的默认出站是 `blackhole`，专用 Freedom 出站仅允许 TCP 3000 并强制重定向到 `langfuse-web:3000`。
+- Bridge 的默认出站是 `blackhole`，专用 Freedom 出站仅允许 TCP 3000 并强制重定向到 `langfuse-ingest:3000`。
 - Portal 的 Langfuse 服务端口只绑定主服务器 Docker 网桥；公网只暴露经过 UUID 和 REALITY 双重校验的 `443` 反向连接端口，Caddy 的 `8443` 回落端口不对公网开放。

@@ -1,0 +1,89 @@
+<clickhouse>
+  <profiles>
+    <langfuse_read>
+      <readonly>2</readonly>
+      <max_concurrent_queries_for_user from_env="CLICKHOUSE_READ_MAX_CONCURRENT" />
+      <max_execution_time from_env="CLICKHOUSE_READ_MAX_EXECUTION_SECONDS" />
+      <timeout_before_checking_execution_speed>0</timeout_before_checking_execution_speed>
+      <max_memory_usage from_env="CLICKHOUSE_READ_MAX_MEMORY_BYTES" />
+      <max_memory_usage_for_user from_env="CLICKHOUSE_READ_MAX_MEMORY_FOR_USER_BYTES" />
+      <max_rows_to_read from_env="CLICKHOUSE_READ_MAX_ROWS" />
+      <max_bytes_to_read from_env="CLICKHOUSE_READ_MAX_BYTES" />
+      <max_result_rows from_env="CLICKHOUSE_READ_MAX_RESULT_ROWS" />
+      <max_result_bytes from_env="CLICKHOUSE_READ_MAX_RESULT_BYTES" />
+      <max_threads from_env="CLICKHOUSE_READ_MAX_THREADS" />
+      <max_temporary_data_on_disk_size_for_query from_env="CLICKHOUSE_READ_MAX_TEMPORARY_DATA_BYTES" />
+      <max_bytes_before_external_sort from_env="CLICKHOUSE_READ_EXTERNAL_SORT_BYTES" />
+      <max_bytes_before_external_group_by from_env="CLICKHOUSE_READ_EXTERNAL_GROUP_BY_BYTES" />
+      <read_overflow_mode>throw</read_overflow_mode>
+      <result_overflow_mode>throw</result_overflow_mode>
+      <log_queries>1</log_queries>
+      <log_comment>langfuse_read_proxy</log_comment>
+      <constraints>
+        <readonly>
+          <readonly />
+        </readonly>
+        <max_concurrent_queries_for_user>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_CONCURRENT" />
+        </max_concurrent_queries_for_user>
+        <max_execution_time>
+          <min>0.001</min>
+          <max from_env="CLICKHOUSE_READ_MAX_EXECUTION_SECONDS" />
+        </max_execution_time>
+        <max_memory_usage>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_MEMORY_BYTES" />
+        </max_memory_usage>
+        <max_memory_usage_for_user>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_MEMORY_FOR_USER_BYTES" />
+        </max_memory_usage_for_user>
+        <max_rows_to_read>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_ROWS" />
+        </max_rows_to_read>
+        <max_bytes_to_read>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_BYTES" />
+        </max_bytes_to_read>
+        <max_result_rows>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_RESULT_ROWS" />
+        </max_result_rows>
+        <max_result_bytes>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_RESULT_BYTES" />
+        </max_result_bytes>
+        <max_threads>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_THREADS" />
+        </max_threads>
+        <max_temporary_data_on_disk_size_for_query>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_MAX_TEMPORARY_DATA_BYTES" />
+        </max_temporary_data_on_disk_size_for_query>
+        <max_bytes_before_external_sort>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_EXTERNAL_SORT_BYTES" />
+        </max_bytes_before_external_sort>
+        <max_bytes_before_external_group_by>
+          <min>1</min>
+          <max from_env="CLICKHOUSE_READ_EXTERNAL_GROUP_BY_BYTES" />
+        </max_bytes_before_external_group_by>
+      </constraints>
+    </langfuse_read>
+  </profiles>
+
+  <users>
+    <langfuse_read>
+      <password from_env="CLICKHOUSE_READ_PASSWORD" />
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>langfuse_read</profile>
+      <quota>default</quota>
+      <access_management>0</access_management>
+    </langfuse_read>
+  </users>
+</clickhouse>

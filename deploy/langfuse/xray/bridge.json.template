@@ -19,7 +19,7 @@
       "protocol": "freedom",
       "tag": "langfuse-only",
       "settings": {
-        "redirect": "langfuse-web:3000",
+        "redirect": "langfuse-ingest:3000",
         "finalRules": [
           {
             "action": "allow",
