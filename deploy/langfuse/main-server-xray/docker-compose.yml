@@ -2,7 +2,7 @@ name: langfuse-xray-portal
 
 services:
   xray-portal:
-    image: ${XRAY_IMAGE:-ghcr.io/xtls/xray-core:26.5.9}
+    image: ${XRAY_IMAGE:-ghcr.nju.edu.cn/xtls/xray-core:26.5.9@sha256:933c868cbbb1ed632198c3ffeb99454709fa13dbb8c2a6f328d6a9a19e75269c}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"

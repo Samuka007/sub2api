@@ -47,7 +47,7 @@ services:
     restart: unless-stopped
     depends_on: *langfuse-depends
     ports:
-      - "${LANGFUSE_BIND_IP:-0.0.0.0}:${LANGFUSE_PORT:-3000}:3000"
+      - "${LANGFUSE_BIND_IP:-127.0.0.1}:${LANGFUSE_PORT:-3000}:3000"
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}

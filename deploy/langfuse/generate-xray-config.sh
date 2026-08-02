@@ -4,6 +4,21 @@ set -eu
 cd "$(dirname "$0")"
 [ -f .env ] || { echo "Missing .env; run ./generate-env.sh first" >&2; exit 1; }
 
+umask 077
+lock_file=.xray-generation.lock
+: > "$lock_file"
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "Another Xray configuration generation is already running" >&2
+  exit 1
+fi
+
+# ClickHouse runs as UID 101 and must be able to read these non-secret bind
+# mounts on both fresh installs and existing-deployment upgrades.
+chmod 644 \
+  clickhouse-config.d/resource-logging.xml \
+  clickhouse-users.d/resource-profile.xml
+
 env_value() {
   sed -n "s/^$1=//p" .env | tail -n 1
 }
@@ -46,7 +61,8 @@ migrate_default() {
 
 # Populate Xray settings when upgrading an existing deployment. Xray owns the
 # public 443 socket; normal HTTPS is sent to Caddy through the host gateway.
-ensure_default XRAY_IMAGE ghcr.io/xtls/xray-core:26.5.9
+default_xray_image=ghcr.nju.edu.cn/xtls/xray-core:26.5.9@sha256:933c868cbbb1ed632198c3ffeb99454709fa13dbb8c2a6f328d6a9a19e75269c
+ensure_default XRAY_IMAGE "$default_xray_image"
 ensure_default XRAY_SERVER_ADDRESS 38.244.20.220
 ensure_default XRAY_SERVER_PORT 443
 ensure_default XRAY_PORTAL_BIND_IP 172.18.0.1
@@ -59,6 +75,7 @@ ensure_default XRAY_REALITY_TARGET host.docker.internal:8443
 # exact defaults so an intentionally customized deployment is left untouched.
 migrate_default XRAY_SERVER_PORT 31590 443
 migrate_default XRAY_REALITY_TARGET api.sub2api.com:443 host.docker.internal:8443
+migrate_default XRAY_IMAGE ghcr.io/xtls/xray-core:26.5.9 "$default_xray_image"
 
 uuid="$(env_value XRAY_UUID)"
 private_key="$(env_value XRAY_REALITY_PRIVATE_KEY)"
@@ -106,9 +123,15 @@ case "$uuid" in *[!a-f0-9-]*|'') echo "Invalid XRAY_UUID" >&2; exit 1 ;; esac
 case "$private_key" in *[!A-Za-z0-9_-]*|'') echo "Invalid XRAY_REALITY_PRIVATE_KEY" >&2; exit 1 ;; esac
 case "$public_key" in *[!A-Za-z0-9_-]*|'') echo "Invalid XRAY_REALITY_PUBLIC_KEY" >&2; exit 1 ;; esac
 case "$short_id" in *[!a-f0-9]*|'') echo "Invalid XRAY_REALITY_SHORT_ID" >&2; exit 1 ;; esac
+[ "$server_port" -ge 1 ] && [ "$server_port" -le 65535 ] || { echo "Invalid XRAY_SERVER_PORT" >&2; exit 1; }
+[ "$portal_port" -ge 1 ] && [ "$portal_port" -le 65535 ] || { echo "Invalid XRAY_PORTAL_PORT" >&2; exit 1; }
 
 mkdir -p .xray main-server-xray
 chmod 700 .xray main-server-xray
+bridge_temp=".xray/bridge.json.tmp.$$"
+portal_temp="main-server-xray/config.json.tmp.$$"
+portal_env_temp="main-server-xray/.env.tmp.$$"
+trap 'rm -f "$bridge_temp" "$portal_temp" "$portal_env_temp"' EXIT HUP INT TERM
 sed \
   -e "s/__XRAY_SERVER_ADDRESS__/$server_address/g" \
   -e "s/__XRAY_SERVER_PORT__/$server_port/g" \
@@ -116,7 +139,7 @@ sed \
   -e "s/__XRAY_REALITY_SERVER_NAME__/$server_name/g" \
   -e "s/__XRAY_REALITY_PUBLIC_KEY__/$public_key/g" \
   -e "s/__XRAY_REALITY_SHORT_ID__/$short_id/g" \
-  xray/bridge.json.template > .xray/bridge.json
+  xray/bridge.json.template > "$bridge_temp"
 
 sed \
   -e "s/__XRAY_UUID__/$uuid/g" \
@@ -124,16 +147,20 @@ sed \
   -e "s/__XRAY_REALITY_TARGET__/$target/g" \
   -e "s/__XRAY_REALITY_PRIVATE_KEY__/$private_key/g" \
   -e "s/__XRAY_REALITY_SHORT_ID__/$short_id/g" \
-  xray/portal.json.template > main-server-xray/config.json
+  xray/portal.json.template > "$portal_temp"
 
 # The official image runs rootless. Keep the containing directories private,
 # while allowing the container UID to read the bind-mounted config files.
-chmod 644 .xray/bridge.json main-server-xray/config.json
-cat > main-server-xray/.env <<EOF
+chmod 644 "$bridge_temp" "$portal_temp"
+cat > "$portal_env_temp" <<EOF
 XRAY_IMAGE=$(env_value XRAY_IMAGE)
 XRAY_SERVER_PORT=$server_port
 XRAY_PORTAL_BIND_IP=$portal_bind_ip
 XRAY_PORTAL_PORT=$portal_port
 EOF
-chmod 600 main-server-xray/.env
+chmod 600 "$portal_env_temp"
+mv "$bridge_temp" .xray/bridge.json
+mv "$portal_temp" main-server-xray/config.json
+mv "$portal_env_temp" main-server-xray/.env
+trap - EXIT HUP INT TERM
 echo "Rendered Xray bridge and main-server portal configs. Secrets were not printed."

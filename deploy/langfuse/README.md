@@ -18,8 +18,10 @@ Compose 不设置 CPU、容器内存、Node.js heap 或 Redis `maxmemory` 上限
 
 ~~~sh
 cd deploy/langfuse
-./generate-env.sh
+LANGFUSE_PUBLIC_URL=https://langfuse.example.com ./generate-env.sh
 ~~~
+
+`LANGFUSE_PUBLIC_URL` 必须是最终由 TLS 反向代理提供的 Langfuse 地址；生成脚本拒绝明文 HTTP 或缺失的地址。默认只把从服务器的 `3000` 绑定到 `127.0.0.1`，不会在局域网或公网直接暴露管理入口。
 
 `generate-env.sh` 会同时生成：
 
@@ -28,7 +30,9 @@ cd deploy/langfuse
 - `main-server-xray/config.json`：主服务器配置；
 - `main-server-xray/.env`：主服务器 Compose 参数。
 
-这些文件包含密钥并被 Git 忽略。`.env` 权限为 600；Xray 配置文件位于权限为 700 的目录中，文件自身为 644，以便官方非 root 镜像只读挂载。生产部署中，`LANGFUSE_INIT_PROJECT_PUBLIC_KEY` 和 `LANGFUSE_INIT_PROJECT_SECRET_KEY` 必须与主服务器 Sub2API 的 `MODEL_TRACING_PUBLIC_KEY` 和 `MODEL_TRACING_SECRET_KEY` 一致。
+这些文件包含密钥并被 Git 忽略。`.env` 权限为 600；Xray 配置文件位于权限为 700 的目录中，文件自身为 644，以便官方非 root 镜像只读挂载。生成器也会把不含密钥的 ClickHouse XML 配置显式设为 644，确保 UID 101 在严格 umask 的部署主机上仍可读取 bind mount。生产部署中，`LANGFUSE_INIT_PROJECT_PUBLIC_KEY` 和 `LANGFUSE_INIT_PROJECT_SECRET_KEY` 必须与主服务器 Sub2API 的 `MODEL_TRACING_PUBLIC_KEY` 和 `MODEL_TRACING_SECRET_KEY` 一致。生成器使用跨进程锁，并通过原子替换发布两端配置；如果另一个生成过程正在运行，本次调用会直接失败。
+
+默认镜像均通过国内镜像站拉取并固定到不可变 digest。普通 `./manage.sh start` 不会拉取或升级镜像；只有显式执行 `./manage.sh pull` 才会下载配置中固定的镜像。变更镜像 digest 前应先完成备份、预发布验证和回滚演练。
 
 已有 `.env` 的旧隧道部署直接运行以下命令即可补充 Xray 参数并迁移旧的默认端口，不会重置 Langfuse 密钥：
 
@@ -61,20 +65,40 @@ sudo env SUB2API_HTTPS_PORT=8443 caddy reload --config /etc/caddy/Caddyfile
 cd main-server-xray
 docker compose config --quiet
 docker compose pull
-docker compose up -d
+docker compose up -d --pull never --force-recreate
 ~~~
 
-主服务器需要允许 `443/tcp` 入站。Compose 将宿主机 `443` 映射到容器内非特权的 `31590`，避免给 rootless Xray 增加绑定特权端口的能力。`3100` 只绑定到 `172.18.0.1`，不暴露在公网；Caddy 回落端口为内部 `8443`。官方 Xray 镜像固定为 `ghcr.io/xtls/xray-core:26.5.9`，两端必须使用同一版本。
+主服务器需要允许 `443/tcp` 入站。Compose 将宿主机 `443` 映射到容器内非特权的 `31590`，避免给 rootless Xray 增加绑定特权端口的能力。`3100` 只绑定到 `172.18.0.1`，不暴露在公网；Caddy 回落端口为内部 `8443`。两端使用经南京大学 GHCR 镜像站代理并固定 digest 的 Xray `26.5.9`，不得单独修改其中一端。该版本提供用于仅放行 `langfuse-web:3000` 的 Freedom `finalRules`，并已通过真实 VLESS Reverse + REALITY 双端链路 smoke。更新生成配置后必须用上面的 `--force-recreate` 重建 Portal；从服务器的 `./xray-tunnel.sh start` 也会强制重建 Bridge，确保 bind mount 切换到原子替换后的新文件。
+
+为 `LANGFUSE_PUBLIC_URL` 配置独立域名，并在主服务器 Caddy 中通过网桥端口提供 TLS 入口，例如：
+
+~~~caddyfile
+langfuse.example.com {
+    reverse_proxy 172.18.0.1:3100
+}
+~~~
+
+DNS、证书和域名必须与 `LANGFUSE_PUBLIC_URL` 一致。不要把从服务器的 `3000` 改回 `0.0.0.0`；本地应急访问可使用 SSH 端口转发到 `127.0.0.1:3000`。
 
 ## 从服务器启动与检查
 
 ~~~sh
+./manage.sh pull
 ./manage.sh start
 ./manage.sh status
 ./manage.sh check
 ./xray-tunnel.sh status
 ./xray-tunnel.sh logs
 ~~~
+
+提交或升级 Xray 配置前，在可访问 `api.sub2api.com:443` 的 Docker 主机运行真实隔离链路 smoke：
+
+~~~sh
+./deploy/tests/langfuse-stack-smoke.sh
+./deploy/tests/langfuse-xray-e2e-smoke.sh
+~~~
+
+第一个脚本通过国内镜像拉起包含全部依赖的临时 Langfuse Compose 栈并验证健康接口；第二个脚本创建带进程后缀的临时 Docker 网络和三个临时容器，验证 `Portal:3100 -> VLESS Reverse + REALITY -> Bridge -> langfuse-web:3000`。两者均自动清理且不占用固定宿主机端口。
 
 Xray Bridge 属于 Compose 项目并设置 `restart: unless-stopped`，Docker 或 NAS 重启后会自动恢复。常用链路命令：
 

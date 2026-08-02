@@ -5,7 +5,7 @@ compose() { docker compose --env-file .env -f docker-compose.yml "$@"; }
 
 case "${1:-}" in
   render) ./generate-xray-config.sh ;;
-  start) ./generate-xray-config.sh; compose up -d xray-bridge ;;
+  start) ./generate-xray-config.sh; compose up -d --pull never --force-recreate xray-bridge ;;
   stop) compose stop xray-bridge ;;
   status) compose ps xray-bridge ;;
   logs) compose logs --tail 100 -f xray-bridge ;;

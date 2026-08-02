@@ -50,7 +50,7 @@ step "Review Skill smoke tests" /bin/bash tools/test_review_skill.sh
 step "Repository governance" python3 tools/check_repository_governance.py
 
 printf '\n==> Deployment script syntax\n'
-for script in deploy/apple-container.sh deploy/install.sh deploy/tests/*.sh; do
+for script in deploy/apple-container.sh deploy/install.sh deploy/langfuse/*.sh deploy/tests/*.sh; do
   /bin/bash -n "${script}"
 done
 
@@ -66,6 +66,7 @@ step "Docker runtime resource contract" /bin/sh deploy/tests/docker-runtime-reso
 step "Model IQ Compose contract" /bin/bash deploy/tests/model-iq-compose-env-test.sh
 step "Install GitHub token contract" /bin/bash deploy/tests/install-github-token-test.sh
 step "Model tracing Compose contract" /bin/bash deploy/tests/model-tracing-compose-test.sh
+step "Langfuse deployment contract" /bin/bash deploy/tests/langfuse-deployment-test.sh
 
 step "Backend unit tests" make -C backend test-unit
 step "Backend integration tests" make -C backend test-integration

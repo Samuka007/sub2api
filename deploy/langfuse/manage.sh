@@ -6,9 +6,10 @@ require_env() { [ -f .env ] || { echo "Missing .env; run ./generate-env.sh first
 render_xray() { ./generate-xray-config.sh; }
 
 case "${1:-}" in
-  start) require_env; render_xray; compose pull; compose up -d ;;
+  start) require_env; render_xray; compose up -d --pull never ;;
+  pull) require_env; compose pull ;;
   stop) require_env; compose down ;;
-  restart) require_env; render_xray; compose up -d --force-recreate ;;
+  restart) require_env; render_xray; compose up -d --pull never --force-recreate ;;
   status) require_env; compose ps ;;
   logs) require_env; compose logs --tail 200 -f "${2:-langfuse-web}" ;;
   check)
@@ -18,16 +19,5 @@ case "${1:-}" in
     curl --fail --silent --show-error "http://127.0.0.1:${port:-3000}/api/public/health"
     printf '\n'
     ;;
-  use-official-images)
-    require_env
-    sed -i \
-      -e 's#^LANGFUSE_WEB_IMAGE=.*#LANGFUSE_WEB_IMAGE=docker.io/langfuse/langfuse:3#' \
-      -e 's#^LANGFUSE_WORKER_IMAGE=.*#LANGFUSE_WORKER_IMAGE=docker.io/langfuse/langfuse-worker:3#' \
-      -e 's#^POSTGRES_IMAGE=.*#POSTGRES_IMAGE=docker.io/library/postgres:17#' \
-      -e 's#^CLICKHOUSE_IMAGE=.*#CLICKHOUSE_IMAGE=docker.io/clickhouse/clickhouse-server:25.12#' \
-      -e 's#^MINIO_IMAGE=.*#MINIO_IMAGE=cgr.dev/chainguard/minio:latest#' \
-      -e 's#^REDIS_IMAGE=.*#REDIS_IMAGE=docker.io/library/redis:7#' .env
-    echo "Switched .env to official image registries."
-    ;;
-  *) echo "Usage: $0 {start|stop|restart|status|logs [service]|check|use-official-images}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {start|pull|stop|restart|status|logs [service]|check}" >&2; exit 2 ;;
 esac

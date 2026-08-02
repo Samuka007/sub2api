@@ -30,4 +30,5 @@ langfuse/reverse-tunnel.log
 langfuse/.reverse-tunnel.pid
 langfuse/.ssh-tunnel/
 langfuse/.xray/
+langfuse/.xray-generation.lock
 langfuse/main-server-xray/config.json
