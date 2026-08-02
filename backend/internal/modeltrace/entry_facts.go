@@ -24,7 +24,7 @@ func resolveEntryFacts(path, contentType string, body []byte) entryFacts {
 		facts.ClientModel = boundedEntryFact(model)
 		return facts
 	}
-	facts.ClientModel = boundedEntryFact(requestModel(contentType, body))
+	facts.ClientModel = boundedEntryFact(requestModel(contentType, body, facts.Protocol == "openai.live"))
 	return facts
 }
 
@@ -45,8 +45,10 @@ func entryProtocol(path string) string {
 		return "anthropic.messages"
 	case strings.HasSuffix(path, "/chat/completions"):
 		return "openai.chat_completions"
-	case strings.HasSuffix(path, "/responses"):
+	case strings.HasSuffix(path, "/responses"), strings.Contains(path, "/responses/"):
 		return "openai.responses"
+	case path == "/v1/live", path == "/backend-api/codex/realtime/calls":
+		return "openai.live"
 	case strings.HasSuffix(path, "/embeddings"):
 		return "openai.embeddings"
 	case strings.HasSuffix(path, "/alpha/search"):
@@ -89,14 +91,14 @@ func geminiModelFromPath(path string) string {
 	return strings.TrimSpace(modelAction)
 }
 
-func requestModel(contentType string, body []byte) string {
+func requestModel(contentType string, body []byte, liveSession bool) string {
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		mediaType = strings.TrimSpace(strings.Split(contentType, ";")[0])
 	}
 	switch strings.ToLower(mediaType) {
 	case "multipart/form-data":
-		return multipartModel(body, params["boundary"])
+		return multipartModel(body, params["boundary"], liveSession)
 	case "application/x-www-form-urlencoded":
 		values, parseErr := url.ParseQuery(string(body))
 		if parseErr == nil {
@@ -104,6 +106,17 @@ func requestModel(contentType string, body []byte) string {
 		}
 		return ""
 	default:
+		if liveSession {
+			var envelope struct {
+				Session struct {
+					Model string `json:"model"`
+				} `json:"session"`
+			}
+			if json.Unmarshal(body, &envelope) == nil {
+				return envelope.Session.Model
+			}
+			return ""
+		}
 		var envelope struct {
 			Model string `json:"model"`
 		}
@@ -114,9 +127,13 @@ func requestModel(contentType string, body []byte) string {
 	}
 }
 
-func multipartModel(body []byte, boundary string) string {
+func multipartModel(body []byte, boundary string, liveSession bool) string {
 	if len(body) == 0 || strings.TrimSpace(boundary) == "" {
 		return ""
+	}
+	formName := "model"
+	if liveSession {
+		formName = "session"
 	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	for {
@@ -124,13 +141,22 @@ func multipartModel(body []byte, boundary string) string {
 		if err != nil {
 			return ""
 		}
-		if part.FormName() != "model" {
+		if part.FormName() != formName {
 			_ = part.Close()
 			continue
 		}
 		value, readErr := io.ReadAll(io.LimitReader(part, maxEntryFactBytes+1))
 		_ = part.Close()
 		if readErr != nil {
+			return ""
+		}
+		if liveSession {
+			var session struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(value, &session) == nil {
+				return session.Model
+			}
 			return ""
 		}
 		return string(value)

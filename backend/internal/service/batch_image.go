@@ -138,6 +138,7 @@ type BatchImageJob struct {
 	IdempotencyKey *string
 	RequestHash    *string
 	ManifestHash   *string
+	SessionID      *string
 
 	RetryCount        int
 	Version           int
@@ -198,6 +199,7 @@ type CreateBatchImageJobParams struct {
 	IdempotencyKey *string
 	RequestHash    *string
 	ManifestHash   *string
+	SessionID      *string
 
 	RetryCount        int
 	TraceContinuation *recording.TraceContinuation

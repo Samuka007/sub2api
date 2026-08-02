@@ -9,6 +9,10 @@ from pathlib import Path
 
 
 REQUIRED_FILES = (
+    ".upstream-version",
+    "README.md",
+    "README_CN.md",
+    "README_JA.md",
     "AGENTS.md",
     "GIT_WORKFLOW.md",
     "DEV_GUIDE.md",
@@ -57,6 +61,8 @@ IGNORED_WORK_SAMPLES = (
     "skills/example/SKILL.md",
 )
 
+UPSTREAM_READMES = ("README.md", "README_CN.md", "README_JA.md")
+
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -83,6 +89,15 @@ def tracked_files(root: Path) -> set[str]:
     return {item for item in result.stdout.split("\0") if item}
 
 
+def upstream_version(root: Path) -> tuple[str, str]:
+    values: dict[str, str] = {}
+    for line in (root / ".upstream-version").read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return values.get("UPSTREAM_TAG", ""), values.get("UPSTREAM_COMMIT", "")
+
+
 def main() -> int:
     try:
         root = repository_root()
@@ -97,6 +112,26 @@ def main() -> int:
         path = root / relative_path
         if not path.is_file() or path.stat().st_size == 0:
             errors.append(f"required non-empty file is missing: {relative_path}")
+
+    try:
+        upstream_tag, upstream_commit = upstream_version(root)
+    except OSError as error:
+        errors.append(f"cannot read .upstream-version: {error}")
+    else:
+        if not upstream_tag or not upstream_commit:
+            errors.append(".upstream-version must define UPSTREAM_TAG and UPSTREAM_COMMIT")
+        else:
+            for relative_path in UPSTREAM_READMES:
+                path = root / relative_path
+                if not path.is_file():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if upstream_tag not in text or (
+                    relative_path == "README.md" and upstream_commit not in text
+                ):
+                    errors.append(
+                        f"README upstream baseline does not match .upstream-version: {relative_path}"
+                    )
 
     for relative_path, expected_target in REQUIRED_SYMLINKS.items():
         path = root / relative_path

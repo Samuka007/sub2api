@@ -23,6 +23,17 @@ class RepositoryGovernanceTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture\n", encoding="utf-8")
 
+        (self.root / ".upstream-version").write_text(
+            "UPSTREAM_TAG=v0.1.169\nUPSTREAM_COMMIT=26d894ef4f50645a4bf1030e378ac892f17d0223\n",
+            encoding="utf-8",
+        )
+        (self.root / "README.md").write_text(
+            "v0.1.169 26d894ef4f50645a4bf1030e378ac892f17d0223\n",
+            encoding="utf-8",
+        )
+        for name in ("README_CN.md", "README_JA.md"):
+            (self.root / name).write_text("v0.1.169\n", encoding="utf-8")
+
         for relative_path, target in governance.REQUIRED_SYMLINKS.items():
             path = self.root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +104,24 @@ class RepositoryGovernanceTest(unittest.TestCase):
             "Skill discovery symlink has wrong target: .codex/skills -> ../wrong/skills",
             result.stderr,
         )
+
+    def test_rejects_readme_upstream_version_drift(self) -> None:
+        (self.root / ".upstream-version").write_text(
+            "UPSTREAM_TAG=v0.1.169\nUPSTREAM_COMMIT=26d894ef4f50645a4bf1030e378ac892f17d0223\n",
+            encoding="utf-8",
+        )
+        (self.root / "README.md").write_text(
+            "| 上游基线 | `v0.1.166` / `dc893dd0b8eab41df5be595ae9fcd1aa74a062b8` |\n",
+            encoding="utf-8",
+        )
+        for name in ("README_CN.md", "README_JA.md"):
+            (self.root / name).write_text("upstream baseline `v0.1.166`\n", encoding="utf-8")
+        self.run_git("add", ".upstream-version", "README.md", "README_CN.md", "README_JA.md")
+
+        result = self.run_check()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("README upstream baseline does not match .upstream-version", result.stderr)
 
     def test_rejects_missing_ignore_boundaries(self) -> None:
         (self.root / ".gitignore").write_text("", encoding="utf-8")

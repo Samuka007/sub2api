@@ -1356,6 +1356,14 @@ func TestOpenAIStreamingPostOutputDisconnectQuarantinesSharedProxyWithoutSameStr
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
 		MaxLineSize: defaultMaxLineSize,
 	}}}
+	// collapseInterval 0: the two loop iterations below record within the
+	// production collapse window and must count as distinct failure events here.
+	svc.openaiProxyStreamCircuit = newOpenAIProxyStreamCircuit(openAIProxyStreamCircuitSettings{
+		failureThreshold: 2,
+		failureWindow:    time.Minute,
+		quarantineTTL:    10 * time.Minute,
+		maxEntries:       16,
+	})
 
 	for _, readErr := range []error{
 		io.ErrUnexpectedEOF,
@@ -2008,6 +2016,14 @@ func TestOpenAIStreamingPassthroughPostOutputDisconnectQuarantinesSharedProxy(t 
 	proxyID := int64(4698)
 	account := &Account{ID: 469804, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, ProxyID: &proxyID}
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	// collapseInterval 0: the loop below records within the production collapse
+	// window and must count as distinct failure events here.
+	svc.openaiProxyStreamCircuit = newOpenAIProxyStreamCircuit(openAIProxyStreamCircuitSettings{
+		failureThreshold: 2,
+		failureWindow:    time.Minute,
+		quarantineTTL:    10 * time.Minute,
+		maxEntries:       16,
+	})
 
 	for _, readErr := range []error{io.ErrUnexpectedEOF, errors.New("http2: client connection lost")} {
 		rec := httptest.NewRecorder()
@@ -2029,7 +2045,7 @@ func TestOpenAIStreamingPassthroughPostOutputDisconnectQuarantinesSharedProxy(t 
 		require.Contains(t, rec.Body.String(), "partial")
 	}
 
-	require.True(t, svc.isOpenAIProxyStreamQuarantined(account))
+	require.True(t, svc.isOpenAIProxyStreamQuarantined(context.Background(), account))
 }
 
 func TestOpenAIStreamingPassthroughResponseFailedBeforeOutputReturnsFailover(t *testing.T) {
@@ -2460,6 +2476,72 @@ func TestOpenAIStreamingReuseScannerBufferAndStillWorks(t *testing.T) {
 	require.Equal(t, 1, result.usage.InputTokens)
 	require.Equal(t, 2, result.usage.OutputTokens)
 	require.Equal(t, 3, result.usage.CacheReadInputTokens)
+}
+
+func TestOpenAIUpstreamRequestCredentialIsolation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name        string
+		passthrough bool
+		account     *Account
+	}{
+		{
+			name:    "non-passthrough API key",
+			account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		},
+		{
+			name: "non-passthrough OAuth",
+			account: &Account{
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Credentials: map[string]any{"chatgpt_account_id": "account-non-passthrough"},
+			},
+		},
+		{
+			name:        "passthrough API key",
+			passthrough: true,
+			account:     &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		},
+		{
+			name:        "passthrough OAuth",
+			passthrough: true,
+			account: &Account{
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Credentials: map[string]any{"chatgpt_account_id": "account-passthrough"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			body := []byte(`{"model":"gpt-5","input":[]}`)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			c.Request.Header.Set("Authorization", "Bearer inbound-must-not-forward")
+			c.Request.Header.Set("x-api-key", "inbound-x-api-key")
+			c.Request.Header.Set("x-goog-api-key", "inbound-x-goog-api-key")
+
+			svc := &OpenAIGatewayService{cfg: &config.Config{Security: config.SecurityConfig{
+				URLAllowlist: config.URLAllowlistConfig{Enabled: false},
+			}}}
+			var (
+				req *http.Request
+				err error
+			)
+			if tt.passthrough {
+				req, err = svc.buildUpstreamRequestOpenAIPassthrough(c.Request.Context(), c, tt.account, body, "account-token")
+			} else {
+				req, err = svc.buildUpstreamRequest(c.Request.Context(), c, tt.account, body, "account-token", false, "", false)
+			}
+			require.NoError(t, err)
+			require.Equal(t, []string{"Bearer account-token"}, req.Header.Values("Authorization"))
+			require.Empty(t, req.Header.Values("x-api-key"))
+			require.Empty(t, req.Header.Values("x-goog-api-key"))
+		})
+	}
 }
 
 func TestOpenAIInvalidBaseURLWhenAllowlistDisabled(t *testing.T) {

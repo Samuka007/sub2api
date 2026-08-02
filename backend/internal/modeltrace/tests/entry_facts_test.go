@@ -17,6 +17,39 @@ func TestResolveEntryFacts(t *testing.T) {
 		require.Equal(t, "gpt-client", facts.ClientModel)
 	})
 
+	t.Run("Responses subpaths keep the Responses protocol", func(t *testing.T) {
+		for _, path := range []string{
+			"/v1/responses/compact",
+			"/responses/compact",
+			"/backend-api/codex/responses/compact",
+			"/v1/responses/foo/responses/compact",
+		} {
+			facts := modeltrace.TestingResolveEntryFacts(path, "application/json", []byte(`{"model":"gpt-client"}`))
+			require.Equal(t, "openai.responses", facts.Protocol, "path=%s", path)
+		}
+
+		facts := modeltrace.TestingResolveEntryFacts("/v1/notresponses/compact", "application/json", []byte(`{"model":"gpt-client"}`))
+		require.Empty(t, facts.Protocol)
+	})
+
+	t.Run("Live JSON model comes from session", func(t *testing.T) {
+		facts := modeltrace.TestingResolveEntryFacts("/v1/live", "application/json", []byte(`{"sdp":"offer","session":{"model":"gpt-realtime"}}`))
+		require.Equal(t, "openai.live", facts.Protocol)
+		require.Equal(t, "gpt-realtime", facts.ClientModel)
+	})
+
+	t.Run("Codex Live multipart model comes from session", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		require.NoError(t, writer.WriteField("sdp", "offer"))
+		require.NoError(t, writer.WriteField("session", `{"model":"gpt-realtime-codex"}`))
+		require.NoError(t, writer.Close())
+
+		facts := modeltrace.TestingResolveEntryFacts("/backend-api/codex/realtime/calls", writer.FormDataContentType(), body.Bytes())
+		require.Equal(t, "openai.live", facts.Protocol)
+		require.Equal(t, "gpt-realtime-codex", facts.ClientModel)
+	})
+
 	t.Run("Gemini model comes from path", func(t *testing.T) {
 		facts := modeltrace.TestingResolveEntryFacts("/v1beta/models/gemini-client:streamGenerateContent", "application/json", []byte(`{"model":"ignored"}`))
 		require.Equal(t, "gemini.streamGenerateContent", facts.Protocol)

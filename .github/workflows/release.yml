@@ -353,6 +353,14 @@ jobs:
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           DOCKERHUB_USERNAME: ${{ env.DOCKERHUB_USERNAME || 'skip' }}
 
+      - name: Verify released runtime resources
+        env:
+          IMAGE: ghcr.io/${{ steps.lowercase.outputs.owner }}/sub2api:${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          SUB2API_RUNTIME_RESOURCE_IMAGE="$IMAGE" /bin/sh deploy/tests/docker-runtime-resources-test.sh
+
       - name: Generate release notes
         env:
           RELEASE_MODE: ${{ needs.resolve-release.outputs.release_mode }}

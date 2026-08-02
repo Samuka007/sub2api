@@ -214,6 +214,7 @@ jobs:
         run: |
           set -euo pipefail
           docker pull "$IMAGE"
+          SUB2API_RUNTIME_RESOURCE_IMAGE="$IMAGE" /bin/sh deploy/tests/docker-runtime-resources-test.sh
           docker run --rm "$IMAGE" --version 2>&1 | tee image-version.txt
           grep -F "Sub2API $VERSION" image-version.txt
           REPO_DIGEST=$(docker image inspect "$IMAGE" --format '{{ index .RepoDigests 0 }}')
