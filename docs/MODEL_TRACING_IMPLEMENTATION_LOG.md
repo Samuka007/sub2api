@@ -178,3 +178,23 @@
 - 为完成行为验证，使用同一脚本通过宿主 rootful Docker socket `/var/run/docker.sock` 运行临时 fallback：镜像来自国内镜像，Go 客户端使用 host network，编译目标按宿主 `linux/amd64` 适配；Langfuse MinIO 数据绑定到 `/data`，绕过根分区空间保留阈值。该路径仅为本机验证适配，不改变生产代码或脚本。
 - `run_e2e.sh` 完整 smoke 通过：Langfuse `3.224.2`，stdout 为 `trace_id=174c92bd5cb108117971adb3a9bead20`、观测数 `1`、`VERIFY_OK`；日志含 `full-scale e2e passed`，HTTP/WS、failover、断连、配置快照、OTLP fail-open、200 项 batch 续接及敏感内容门禁均通过。
 - 单测与 race 使用 `golang:1.26.5` 容器完成；本记录不包含任何 Langfuse、模型供应商或本地测试凭据。
+
+## 2026-08-03 — 提升模型追踪捕获上限（prompt 16M / response 8M / media 16M）
+
+### 背景与根因
+
+- Langfuse 观测：最近 24h input 高度集中于 8,388,665/8,388,666 bytes（合计 8,429 条）、output 集中于 1,048,629/1,048,633 bytes（合计 1,762 条），且全部为失效 JSON。截断值 = 捕获 limit + `[truncated:original_bytes=%d,captured_bytes=%d]` 标记（标记追加在 limit 之外，长度随 original_bytes 位数变化），确认是 Sub2API 捕获层硬截断，非 Langfuse/Collector 侧。
+- input 8 MiB = 面板运行时配置 `prompt_max_bytes=8MiB` 命中 `maxCaptureBytes = 8<<20` 硬顶；output 1 MiB = 部署 env `response_max_bytes=1MiB`。
+- 捕获顺序是先按 limit 截原始请求字节、再 sanitize：base64 媒体字节计入捕获预算，超限请求被截断后 JSON 解析失败，媒体摘要（media descriptor）机制无法生效，残留 input 是含 base64 的半截 JSON。请求数据一旦截断不可重来，上限过低导致不可恢复的信息丢失。
+
+### 行为变更
+
+- `backend/internal/modeltrace/exporter.go`：默认捕获上限调整为 prompt 16 MiB、response 8 MiB、media 16 MiB；`maxCaptureBytes` 硬顶 8 MiB → 32 MiB，解除 8 MiB 钳制。
+- `backend/internal/config/config.go`：`setModelTracingDefaults` 与 `normalizeModelTracingConfig` 缺省值对齐 16M/8M/16M。
+- `backend/internal/modeltrace/recording/recording.go`：`InputLimit` 非 recorder fallback 1 MiB → 16 MiB 对齐。
+- 运行时注意：面板运行时配置若仍保留 `prompt_max_bytes=8MiB`，会继续覆盖部署配置，升级后需把面板与 `model-tracing.env` 同步为 16M/8M/16M。
+
+### 验证
+
+- `gofmt -l` 无输出；`go test ./internal/modeltrace/... ./internal/config -count=1` 退出 0。
+- `tests/security_test.go` 通过 `TestingMaxCaptureBytes` 常量自适应新上限，断言无需改动。

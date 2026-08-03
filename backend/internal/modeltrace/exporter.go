@@ -35,9 +35,9 @@ const (
 	serviceName          = "sub2api"
 	tracerName           = "github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	langfuseIngestionHdr = "x-langfuse-ingestion-version"
-	defaultPromptBytes   = 1 << 20
-	defaultResponseBytes = 1 << 20
-	defaultMediaBytes    = 1 << 20
+	defaultPromptBytes   = 16 << 20
+	defaultResponseBytes = 8 << 20
+	defaultMediaBytes    = 16 << 20
 	// defaultExportTimeout is the single-batch OTLP export deadline including the
 	// OTLP exporter's internal retry loop. It must cover the full retry window so
 	// a transiently refused Collector is retried instead of discarded. <=0 config
@@ -46,7 +46,7 @@ const (
 	defaultRetryInitial     = 5 * time.Second
 	defaultRetryMaxInterval = 30 * time.Second
 	defaultRetryMaxElapsed  = 55 * time.Second
-	maxCaptureBytes         = 8 << 20
+	maxCaptureBytes         = 32 << 20
 	defaultMaxQueueSize     = 256
 	defaultMaxExportBatch   = 16
 	defaultBatchTimeout     = 1000 * time.Millisecond
