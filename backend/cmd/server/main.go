@@ -132,27 +132,48 @@ func runSetupServer() {
 	}
 }
 
-func (app *Application) activate() {
+func (app *Application) activate() error {
+	if app.Metrics != nil {
+		if err := app.Metrics.Start(); err != nil {
+			return err
+		}
+	}
+	if app.OpsMetrics != nil {
+		app.OpsMetrics.Start()
+	}
 	modeltrace.InstallDefaultConfigManager(app.ModelTraceConfig)
 	if app.ModelTraceConfig != nil {
 		if err := app.ModelTraceConfig.Start(context.Background()); err != nil {
 			log.Printf("Model tracing runtime config started in degraded state: %v", err)
 		}
 	}
+	return nil
 }
 
 func (app *Application) cleanup() {
-	modeltrace.InstallDefaultConfigManager(nil)
-	if app.ModelTraceConfig != nil {
+	if app == nil {
+		return
+	}
+	app.cleanupOnce.Do(func() {
+		modeltrace.InstallDefaultConfigManager(nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := app.ModelTraceConfig.Shutdown(ctx); err != nil {
-			log.Printf("Model tracing config refresh shutdown failed: %v", err)
-		}
+		shutdownModelTracing(ctx, app.ModelTraceConfig, app.ModelTrace)
 		cancel()
-	}
-	if app.Cleanup != nil {
-		app.Cleanup()
-	}
+
+		if app.OpsMetrics != nil {
+			app.OpsMetrics.Stop()
+		}
+		if app.Metrics != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := app.Metrics.Shutdown(ctx); err != nil {
+				log.Printf("Metrics listener shutdown failed: %v", err)
+			}
+			cancel()
+		}
+		if app.Cleanup != nil {
+			app.Cleanup()
+		}
+	})
 }
 
 type modelTraceShutdowner interface {
@@ -199,8 +220,15 @@ func runMainServer() {
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
-	app.activate()
+	if err := app.activate(); err != nil {
+		log.Printf("Failed to activate application: %v", err)
+		app.cleanup()
+		return
+	}
 	defer app.cleanup()
+	if app.Metrics != nil && app.Metrics.Addr() != nil {
+		log.Printf("Metrics listener started on %s", app.Metrics.Addr())
+	}
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
@@ -233,7 +261,7 @@ func runMainServer() {
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
-	shutdownModelTracing(ctx, app.ModelTraceConfig, modelTrace)
+	app.cleanup()
 
 	log.Println("Server exited")
 }

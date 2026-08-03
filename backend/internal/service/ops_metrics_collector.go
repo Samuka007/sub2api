@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -43,6 +44,14 @@ type opsSchedulableAccountLoadRepository interface {
 	ListSchedulableAccountLoads(ctx context.Context) ([]AccountWithConcurrency, error)
 }
 
+// OpsMetricsLeaderLock is the collector-specific cross-instance lock. The
+// interface intentionally does not expose an arbitrary key so its repository
+// implementation can preserve the exact legacy Redis key contract.
+type OpsMetricsLeaderLock interface {
+	TryAcquire(ctx context.Context, owner string, ttl time.Duration) (bool, error)
+	Release(ctx context.Context, owner string) error
+}
+
 type OpsMetricsCollector struct {
 	opsRepo     OpsRepository
 	settingRepo SettingRepository
@@ -53,17 +62,25 @@ type OpsMetricsCollector struct {
 
 	db          *sql.DB
 	redisClient *redis.Client
+	leaderLock  OpsMetricsLeaderLock
 	instanceID  string
 
 	lastCgroupCPUUsageNanos uint64
 	lastCgroupCPUSampleAt   time.Time
 
-	stopCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
+	lifecycleMu     sync.Mutex
+	running         bool
+	runCancel       context.CancelFunc
+	runDone         chan struct{}
+	collectOnceHook func(context.Context)
+
+	leaderLockReleaseFailures atomic.Uint64
 
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
+
+	snapshotMu sync.RWMutex
+	snapshot   *OpsInsertSystemMetricsInput
 }
 
 func NewOpsMetricsCollector(
@@ -73,6 +90,7 @@ func NewOpsMetricsCollector(
 	concurrencyService *ConcurrencyService,
 	db *sql.DB,
 	redisClient *redis.Client,
+	leaderLock OpsMetricsLeaderLock,
 	cfg *config.Config,
 ) *OpsMetricsCollector {
 	return &OpsMetricsCollector{
@@ -83,6 +101,7 @@ func NewOpsMetricsCollector(
 		concurrencyService: concurrencyService,
 		db:                 db,
 		redisClient:        redisClient,
+		leaderLock:         leaderLock,
 		instanceID:         uuid.NewString(),
 	}
 }
@@ -91,50 +110,75 @@ func (c *OpsMetricsCollector) Start() {
 	if c == nil {
 		return
 	}
-	c.startOnce.Do(func() {
-		if c.stopCh == nil {
-			c.stopCh = make(chan struct{})
-		}
-		go c.run()
-	})
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.running {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.running = true
+	c.runCancel = cancel
+	c.runDone = done
+	go c.run(ctx, done)
 }
 
 func (c *OpsMetricsCollector) Stop() {
 	if c == nil {
 		return
 	}
-	c.stopOnce.Do(func() {
-		if c.stopCh != nil {
-			close(c.stopCh)
-		}
-	})
+	c.lifecycleMu.Lock()
+	if !c.running {
+		c.lifecycleMu.Unlock()
+		return
+	}
+	cancel := c.runCancel
+	done := c.runDone
+	c.lifecycleMu.Unlock()
+
+	cancel()
+	<-done
 }
 
-func (c *OpsMetricsCollector) run() {
+func (c *OpsMetricsCollector) run(ctx context.Context, done chan struct{}) {
+	defer func() {
+		c.lifecycleMu.Lock()
+		if c.runDone == done {
+			c.running = false
+			c.runCancel = nil
+			c.runDone = nil
+		}
+		close(done)
+		c.lifecycleMu.Unlock()
+	}()
+
 	// First run immediately so the dashboard has data soon after startup.
-	c.collectOnce()
+	c.collectOnceWithParent(ctx)
 
 	for {
-		interval := c.getInterval()
+		if ctx.Err() != nil {
+			return
+		}
+		interval := c.getInterval(ctx)
 		timer := time.NewTimer(interval)
 		select {
 		case <-timer.C:
-			c.collectOnce()
-		case <-c.stopCh:
+			c.collectOnceWithParent(ctx)
+		case <-ctx.Done():
 			timer.Stop()
 			return
 		}
 	}
 }
 
-func (c *OpsMetricsCollector) getInterval() time.Duration {
+func (c *OpsMetricsCollector) getInterval(parent context.Context) time.Duration {
 	interval := opsMetricsCollectorMinInterval
 
 	if c.settingRepo == nil {
 		return interval
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	raw, err := c.settingRepo.GetValue(ctx, SettingKeyOpsMetricsIntervalSeconds)
@@ -160,23 +204,34 @@ func (c *OpsMetricsCollector) getInterval() time.Duration {
 }
 
 func (c *OpsMetricsCollector) collectOnce() {
+	c.collectOnceWithParent(context.Background())
+}
+
+func (c *OpsMetricsCollector) collectOnceWithParent(parent context.Context) {
 	if c == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(parent, opsMetricsCollectorTimeout)
+	defer cancel()
+	if c.collectOnceHook != nil {
+		c.collectOnceHook(ctx)
+		return
+	}
 	if c.cfg != nil && !c.cfg.Ops.Enabled {
+		c.clearPublishedSnapshot()
 		return
 	}
 	if c.opsRepo == nil {
+		c.clearPublishedSnapshot()
 		return
 	}
 	if c.db == nil {
+		c.clearPublishedSnapshot()
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opsMetricsCollectorTimeout)
-	defer cancel()
-
 	if !c.isMonitoringEnabled(ctx) {
+		c.clearPublishedSnapshot()
 		return
 	}
 
@@ -364,7 +419,91 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 		ConcurrencyQueueDepth: concurrencyQueueDepth,
 	}
 
-	return c.opsRepo.InsertSystemMetrics(ctx, input)
+	return c.persistAndPublish(ctx, input)
+}
+
+func (c *OpsMetricsCollector) persistAndPublish(ctx context.Context, input *OpsInsertSystemMetricsInput) error {
+	if err := c.opsRepo.InsertSystemMetrics(ctx, input); err != nil {
+		return err
+	}
+	c.publishPersistedSnapshot(input)
+	return nil
+}
+
+func (c *OpsMetricsCollector) publishPersistedSnapshot(input *OpsInsertSystemMetricsInput) {
+	if c == nil || input == nil {
+		return
+	}
+	snapshot := cloneOpsSystemMetricsInput(input)
+	c.snapshotMu.Lock()
+	c.snapshot = snapshot
+	c.snapshotMu.Unlock()
+}
+
+func (c *OpsMetricsCollector) clearPublishedSnapshot() {
+	if c == nil {
+		return
+	}
+	c.snapshotMu.Lock()
+	c.snapshot = nil
+	c.snapshotMu.Unlock()
+}
+
+// LatestSnapshot returns an isolated copy of the latest exact Ops one-minute
+// snapshot whose InsertSystemMetrics call succeeded. It never queries storage.
+func (c *OpsMetricsCollector) LatestSnapshot() *OpsInsertSystemMetricsInput {
+	if c == nil {
+		return nil
+	}
+	c.snapshotMu.RLock()
+	snapshot := cloneOpsSystemMetricsInput(c.snapshot)
+	c.snapshotMu.RUnlock()
+	return snapshot
+}
+
+func cloneOpsSystemMetricsInput(input *OpsInsertSystemMetricsInput) *OpsInsertSystemMetricsInput {
+	if input == nil {
+		return nil
+	}
+	result := *input
+	result.Platform = clonePtr(input.Platform)
+	result.GroupID = clonePtr(input.GroupID)
+	result.QPS = clonePtr(input.QPS)
+	result.TPS = clonePtr(input.TPS)
+	result.DurationP50Ms = clonePtr(input.DurationP50Ms)
+	result.DurationP90Ms = clonePtr(input.DurationP90Ms)
+	result.DurationP95Ms = clonePtr(input.DurationP95Ms)
+	result.DurationP99Ms = clonePtr(input.DurationP99Ms)
+	result.DurationAvgMs = clonePtr(input.DurationAvgMs)
+	result.DurationMaxMs = clonePtr(input.DurationMaxMs)
+	result.TTFTP50Ms = clonePtr(input.TTFTP50Ms)
+	result.TTFTP90Ms = clonePtr(input.TTFTP90Ms)
+	result.TTFTP95Ms = clonePtr(input.TTFTP95Ms)
+	result.TTFTP99Ms = clonePtr(input.TTFTP99Ms)
+	result.TTFTAvgMs = clonePtr(input.TTFTAvgMs)
+	result.TTFTMaxMs = clonePtr(input.TTFTMaxMs)
+	result.CPUUsagePercent = clonePtr(input.CPUUsagePercent)
+	result.MemoryUsedMB = clonePtr(input.MemoryUsedMB)
+	result.MemoryTotalMB = clonePtr(input.MemoryTotalMB)
+	result.MemoryUsagePercent = clonePtr(input.MemoryUsagePercent)
+	result.DBOK = clonePtr(input.DBOK)
+	result.RedisOK = clonePtr(input.RedisOK)
+	result.RedisConnTotal = clonePtr(input.RedisConnTotal)
+	result.RedisConnIdle = clonePtr(input.RedisConnIdle)
+	result.DBConnActive = clonePtr(input.DBConnActive)
+	result.DBConnIdle = clonePtr(input.DBConnIdle)
+	result.DBConnWaiting = clonePtr(input.DBConnWaiting)
+	result.GoroutineCount = clonePtr(input.GoroutineCount)
+	result.ConcurrencyQueueDepth = clonePtr(input.ConcurrencyQueueDepth)
+	return &result
+}
+
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func (c *OpsMetricsCollector) collectConcurrencyQueueDepth(parentCtx context.Context) *int {
@@ -862,33 +1001,28 @@ func (c *OpsMetricsCollector) dbPoolStats() (active int, idle int) {
 	return stats.InUse, stats.Idle
 }
 
-var opsMetricsCollectorReleaseScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
-`)
-
 func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(), bool) {
-	if c == nil || c.redisClient == nil {
+	if c == nil || c.leaderLock == nil {
 		return nil, true
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	ok, err := c.redisClient.SetNX(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID, opsMetricsCollectorLeaderLockTTL).Result()
+	ok, err := c.leaderLock.TryAcquire(ctx, c.instanceID, opsMetricsCollectorLeaderLockTTL)
 	if err != nil {
 		// Prefer fail-closed to avoid stampeding the database when Redis is flaky.
 		// Fallback to a DB advisory lock when Redis is present but unavailable.
 		release, ok := tryAcquireDBAdvisoryLock(ctx, c.db, opsMetricsCollectorAdvisoryLockID)
 		if !ok {
+			c.clearPublishedSnapshot()
 			c.maybeLogSkip()
 			return nil, false
 		}
 		return release, true
 	}
 	if !ok {
+		c.clearPublishedSnapshot()
 		c.maybeLogSkip()
 		return nil, false
 	}
@@ -896,9 +1030,31 @@ func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(),
 	release := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _ = opsMetricsCollectorReleaseScript.Run(ctx, c.redisClient, []string{opsMetricsCollectorLeaderLockKey}, c.instanceID).Result()
+		if err := c.leaderLock.Release(ctx, c.instanceID); err != nil {
+			c.leaderLockReleaseFailures.Add(1)
+		}
 	}
 	return release, true
+}
+
+// LeaderLockReleaseFailures exposes a non-sensitive count of exact Ops lock
+// release failures for health checks and tests. Owner tokens and backend error
+// strings are deliberately not retained.
+func (c *OpsMetricsCollector) LeaderLockReleaseFailures() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.leaderLockReleaseFailures.Load()
+}
+
+// Running reports whether the collector currently owns a run goroutine.
+func (c *OpsMetricsCollector) Running() bool {
+	if c == nil {
+		return false
+	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.running
 }
 
 func (c *OpsMetricsCollector) maybeLogSkip() {

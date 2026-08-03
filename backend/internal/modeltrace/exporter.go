@@ -76,6 +76,15 @@ type exportStatsSnapshot struct {
 	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout, FailedQueueFull, FailedOther uint64
 }
 
+// ExportStatus is the active model-tracing generation's existing export-health
+// snapshot. Values reset when the active generation changes.
+type ExportStatus struct {
+	Enabled                                                        bool
+	EndedSpans, AttemptedSpans, ExportedSpans, FailedSpans, Panics uint64
+	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout       uint64
+	FailedQueueFull, FailedOther                                   uint64
+}
+
 func (s *exportStats) snapshot() exportStatsSnapshot {
 	if s == nil {
 		return exportStatsSnapshot{}
@@ -663,6 +672,29 @@ func (m *Manager) Config() config.ModelTracingConfig {
 	snapshot := m.Acquire()
 	defer snapshot.Release()
 	return snapshot.Config()
+}
+
+// ExportStatus reads the counters already owned by the active immutable
+// generation; it does not install observers or duplicate exporter callbacks.
+func (m *Manager) ExportStatus() ExportStatus {
+	if m == nil {
+		return ExportStatus{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed || m.active == nil || !m.active.enabled() || m.active.stats == nil {
+		return ExportStatus{}
+	}
+	snapshot := m.active.stats.snapshot()
+	return ExportStatus{
+		Enabled:    true,
+		EndedSpans: snapshot.Ended, AttemptedSpans: snapshot.Attempted,
+		ExportedSpans: snapshot.Exported, FailedSpans: snapshot.Failed,
+		Panics:            snapshot.Panics,
+		FailedInvalidUTF8: snapshot.FailedInvalidUTF8, FailedCollectorRefused: snapshot.FailedCollectorRefused,
+		FailedTimeout: snapshot.FailedTimeout, FailedQueueFull: snapshot.FailedQueueFull,
+		FailedOther: snapshot.FailedOther,
+	}
 }
 
 func (m *Manager) Fingerprint() string {
