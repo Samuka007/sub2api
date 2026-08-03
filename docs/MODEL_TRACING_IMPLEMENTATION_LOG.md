@@ -198,3 +198,23 @@
 
 - `gofmt -l` 无输出；`go test ./internal/modeltrace/... ./internal/config -count=1` 退出 0。
 - `tests/security_test.go` 通过 `TestingMaxCaptureBytes` 常量自适应新上限，断言无需改动。
+
+## 2026-08-03 — 移除 maxCaptureBytes 硬顶，捕获上限改为纯可选配置
+
+### 背景
+
+- #89 把硬顶从 8 MiB 提升到 32 MiB，但硬顶本身是多余约束：`prompt/response/media_max_bytes` 本来就是可选配置（≤0 时回落默认值），代码再设一个不可配置的硬顶会静默钳制用户明确配置的值；32 MiB 这个数字没有理由替用户决定边界。
+
+### 行为变更
+
+- `backend/internal/modeltrace/exporter.go`：删除 `maxCaptureBytes` 常量与 `boundedSizes` 中的三处钳制；显式配置值原样生效、无上限；≤0 仍回落默认（16M/8M/16M）。
+- `backend/internal/modeltrace/testing_export.go`：移除 `TestingMaxCaptureBytes` 导出。
+- `backend/internal/modeltrace/tests/security_test.go`：`TestModelTraceLargePayloadMemoryBound` 重写为 `TestModelTraceCaptureLimitsHonorConfigWithoutHardCap`——显式值不被钳制（含 MaxInt）、缺省回落默认、截断标记行为不变。
+
+### 验证
+
+- `gofmt -l` 无输出；`go test ./internal/modeltrace/... ./internal/config -count=1` 退出 0。
+
+### 运行时注意
+
+- 上限不再有代码硬顶：面板/部署配置设多大就生效多大。内存与单批 OTLP 导出载荷随配置线性放大，超大请求的导出失败仍为 fail-open、不影响业务。

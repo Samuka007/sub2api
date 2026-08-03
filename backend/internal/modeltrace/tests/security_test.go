@@ -58,19 +58,38 @@ func TestModelTraceNoCredentialLeak(t *testing.T) {
 	require.NotContains(t, unstructured, "another-secret")
 }
 
-func TestModelTraceLargePayloadMemoryBound(t *testing.T) {
+func TestModelTraceCaptureLimitsHonorConfigWithoutHardCap(t *testing.T) {
+	// Explicitly configured limits pass through unclamped.
 	prompt, response, media := modeltrace.TestingBoundedSizes(config.ModelTracingConfig{
+		PromptMaxBytes:   5 << 20,
+		ResponseMaxBytes: 7 << 20,
+		MediaMaxBytes:    9 << 20,
+	})
+	require.Equal(t, 5<<20, prompt)
+	require.Equal(t, 7<<20, response)
+	require.Equal(t, 9<<20, media)
+
+	// Even extreme configured values are honored — there is no hard cap.
+	prompt, response, media = modeltrace.TestingBoundedSizes(config.ModelTracingConfig{
 		PromptMaxBytes:   int(^uint(0) >> 1),
 		ResponseMaxBytes: int(^uint(0) >> 1),
 		MediaMaxBytes:    int(^uint(0) >> 1),
 	})
-	require.Equal(t, modeltrace.TestingMaxCaptureBytes, prompt)
-	require.Equal(t, modeltrace.TestingMaxCaptureBytes, response)
-	require.Equal(t, modeltrace.TestingMaxCaptureBytes, media)
+	require.Equal(t, int(^uint(0)>>1), prompt)
+	require.Equal(t, int(^uint(0)>>1), response)
+	require.Equal(t, int(^uint(0)>>1), media)
 
-	raw := []byte(strings.Repeat("x", modeltrace.TestingMaxCaptureBytes+1024))
-	captured := modeltrace.TestingCaptureModelContent(raw, len(raw), prompt, modeltrace.TestingCapturePolicy{})
-	require.LessOrEqual(t, len(captured), modeltrace.TestingMaxCaptureBytes+128)
+	// Unset (<=0) values fall back to the documented defaults.
+	prompt, response, media = modeltrace.TestingBoundedSizes(config.ModelTracingConfig{})
+	require.Equal(t, modeltrace.TestingDefaultPromptBytes, prompt)
+	require.Equal(t, modeltrace.TestingDefaultResponseBytes, response)
+	require.Equal(t, modeltrace.TestingDefaultMediaBytes, media)
+
+	// Capture still truncates at the effective limit with the marker when the
+	// content exceeds it.
+	raw := []byte(strings.Repeat("x", 4096+1024))
+	captured := modeltrace.TestingCaptureModelContent(raw, len(raw), 4096, modeltrace.TestingCapturePolicy{})
+	require.LessOrEqual(t, len(captured), 4096+128)
 	require.Contains(t, captured[len(captured)-128:], "[truncated:original_bytes=")
 }
 

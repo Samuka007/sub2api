@@ -46,7 +46,6 @@ const (
 	defaultRetryInitial     = 5 * time.Second
 	defaultRetryMaxInterval = 30 * time.Second
 	defaultRetryMaxElapsed  = 55 * time.Second
-	maxCaptureBytes         = 32 << 20
 	defaultMaxQueueSize     = 256
 	defaultMaxExportBatch   = 16
 	defaultBatchTimeout     = 1000 * time.Millisecond
@@ -518,26 +517,20 @@ func generationFingerprint(cfg config.ModelTracingConfig, source string, version
 }
 
 func boundedSizes(cfg config.ModelTracingConfig) (int, int, int) {
+	// The per-field limits are plain optional configuration: an explicit
+	// value is honored as-is (no hard cap), and <=0 falls back to the
+	// documented defaults.
 	p := cfg.PromptMaxBytes
 	if p <= 0 {
 		p = defaultPromptBytes
-	}
-	if p > maxCaptureBytes {
-		p = maxCaptureBytes
 	}
 	r := cfg.ResponseMaxBytes
 	if r <= 0 {
 		r = defaultResponseBytes
 	}
-	if r > maxCaptureBytes {
-		r = maxCaptureBytes
-	}
 	m := cfg.MediaMaxBytes
 	if m <= 0 {
 		m = defaultMediaBytes
-	}
-	if m > maxCaptureBytes {
-		m = maxCaptureBytes
 	}
 	return p, r, m
 }

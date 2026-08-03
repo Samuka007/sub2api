@@ -24,7 +24,6 @@ const (
 	TestingRedactedValue                  = redactedValue
 	TestingDefaultMaxQueueSize            = defaultMaxQueueSize
 	TestingDefaultMaxExportBatch          = defaultMaxExportBatch
-	TestingMaxCaptureBytes                = maxCaptureBytes
 	TestingStreamStatusCompleted          = streamStatusCompleted
 	TestingStreamStatusCancelled          = streamStatusCancelled
 	TestingStreamStatusClientDisconnected = streamStatusClientDisconnected
