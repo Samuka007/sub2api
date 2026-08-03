@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -43,6 +44,14 @@ type opsSchedulableAccountLoadRepository interface {
 	ListSchedulableAccountLoads(ctx context.Context) ([]AccountWithConcurrency, error)
 }
 
+// OpsMetricsLeaderLock is the collector-specific cross-instance lock. The
+// interface intentionally does not expose an arbitrary key so its repository
+// implementation can preserve the exact legacy Redis key contract.
+type OpsMetricsLeaderLock interface {
+	TryAcquire(ctx context.Context, owner string, ttl time.Duration) (bool, error)
+	Release(ctx context.Context, owner string) error
+}
+
 type OpsMetricsCollector struct {
 	opsRepo     OpsRepository
 	settingRepo SettingRepository
@@ -53,15 +62,19 @@ type OpsMetricsCollector struct {
 
 	db          *sql.DB
 	redisClient *redis.Client
-	leaderLock  LeaderLockCache
+	leaderLock  OpsMetricsLeaderLock
 	instanceID  string
 
 	lastCgroupCPUUsageNanos uint64
 	lastCgroupCPUSampleAt   time.Time
 
-	stopCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
+	lifecycleMu     sync.Mutex
+	running         bool
+	runCancel       context.CancelFunc
+	runDone         chan struct{}
+	collectOnceHook func(context.Context)
+
+	leaderLockReleaseFailures atomic.Uint64
 
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
@@ -77,7 +90,7 @@ func NewOpsMetricsCollector(
 	concurrencyService *ConcurrencyService,
 	db *sql.DB,
 	redisClient *redis.Client,
-	leaderLock LeaderLockCache,
+	leaderLock OpsMetricsLeaderLock,
 	cfg *config.Config,
 ) *OpsMetricsCollector {
 	return &OpsMetricsCollector{
@@ -97,50 +110,75 @@ func (c *OpsMetricsCollector) Start() {
 	if c == nil {
 		return
 	}
-	c.startOnce.Do(func() {
-		if c.stopCh == nil {
-			c.stopCh = make(chan struct{})
-		}
-		go c.run()
-	})
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.running {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.running = true
+	c.runCancel = cancel
+	c.runDone = done
+	go c.run(ctx, done)
 }
 
 func (c *OpsMetricsCollector) Stop() {
 	if c == nil {
 		return
 	}
-	c.stopOnce.Do(func() {
-		if c.stopCh != nil {
-			close(c.stopCh)
-		}
-	})
+	c.lifecycleMu.Lock()
+	if !c.running {
+		c.lifecycleMu.Unlock()
+		return
+	}
+	cancel := c.runCancel
+	done := c.runDone
+	c.lifecycleMu.Unlock()
+
+	cancel()
+	<-done
 }
 
-func (c *OpsMetricsCollector) run() {
+func (c *OpsMetricsCollector) run(ctx context.Context, done chan struct{}) {
+	defer func() {
+		c.lifecycleMu.Lock()
+		if c.runDone == done {
+			c.running = false
+			c.runCancel = nil
+			c.runDone = nil
+		}
+		close(done)
+		c.lifecycleMu.Unlock()
+	}()
+
 	// First run immediately so the dashboard has data soon after startup.
-	c.collectOnce()
+	c.collectOnceWithParent(ctx)
 
 	for {
-		interval := c.getInterval()
+		if ctx.Err() != nil {
+			return
+		}
+		interval := c.getInterval(ctx)
 		timer := time.NewTimer(interval)
 		select {
 		case <-timer.C:
-			c.collectOnce()
-		case <-c.stopCh:
+			c.collectOnceWithParent(ctx)
+		case <-ctx.Done():
 			timer.Stop()
 			return
 		}
 	}
 }
 
-func (c *OpsMetricsCollector) getInterval() time.Duration {
+func (c *OpsMetricsCollector) getInterval(parent context.Context) time.Duration {
 	interval := opsMetricsCollectorMinInterval
 
 	if c.settingRepo == nil {
 		return interval
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	raw, err := c.settingRepo.GetValue(ctx, SettingKeyOpsMetricsIntervalSeconds)
@@ -166,7 +204,17 @@ func (c *OpsMetricsCollector) getInterval() time.Duration {
 }
 
 func (c *OpsMetricsCollector) collectOnce() {
+	c.collectOnceWithParent(context.Background())
+}
+
+func (c *OpsMetricsCollector) collectOnceWithParent(parent context.Context) {
 	if c == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, opsMetricsCollectorTimeout)
+	defer cancel()
+	if c.collectOnceHook != nil {
+		c.collectOnceHook(ctx)
 		return
 	}
 	if c.cfg != nil && !c.cfg.Ops.Enabled {
@@ -181,9 +229,6 @@ func (c *OpsMetricsCollector) collectOnce() {
 		c.clearPublishedSnapshot()
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), opsMetricsCollectorTimeout)
-	defer cancel()
 
 	if !c.isMonitoringEnabled(ctx) {
 		c.clearPublishedSnapshot()
@@ -964,7 +1009,7 @@ func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(),
 		ctx = context.Background()
 	}
 
-	ok, err := c.leaderLock.TryAcquireLeaderLock(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID, opsMetricsCollectorLeaderLockTTL)
+	ok, err := c.leaderLock.TryAcquire(ctx, c.instanceID, opsMetricsCollectorLeaderLockTTL)
 	if err != nil {
 		// Prefer fail-closed to avoid stampeding the database when Redis is flaky.
 		// Fallback to a DB advisory lock when Redis is present but unavailable.
@@ -985,9 +1030,31 @@ func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(),
 	release := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = c.leaderLock.ReleaseLeaderLock(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID)
+		if err := c.leaderLock.Release(ctx, c.instanceID); err != nil {
+			c.leaderLockReleaseFailures.Add(1)
+		}
 	}
 	return release, true
+}
+
+// LeaderLockReleaseFailures exposes a non-sensitive count of exact Ops lock
+// release failures for health checks and tests. Owner tokens and backend error
+// strings are deliberately not retained.
+func (c *OpsMetricsCollector) LeaderLockReleaseFailures() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.leaderLockReleaseFailures.Load()
+}
+
+// Running reports whether the collector currently owns a run goroutine.
+func (c *OpsMetricsCollector) Running() bool {
+	if c == nil {
+		return false
+	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.running
 }
 
 func (c *OpsMetricsCollector) maybeLogSkip() {

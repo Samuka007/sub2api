@@ -322,7 +322,8 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 	engine := server.ProvideRouter(configConfig, handlers, modelTrace, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
 	modeltraceConfigManager := provideModelTraceConfigManager(configConfig, settingRepository, secretEncryptor, modelTrace)
-	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, leaderLockCache, configConfig)
+	opsMetricsLeaderLock := repository.NewOpsMetricsLeaderLock(redisClient)
+	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, opsMetricsLeaderLock, configConfig)
 	metrics, err := provideAppMetrics(configConfig, opsMetricsCollector, modelTrace)
 	if err != nil {
 		return nil, err

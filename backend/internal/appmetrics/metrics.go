@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -28,9 +29,12 @@ type Metrics struct {
 	cfg     config.MetricsConfig
 	handler http.Handler
 
-	mu       sync.Mutex
-	listener net.Listener
-	server   *http.Server
+	mu         sync.Mutex
+	listener   net.Listener
+	server     *http.Server
+	generation uint64
+	lastError  error
+	serve      func(*http.Server, net.Listener) error
 }
 
 func New(cfg config.MetricsConfig, ops OpsSnapshotSource, exports ExportStatusSource) (*Metrics, error) {
@@ -49,7 +53,9 @@ func New(cfg config.MetricsConfig, ops OpsSnapshotSource, exports ExportStatusSo
 		}
 		promHandler.ServeHTTP(w, r)
 	})
-	return &Metrics{cfg: cfg, handler: exactHandler}, nil
+	return &Metrics{cfg: cfg, handler: exactHandler, serve: func(server *http.Server, listener net.Listener) error {
+		return server.Serve(listener)
+	}}, nil
 }
 
 func (m *Metrics) Handler() http.Handler {
@@ -81,14 +87,26 @@ func (m *Metrics) Start() error {
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
+	m.generation++
+	generation := m.generation
 	m.listener = listener
 	m.server = server
+	m.lastError = nil
+	serve := m.serve
 	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// The main lifecycle observes bind failures synchronously. Runtime Serve
-			// failures close this private endpoint without affecting the public API.
+		err := serve(server, listener)
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return
+		}
+		log.Printf("Metrics listener Serve failed: %v", err)
+		m.mu.Lock()
+		if m.generation == generation && m.listener == listener && m.server == server {
+			m.listener = nil
+			m.server = nil
+			m.lastError = err
 			_ = listener.Close()
 		}
+		m.mu.Unlock()
 	}()
 	return nil
 }
@@ -103,6 +121,17 @@ func (m *Metrics) Addr() net.Addr {
 		return nil
 	}
 	return m.listener.Addr()
+}
+
+// LastError reports the current generation's unexpected Serve failure. A
+// successful restart clears it; public application APIs remain unaffected.
+func (m *Metrics) LastError() error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastError
 }
 
 func (m *Metrics) Shutdown(ctx context.Context) error {

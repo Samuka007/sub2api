@@ -2,9 +2,12 @@ package appmetrics
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +26,62 @@ func (f fakeOpsSource) LatestSnapshot() *service.OpsInsertSystemMetricsInput { r
 type fakeExportSource struct{ status modeltrace.ExportStatus }
 
 func (f fakeExportSource) ExportStatus() modeltrace.ExportStatus { return f.status }
+
+func TestServeFailureClearsStateIsObservableAndAllowsRestart(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true, Host: "127.0.0.1", Port: 0}, fakeOpsSource{}, fakeExportSource{})
+	require.NoError(t, err)
+	serveResults := make(chan error, 2)
+	metrics.serve = func(_ *http.Server, _ net.Listener) error { return <-serveResults }
+
+	require.NoError(t, metrics.Start())
+	require.NotNil(t, metrics.Addr())
+	serveFailure := errors.New("accept failed")
+	serveResults <- serveFailure
+	require.Eventually(t, func() bool { return metrics.Addr() == nil }, time.Second, time.Millisecond)
+	require.ErrorIs(t, metrics.LastError(), serveFailure)
+
+	require.NoError(t, metrics.Start())
+	require.NotNil(t, metrics.Addr())
+	require.NoError(t, metrics.Shutdown(context.Background()))
+	serveResults <- http.ErrServerClosed
+}
+
+func TestOldServeFailureCannotClearRestartedServerState(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true, Host: "127.0.0.1", Port: 0}, fakeOpsSource{}, fakeExportSource{})
+	require.NoError(t, err)
+	firstResult := make(chan error, 1)
+	secondResult := make(chan error, 1)
+	serveStarted := make(chan int, 2)
+	var serveCalls int
+	var serveMu sync.Mutex
+	metrics.serve = func(_ *http.Server, _ net.Listener) error {
+		serveMu.Lock()
+		serveCalls++
+		call := serveCalls
+		serveMu.Unlock()
+		serveStarted <- call
+		if call == 1 {
+			return <-firstResult
+		}
+		return <-secondResult
+	}
+
+	require.NoError(t, metrics.Start())
+	require.Equal(t, 1, <-serveStarted)
+	require.NoError(t, metrics.Shutdown(context.Background()))
+	require.NoError(t, metrics.Start())
+	require.Equal(t, 2, <-serveStarted)
+	restartedAddr := metrics.Addr()
+	require.NotNil(t, restartedAddr)
+
+	firstResult <- errors.New("late old serve failure")
+	time.Sleep(20 * time.Millisecond)
+	require.Equal(t, restartedAddr.String(), metrics.Addr().String())
+	require.NoError(t, metrics.LastError())
+
+	require.NoError(t, metrics.Shutdown(context.Background()))
+	secondResult <- http.ErrServerClosed
+}
 
 func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 	qps, tps := 2.5, 90.0
