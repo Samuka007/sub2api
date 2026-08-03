@@ -81,6 +81,7 @@ Issue 关联、assignee、分支命名和 PR 标题属于协作建议，不进�
 ## 8. 项目专项规则
 
 - 模型请求追踪实现位于 `backend/internal/modeltrace/`，行为映射位于 `.agent/skills/sub2api-model-trace-e2e/references/otel-spec-mapping.md`。
+- 禁止直接连接或查询 `langfuse-clickhouse-1`；所有 Langfuse ClickHouse 查询必须通过 `langfuse-clickhouse-read-proxy-1` 执行。
 - 修改 Ent Schema 后运行 `go generate ./ent`；修改 Wire Provider 后运行 `go generate ./cmd/server`，并提交对应生成文件。
 - 修改 `frontend/package.json` 时同步更新 `frontend/pnpm-lock.yaml`。
 - 禁止在生产路径硬编码本地 endpoint；禁止在日志、文档、Issue 或 PR 中记录任何真实或本地测试凭据。
