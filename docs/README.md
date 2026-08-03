@@ -13,6 +13,11 @@
 | 法律 | `docs/legal/` | 已批准的法律与合规文本 | 审批后 |
 | 可执行 Agent 流程 | `.agent/skills/<name>/` | `SKILL.md`、脚本、reference、测试 prompt；`.claude/skills`、`.codex/skills` 仅为自动发现软链接 | Skill 行为或发现入口变化时 |
 
+稳定功能文档：
+
+- [`LANGFUSE_SESSION_GRAPH.md`](LANGFUSE_SESSION_GRAPH.md)：热存储侧 trace 解析、
+  history 去重与 session 图输出契约。
+
 任何新长期文档都必须有明确读者、权威来源、更新触发条件和可验证事实。能更新现有权威文档时，不创建第二份同义说明。
 
 ## 禁止提交的工作材料
