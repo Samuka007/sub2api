@@ -3808,9 +3808,9 @@ func setModelTracingDefaults() {
 	viper.SetDefault("model_tracing.endpoint", "")
 	viper.SetDefault("model_tracing.public_key", "")
 	viper.SetDefault("model_tracing.secret_key", "")
-	viper.SetDefault("model_tracing.prompt_max_bytes", 1<<20)
-	viper.SetDefault("model_tracing.response_max_bytes", 1<<20)
-	viper.SetDefault("model_tracing.media_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.prompt_max_bytes", 16<<20)
+	viper.SetDefault("model_tracing.response_max_bytes", 8<<20)
+	viper.SetDefault("model_tracing.media_max_bytes", 16<<20)
 	viper.SetDefault("model_tracing.capture_media_content", false)
 	viper.SetDefault("model_tracing.export_timeout_seconds", 60)
 	viper.SetDefault("model_tracing.export_retry.enabled", true)
@@ -3833,13 +3833,13 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	value.PublicKey = strings.TrimSpace(value.PublicKey)
 	value.SecretKey = strings.TrimSpace(value.SecretKey)
 	if value.PromptMaxBytes <= 0 {
-		value.PromptMaxBytes = 1 << 20
+		value.PromptMaxBytes = 16 << 20
 	}
 	if value.ResponseMaxBytes <= 0 {
-		value.ResponseMaxBytes = 1 << 20
+		value.ResponseMaxBytes = 8 << 20
 	}
 	if value.MediaMaxBytes <= 0 {
-		value.MediaMaxBytes = 1 << 20
+		value.MediaMaxBytes = 16 << 20
 	}
 	if value.ExportTimeoutSeconds <= 0 {
 		value.ExportTimeoutSeconds = 60

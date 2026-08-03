@@ -120,7 +120,7 @@ func InputLimit(ctx context.Context) (limit int, ok bool) {
 	if limited, ok := recorder.(inputLimitReporter); ok {
 		return limited.TraceInputLimit(), true
 	}
-	return 1 << 20, true
+	return 16 << 20, true
 }
 
 // AttemptSource carries protocol-aware metadata to the actual RoundTrip
