@@ -218,3 +218,23 @@
 ### 运行时注意
 
 - 上限不再有代码硬顶：面板/部署配置设多大就生效多大。内存与单批 OTLP 导出载荷随配置线性放大，超大请求的导出失败仍为 fail-open、不影响业务。
+
+## 2026-08-03 — 移除前端 model-tracing 面板的 8M 捕获上限钳制
+
+### 背景
+
+- 后端 #89/#90 已移除 `maxCaptureBytes` 硬顶并提升默认值（prompt 16M / response 8M / media 16M），但前端面板 `frontend/src/features/model-tracing/ModelTracingSettings.vue` 仍硬编码 `MAX_CAPTURE_BYTES = 8 * 1024 * 1024`：输入框 `:max` 限制 + 提交时 `positiveInteger` 用 `Math.min(MAX_CAPTURE_BYTES, …)` 钳制。
+- 现象：面板把 prompt 改为 16M 保存后回弹为 8M——前端提交前把值钳到 8M，后端如实存储并回显，非后端/存储问题。
+
+### 行为变更
+
+- 删除 `MAX_CAPTURE_BYTES` 常量与输入框 `:max` 属性；
+- `positiveInteger` 不再做上限钳制，正值原样提交（`Math.floor`），与后端"显式配置无硬顶"契约一致。
+
+### 验证
+
+- `pnpm test:run src/features/model-tracing` 通过（vitest）。
+
+### 部署注意
+
+- 面板 UI 随前端构建发布（新 release）；生效后管理员可在面板保存 >8M 的捕获上限。
