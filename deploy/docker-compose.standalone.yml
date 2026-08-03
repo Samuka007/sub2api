@@ -41,6 +41,12 @@ services:
       - SERVER_MODE=${SERVER_MODE:-release}
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}
+      # Optional private listener for Alloy on the Compose network. Port 9091 is
+      # deliberately not published to the host.
+      - METRICS_ENABLED=${METRICS_ENABLED:-false}
+      - METRICS_HOST=${METRICS_HOST:-0.0.0.0}
+      - METRICS_PORT=${METRICS_PORT:-9091}
+      - METRICS_PATH=${METRICS_PATH:-/metrics}
       - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
 
       # =======================================================================

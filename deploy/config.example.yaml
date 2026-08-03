@@ -73,6 +73,19 @@ server:
     max_upload_buffer_per_stream: 524288
 
 # =============================================================================
+# Private Prometheus Metrics Listener (Optional)
+# Prometheus 私有指标监听器（可选）
+# =============================================================================
+# Keep this listener on loopback or an internal container network. Alloy should
+# scrape this exact path; it is intentionally separate from the public API.
+# 保持监听在回环地址或容器内部网络；由 Alloy 抓取精确路径，不接入公网 API。
+metrics:
+  enabled: false
+  host: "127.0.0.1"
+  port: 9091
+  path: "/metrics"
+
+# =============================================================================
 # WebAuthn / Passkey Configuration
 # WebAuthn / Passkey 配置
 # =============================================================================

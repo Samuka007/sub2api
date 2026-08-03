@@ -53,6 +53,7 @@ type OpsMetricsCollector struct {
 
 	db          *sql.DB
 	redisClient *redis.Client
+	leaderLock  LeaderLockCache
 	instanceID  string
 
 	lastCgroupCPUUsageNanos uint64
@@ -64,6 +65,9 @@ type OpsMetricsCollector struct {
 
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
+
+	snapshotMu sync.RWMutex
+	snapshot   *OpsInsertSystemMetricsInput
 }
 
 func NewOpsMetricsCollector(
@@ -73,6 +77,7 @@ func NewOpsMetricsCollector(
 	concurrencyService *ConcurrencyService,
 	db *sql.DB,
 	redisClient *redis.Client,
+	leaderLock LeaderLockCache,
 	cfg *config.Config,
 ) *OpsMetricsCollector {
 	return &OpsMetricsCollector{
@@ -83,6 +88,7 @@ func NewOpsMetricsCollector(
 		concurrencyService: concurrencyService,
 		db:                 db,
 		redisClient:        redisClient,
+		leaderLock:         leaderLock,
 		instanceID:         uuid.NewString(),
 	}
 }
@@ -164,12 +170,15 @@ func (c *OpsMetricsCollector) collectOnce() {
 		return
 	}
 	if c.cfg != nil && !c.cfg.Ops.Enabled {
+		c.clearPublishedSnapshot()
 		return
 	}
 	if c.opsRepo == nil {
+		c.clearPublishedSnapshot()
 		return
 	}
 	if c.db == nil {
+		c.clearPublishedSnapshot()
 		return
 	}
 
@@ -177,6 +186,7 @@ func (c *OpsMetricsCollector) collectOnce() {
 	defer cancel()
 
 	if !c.isMonitoringEnabled(ctx) {
+		c.clearPublishedSnapshot()
 		return
 	}
 
@@ -364,7 +374,91 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 		ConcurrencyQueueDepth: concurrencyQueueDepth,
 	}
 
-	return c.opsRepo.InsertSystemMetrics(ctx, input)
+	return c.persistAndPublish(ctx, input)
+}
+
+func (c *OpsMetricsCollector) persistAndPublish(ctx context.Context, input *OpsInsertSystemMetricsInput) error {
+	if err := c.opsRepo.InsertSystemMetrics(ctx, input); err != nil {
+		return err
+	}
+	c.publishPersistedSnapshot(input)
+	return nil
+}
+
+func (c *OpsMetricsCollector) publishPersistedSnapshot(input *OpsInsertSystemMetricsInput) {
+	if c == nil || input == nil {
+		return
+	}
+	snapshot := cloneOpsSystemMetricsInput(input)
+	c.snapshotMu.Lock()
+	c.snapshot = snapshot
+	c.snapshotMu.Unlock()
+}
+
+func (c *OpsMetricsCollector) clearPublishedSnapshot() {
+	if c == nil {
+		return
+	}
+	c.snapshotMu.Lock()
+	c.snapshot = nil
+	c.snapshotMu.Unlock()
+}
+
+// LatestSnapshot returns an isolated copy of the latest exact Ops one-minute
+// snapshot whose InsertSystemMetrics call succeeded. It never queries storage.
+func (c *OpsMetricsCollector) LatestSnapshot() *OpsInsertSystemMetricsInput {
+	if c == nil {
+		return nil
+	}
+	c.snapshotMu.RLock()
+	snapshot := cloneOpsSystemMetricsInput(c.snapshot)
+	c.snapshotMu.RUnlock()
+	return snapshot
+}
+
+func cloneOpsSystemMetricsInput(input *OpsInsertSystemMetricsInput) *OpsInsertSystemMetricsInput {
+	if input == nil {
+		return nil
+	}
+	result := *input
+	result.Platform = clonePtr(input.Platform)
+	result.GroupID = clonePtr(input.GroupID)
+	result.QPS = clonePtr(input.QPS)
+	result.TPS = clonePtr(input.TPS)
+	result.DurationP50Ms = clonePtr(input.DurationP50Ms)
+	result.DurationP90Ms = clonePtr(input.DurationP90Ms)
+	result.DurationP95Ms = clonePtr(input.DurationP95Ms)
+	result.DurationP99Ms = clonePtr(input.DurationP99Ms)
+	result.DurationAvgMs = clonePtr(input.DurationAvgMs)
+	result.DurationMaxMs = clonePtr(input.DurationMaxMs)
+	result.TTFTP50Ms = clonePtr(input.TTFTP50Ms)
+	result.TTFTP90Ms = clonePtr(input.TTFTP90Ms)
+	result.TTFTP95Ms = clonePtr(input.TTFTP95Ms)
+	result.TTFTP99Ms = clonePtr(input.TTFTP99Ms)
+	result.TTFTAvgMs = clonePtr(input.TTFTAvgMs)
+	result.TTFTMaxMs = clonePtr(input.TTFTMaxMs)
+	result.CPUUsagePercent = clonePtr(input.CPUUsagePercent)
+	result.MemoryUsedMB = clonePtr(input.MemoryUsedMB)
+	result.MemoryTotalMB = clonePtr(input.MemoryTotalMB)
+	result.MemoryUsagePercent = clonePtr(input.MemoryUsagePercent)
+	result.DBOK = clonePtr(input.DBOK)
+	result.RedisOK = clonePtr(input.RedisOK)
+	result.RedisConnTotal = clonePtr(input.RedisConnTotal)
+	result.RedisConnIdle = clonePtr(input.RedisConnIdle)
+	result.DBConnActive = clonePtr(input.DBConnActive)
+	result.DBConnIdle = clonePtr(input.DBConnIdle)
+	result.DBConnWaiting = clonePtr(input.DBConnWaiting)
+	result.GoroutineCount = clonePtr(input.GoroutineCount)
+	result.ConcurrencyQueueDepth = clonePtr(input.ConcurrencyQueueDepth)
+	return &result
+}
+
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func (c *OpsMetricsCollector) collectConcurrencyQueueDepth(parentCtx context.Context) *int {
@@ -862,33 +956,28 @@ func (c *OpsMetricsCollector) dbPoolStats() (active int, idle int) {
 	return stats.InUse, stats.Idle
 }
 
-var opsMetricsCollectorReleaseScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
-`)
-
 func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(), bool) {
-	if c == nil || c.redisClient == nil {
+	if c == nil || c.leaderLock == nil {
 		return nil, true
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	ok, err := c.redisClient.SetNX(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID, opsMetricsCollectorLeaderLockTTL).Result()
+	ok, err := c.leaderLock.TryAcquireLeaderLock(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID, opsMetricsCollectorLeaderLockTTL)
 	if err != nil {
 		// Prefer fail-closed to avoid stampeding the database when Redis is flaky.
 		// Fallback to a DB advisory lock when Redis is present but unavailable.
 		release, ok := tryAcquireDBAdvisoryLock(ctx, c.db, opsMetricsCollectorAdvisoryLockID)
 		if !ok {
+			c.clearPublishedSnapshot()
 			c.maybeLogSkip()
 			return nil, false
 		}
 		return release, true
 	}
 	if !ok {
+		c.clearPublishedSnapshot()
 		c.maybeLogSkip()
 		return nil, false
 	}
@@ -896,7 +985,7 @@ func (c *OpsMetricsCollector) tryAcquireLeaderLock(ctx context.Context) (func(),
 	release := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _ = opsMetricsCollectorReleaseScript.Run(ctx, c.redisClient, []string{opsMetricsCollectorLeaderLockKey}, c.instanceID).Result()
+		_ = c.leaderLock.ReleaseLeaderLock(ctx, opsMetricsCollectorLeaderLockKey, c.instanceID)
 	}
 	return release, true
 }

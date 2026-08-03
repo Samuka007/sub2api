@@ -379,7 +379,8 @@ func ProvideRateLimitService(
 	return svc
 }
 
-// ProvideOpsMetricsCollector creates and starts OpsMetricsCollector.
+// ProvideOpsMetricsCollector creates OpsMetricsCollector. Application startup
+// starts it only after the private metrics listener has bound successfully.
 func ProvideOpsMetricsCollector(
 	opsRepo OpsRepository,
 	settingRepo SettingRepository,
@@ -387,10 +388,10 @@ func ProvideOpsMetricsCollector(
 	concurrencyService *ConcurrencyService,
 	db *sql.DB,
 	redisClient *redis.Client,
+	leaderLock LeaderLockCache,
 	cfg *config.Config,
 ) *OpsMetricsCollector {
-	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, cfg)
-	collector.Start()
+	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, leaderLock, cfg)
 	return collector
 }
 

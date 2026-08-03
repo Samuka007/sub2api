@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/appmetrics"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
@@ -321,7 +322,11 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 	engine := server.ProvideRouter(configConfig, handlers, modelTrace, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
 	modeltraceConfigManager := provideModelTraceConfigManager(configConfig, settingRepository, secretEncryptor, modelTrace)
-	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
+	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, leaderLockCache, configConfig)
+	metrics, err := provideAppMetrics(configConfig, opsMetricsCollector, modelTrace)
+	if err != nil {
+		return nil, err
+	}
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
 	opsCleanupService := service.ProvideOpsCleanupService(opsRepository, db, redisClient, configConfig, channelMonitorService, settingRepository, opsService)
@@ -346,6 +351,9 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 		Server:           httpServer,
 		PromptAudit:      promptService,
 		ModelTraceConfig: modeltraceConfigManager,
+		ModelTrace:       modelTrace,
+		Metrics:          metrics,
+		OpsMetrics:       opsMetricsCollector,
 		Cleanup:          v,
 	}
 	return application, nil
@@ -357,7 +365,11 @@ type Application struct {
 	Server           *http.Server
 	PromptAudit      *securityaudit.PromptService
 	ModelTraceConfig *modeltrace.ConfigManager
+	ModelTrace       *modeltrace.Manager
+	Metrics          *appmetrics.Metrics
+	OpsMetrics       *service.OpsMetricsCollector
 	Cleanup          func()
+	cleanupOnce      sync.Once
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
@@ -369,6 +381,14 @@ func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideAppMetrics(
+	cfg *config.Config,
+	opsMetrics *service.OpsMetricsCollector,
+	modelTrace *modeltrace.Manager,
+) (*appmetrics.Metrics, error) {
+	return appmetrics.New(cfg.Metrics, opsMetrics, modelTrace)
 }
 
 func provideModelTraceConfigManager(
