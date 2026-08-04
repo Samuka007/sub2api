@@ -25,6 +25,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read
 
 concurrency:
   group: release-publish
@@ -149,13 +150,26 @@ jobs:
 
   quality-gate:
     needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
+      actions: read
       contents: read
-      issues: read
-      pull-requests: read
-    uses: ./.github/workflows/code-quality.yml
-    with:
-      ref: ${{ needs.resolve-release.outputs.tag_sha }}
+    outputs:
+      run_id: ${{ steps.quality.outputs.run_id }}
+      run_url: ${{ steps.quality.outputs.run_url }}
+      artifact_name: ${{ steps.quality.outputs.artifact_name }}
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
+      - name: Wait for existing Code Quality run
+        id: quality
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
+        run: python3 tools/wait_for_code_quality.py --commit "$TAG_SHA"
 
   update-version:
     needs: [resolve-release, quality-gate]
@@ -183,46 +197,9 @@ jobs:
           path: backend/cmd/server/VERSION
           retention-days: 1
 
-  build-frontend:
-    needs: [resolve-release, quality-gate]
-    runs-on: [self-hosted, Linux, X64, sub2api-pve]
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve-release.outputs.tag_name }}
-
-      - name: Verify immutable release commit
-        env:
-          TAG_SHA: ${{ needs.resolve-release.outputs.tag_sha }}
-        run: test "$(git rev-parse HEAD)" = "$TAG_SHA"
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 9.15.9
-          dest: ${{ runner.temp }}/setup-pnpm
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Install frontend dependencies
-        run: pnpm --dir frontend install --frozen-lockfile
-
-      - name: Build frontend
-        run: make build-frontend
-
-      - name: Upload frontend artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: frontend-dist
-          path: backend/internal/web/dist/
-          retention-days: 1
 
   release:
-    needs: [resolve-release, quality-gate, update-version, build-frontend]
+    needs: [resolve-release, quality-gate, update-version]
     runs-on: ${{ needs.resolve-release.outputs.release_runner }}
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -268,11 +245,13 @@ jobs:
           name: version-file
           path: backend/cmd/server/
 
-      - name: Download frontend artifact
+      - name: Download verified frontend artifact
         uses: actions/download-artifact@v8
         with:
-          name: frontend-dist
+          name: ${{ needs.quality-gate.outputs.artifact_name }}
           path: backend/internal/web/dist/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.quality-gate.outputs.run_id }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
