@@ -9,6 +9,41 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
+func TestCanonicalGenerationConfigUsesEffectiveDefaultsAndNormalization(t *testing.T) {
+	defaults := canonicalGenerationConfig(config.ModelTracingConfig{
+		Enabled:   true,
+		Endpoint:  " https://langfuse.example.test ",
+		PublicKey: "public",
+		SecretKey: "secret",
+	})
+	explicit := config.ModelTracingConfig{
+		Enabled:              true,
+		Destination:          config.ModelTracingDestinationLangfuse,
+		Endpoint:             "https://langfuse.example.test/api/public/otel/v1/traces",
+		PublicKey:            "public",
+		SecretKey:            "secret",
+		PromptMaxBytes:       defaultPromptBytes,
+		ResponseMaxBytes:     defaultResponseBytes,
+		MediaMaxBytes:        defaultMediaBytes,
+		ExportTimeoutSeconds: int(defaultExportTimeout.Seconds()),
+		ExportRetry: config.ModelTracingExportRetryConfig{
+			Enabled:                true,
+			InitialIntervalSeconds: int(defaultRetryInitial.Seconds()),
+			MaxIntervalSeconds:     int(defaultRetryMaxInterval.Seconds()),
+			MaxElapsedTimeSeconds:  int(defaultRetryMaxElapsed.Seconds()),
+		},
+		ExportQueueSize:      defaultMaxQueueSize,
+		ExportBatchSize:      defaultMaxExportBatch,
+		ExportBatchTimeoutMs: int(defaultBatchTimeout.Milliseconds()),
+	}
+
+	require.Equal(t, explicit, defaults)
+	require.Equal(t,
+		generationFingerprint(explicit, ConfigSourceRuntime, 7),
+		generationFingerprint(defaults, ConfigSourceRuntime, 7),
+	)
+}
+
 func TestManagerExportStatusReadsOnlyActiveGeneration(t *testing.T) {
 	oldStats := &exportStats{}
 	oldStats.endedSpans.Add(9)

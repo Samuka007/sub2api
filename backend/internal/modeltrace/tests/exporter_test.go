@@ -1,8 +1,10 @@
 package modeltrace_test
 
 import (
+	"bytes"
 	"context"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -15,6 +17,124 @@ import (
 
 	"go.opentelemetry.io/otel"
 )
+
+func TestManagerIdenticalSnapshotIsNoOpBeforeExporterBuild(t *testing.T) {
+	// slog.SetDefault is process-global, so this test must not run in parallel.
+	cfg := config.ModelTracingConfig{
+		Enabled:   true,
+		Endpoint:  "https://langfuse.example.test",
+		PublicKey: "public",
+		SecretKey: "secret",
+	}
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	managerClosed := false
+	defer func() {
+		if managerClosed {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown manager: %v", err)
+		}
+	}()
+	if err := manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: cfg, Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
+	}); err != nil {
+		t.Fatalf("apply initial runtime snapshot: %v", err)
+	}
+
+	previousLogger := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	loggerRestored := false
+	defer func() {
+		if !loggerRestored {
+			slog.SetDefault(previousLogger)
+		}
+	}()
+
+	if err := manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: cfg, Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
+	}); err != nil {
+		t.Fatalf("reapply identical runtime snapshot: %v", err)
+	}
+	if strings.Contains(logs.String(), "result=shutdown") {
+		t.Fatalf("identical snapshot built and closed an unpublished exporter generation:\n%s", logs.String())
+	}
+
+	slog.SetDefault(previousLogger)
+	loggerRestored = true
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown manager: %v", err)
+	}
+	managerClosed = true
+}
+
+func TestManagerFailedSnapshotBuildKeepsActiveGeneration(t *testing.T) {
+	cfg := config.ModelTracingConfig{
+		Enabled:   true,
+		Endpoint:  "https://langfuse.example.test",
+		PublicKey: "public",
+		SecretKey: "secret",
+	}
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	managerClosed := false
+	defer func() {
+		if managerClosed {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown manager: %v", err)
+		}
+	}()
+	if err := manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: cfg, Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
+	}); err != nil {
+		t.Fatalf("apply initial runtime snapshot: %v", err)
+	}
+
+	before := manager.Acquire()
+	beforeFingerprint := before.Fingerprint()
+	beforeConfig := before.Config()
+	before.Release()
+
+	err = manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: config.ModelTracingConfig{
+			Enabled: true, Destination: "unsupported", Endpoint: "https://collector.example.test",
+		},
+		Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 2,
+	})
+	if err == nil {
+		t.Fatal("apply invalid runtime snapshot succeeded")
+	}
+
+	after := manager.Acquire()
+	if after.Fingerprint() != beforeFingerprint || after.Source() != modeltrace.ConfigSourceRuntime || after.Version() != 1 {
+		t.Fatalf("failed build changed active generation: fingerprint=%q source=%q version=%d", after.Fingerprint(), after.Source(), after.Version())
+	}
+	if !reflect.DeepEqual(after.Config(), beforeConfig) {
+		t.Fatalf("failed build changed active config:\n got: %#v\nwant: %#v", after.Config(), beforeConfig)
+	}
+	after.Release()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown manager: %v", err)
+	}
+	managerClosed = true
+}
 
 func TestModelTraceEndpointTransport(t *testing.T) {
 	t.Run("accepts complete HTTP or HTTPS endpoints", func(t *testing.T) {

@@ -428,18 +428,12 @@ func NewManager(ctx context.Context, cfg config.ModelTracingConfig) (*Manager, e
 }
 
 func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source string, version int64) (*generation, error) {
-	prompt, response, media := boundedSizes(cfg)
-	cfg.PromptMaxBytes = prompt
-	cfg.ResponseMaxBytes = response
-	cfg.MediaMaxBytes = media
-	exportTimeout, retry, queueSize, batchSize, batchTimeout := resolveExportSettings(cfg)
-	cfg.ExportTimeoutSeconds = int(exportTimeout.Seconds())
-	cfg.ExportRetry = retry
-	cfg.ExportQueueSize = queueSize
-	cfg.ExportBatchSize = batchSize
-	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
-	cfg.Destination = config.NormalizeModelTracingDestination(cfg.Destination)
-	cfg.Endpoint = config.NormalizeModelTracingEndpoint(cfg.Destination, cfg.Endpoint)
+	cfg = canonicalGenerationConfig(cfg)
+	exportTimeout := time.Duration(cfg.ExportTimeoutSeconds) * time.Second
+	retry := cfg.ExportRetry
+	queueSize := cfg.ExportQueueSize
+	batchSize := cfg.ExportBatchSize
+	batchTimeout := time.Duration(cfg.ExportBatchTimeoutMs) * time.Millisecond
 	g := &generation{cfg: cfg, source: source, version: version}
 	g.fingerprint = generationFingerprint(cfg, source, version)
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
@@ -513,6 +507,22 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	g.tracer = provider.Tracer(tracerName)
 	g.shutdown = provider.Shutdown
 	return g, nil
+}
+
+func canonicalGenerationConfig(cfg config.ModelTracingConfig) config.ModelTracingConfig {
+	prompt, response, media := boundedSizes(cfg)
+	cfg.PromptMaxBytes = prompt
+	cfg.ResponseMaxBytes = response
+	cfg.MediaMaxBytes = media
+	exportTimeout, retry, queueSize, batchSize, batchTimeout := resolveExportSettings(cfg)
+	cfg.ExportTimeoutSeconds = int(exportTimeout.Seconds())
+	cfg.ExportRetry = retry
+	cfg.ExportQueueSize = queueSize
+	cfg.ExportBatchSize = batchSize
+	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
+	cfg.Destination = config.NormalizeModelTracingDestination(cfg.Destination)
+	cfg.Endpoint = config.NormalizeModelTracingEndpoint(cfg.Destination, cfg.Endpoint)
+	return cfg
 }
 
 func generationFingerprint(cfg config.ModelTracingConfig, source string, version int64) string {
@@ -709,8 +719,7 @@ func (m *Manager) ApplySnapshot(ctx context.Context, snapshot ConfigSnapshot) er
 	if m == nil {
 		return errors.New("modeltrace: manager is nil")
 	}
-	cfg := snapshot.Config
-	cfg.PromptMaxBytes, cfg.ResponseMaxBytes, cfg.MediaMaxBytes = boundedSizes(cfg)
+	cfg := canonicalGenerationConfig(snapshot.Config)
 	if m.Fingerprint() == generationFingerprint(cfg, snapshot.Source, snapshot.ConfigVersion) {
 		return nil
 	}
