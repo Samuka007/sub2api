@@ -23,6 +23,7 @@ type OpsSnapshotSource interface {
 
 type ExportStatusSource interface {
 	ExportStatus() modeltrace.ExportStatus
+	ExportTotals() modeltrace.ExportTotals
 }
 
 type Metrics struct {
@@ -150,10 +151,12 @@ func (m *Metrics) Shutdown(ctx context.Context) error {
 }
 
 type snapshotCollector struct {
-	ops     OpsSnapshotSource
-	exports ExportStatusSource
-	desc    map[string]*prometheus.Desc
-	reason  *prometheus.Desc
+	ops           OpsSnapshotSource
+	exports       ExportStatusSource
+	desc          map[string]*prometheus.Desc
+	reason        *prometheus.Desc
+	terminalTotal *prometheus.Desc
+	failureTotal  *prometheus.Desc
 }
 
 func newSnapshotCollector(ops OpsSnapshotSource, exports ExportStatusSource) *snapshotCollector {
@@ -162,6 +165,9 @@ func newSnapshotCollector(ops OpsSnapshotSource, exports ExportStatusSource) *sn
 	}
 	modeltraceHelp := func(description string) string {
 		return "Active modeltrace generation gauge; value resets when the active generation changes: " + description
+	}
+	processModeltraceHelp := func(description string) string {
+		return "Current Sub2API process counter; survives active modeltrace generation changes and resets on process restart: " + description
 	}
 	help := map[string]string{
 		"ops_snapshot_timestamp_seconds":               opsHelp("snapshot timestamp in Unix seconds."),
@@ -202,6 +208,9 @@ func newSnapshotCollector(ops OpsSnapshotSource, exports ExportStatusSource) *sn
 		"modeltrace_exported_spans":                    modeltraceHelp("exported spans."),
 		"modeltrace_export_failed_spans":               modeltraceHelp("terminally failed export spans."),
 		"modeltrace_export_panics":                     modeltraceHelp("exporter panics."),
+		"modeltrace_ended_spans_total":                 processModeltraceHelp("ended spans submitted to the batch processor."),
+		"modeltrace_export_attempted_spans_total":      processModeltraceHelp("spans handed to the OTLP exporter."),
+		"modeltrace_export_panics_total":               processModeltraceHelp("recovered exporter panic calls/batches; unit is incidents, not spans."),
 	}
 	desc := make(map[string]*prometheus.Desc, len(help)+2)
 	for name, text := range help {
@@ -211,7 +220,9 @@ func newSnapshotCollector(ops OpsSnapshotSource, exports ExportStatusSource) *sn
 	desc["infra_redis_connections"] = prometheus.NewDesc("sub2api_infra_redis_connections", opsHelp("Redis connections by fixed state."), []string{"state"}, nil)
 	return &snapshotCollector{
 		ops: ops, exports: exports, desc: desc,
-		reason: prometheus.NewDesc("sub2api_modeltrace_export_failed_spans_by_reason", modeltraceHelp("terminally failed export spans by existing fixed reason."), []string{"reason"}, nil),
+		reason:        prometheus.NewDesc("sub2api_modeltrace_export_failed_spans_by_reason", modeltraceHelp("terminally failed export spans by existing fixed reason."), []string{"reason"}, nil),
+		terminalTotal: prometheus.NewDesc("sub2api_modeltrace_export_terminal_spans_total", processModeltraceHelp("terminal export spans by fixed outcome."), []string{"outcome"}, nil),
+		failureTotal:  prometheus.NewDesc("sub2api_modeltrace_export_failed_spans_total", processModeltraceHelp("ordinary terminally failed export spans by fixed classified reason; exporter panics remain only in terminal outcome and panic incident counters."), []string{"reason"}, nil),
 	}
 }
 
@@ -220,6 +231,8 @@ func (c *snapshotCollector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- desc
 	}
 	ch <- c.reason
+	ch <- c.terminalTotal
+	ch <- c.failureTotal
 }
 
 func (c *snapshotCollector) Collect(ch chan<- prometheus.Metric) {
@@ -229,14 +242,21 @@ func (c *snapshotCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	status := modeltrace.ExportStatus{}
+	totals := modeltrace.ExportTotals{}
 	if c.exports != nil {
 		status = c.exports.ExportStatus()
+		totals = c.exports.ExportTotals()
 	}
 	c.collectExportStatus(ch, status)
+	c.collectExportTotals(ch, totals)
 }
 
 func (c *snapshotCollector) gauge(ch chan<- prometheus.Metric, name string, value float64, labels ...string) {
 	ch <- prometheus.MustNewConstMetric(c.desc[name], prometheus.GaugeValue, value, labels...)
+}
+
+func (c *snapshotCollector) counter(ch chan<- prometheus.Metric, name string, value float64, labels ...string) {
+	ch <- prometheus.MustNewConstMetric(c.desc[name], prometheus.CounterValue, value, labels...)
 }
 
 func (c *snapshotCollector) collectOps(ch chan<- prometheus.Metric, s *service.OpsInsertSystemMetricsInput) {
@@ -294,6 +314,24 @@ func (c *snapshotCollector) collectExportStatus(ch chan<- prometheus.Metric, s m
 		"timeout": s.FailedTimeout, "queue_full": s.FailedQueueFull, "other": s.FailedOther,
 	} {
 		ch <- prometheus.MustNewConstMetric(c.reason, prometheus.GaugeValue, float64(value), reason)
+	}
+}
+
+func (c *snapshotCollector) collectExportTotals(ch chan<- prometheus.Metric, s modeltrace.ExportTotals) {
+	c.counter(ch, "modeltrace_ended_spans_total", float64(s.EndedSpans))
+	c.counter(ch, "modeltrace_export_attempted_spans_total", float64(s.AttemptedSpans))
+	c.counter(ch, "modeltrace_export_panics_total", float64(s.Panics))
+	for outcome, value := range map[string]uint64{
+		"success": s.ExportedSpans,
+		"failure": s.FailedSpans,
+	} {
+		ch <- prometheus.MustNewConstMetric(c.terminalTotal, prometheus.CounterValue, float64(value), outcome)
+	}
+	for reason, value := range map[string]uint64{
+		"invalid_utf8": s.FailedInvalidUTF8, "collector_refused": s.FailedCollectorRefused,
+		"timeout": s.FailedTimeout, "queue_full": s.FailedQueueFull, "other": s.FailedOther,
+	} {
+		ch <- prometheus.MustNewConstMetric(c.failureTotal, prometheus.CounterValue, float64(value), reason)
 	}
 }
 

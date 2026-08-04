@@ -23,9 +23,13 @@ type fakeOpsSource struct {
 
 func (f fakeOpsSource) LatestSnapshot() *service.OpsInsertSystemMetricsInput { return f.snapshot }
 
-type fakeExportSource struct{ status modeltrace.ExportStatus }
+type fakeExportSource struct {
+	status modeltrace.ExportStatus
+	totals modeltrace.ExportTotals
+}
 
 func (f fakeExportSource) ExportStatus() modeltrace.ExportStatus { return f.status }
+func (f fakeExportSource) ExportTotals() modeltrace.ExportTotals { return f.totals }
 
 func TestServeFailureClearsStateIsObservableAndAllowsRestart(t *testing.T) {
 	metrics, err := New(config.MetricsConfig{Enabled: true, Host: "127.0.0.1", Port: 0}, fakeOpsSource{}, fakeExportSource{})
@@ -109,11 +113,17 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 			DBConnActive: &dbActive, DBConnIdle: &dbIdle,
 			GoroutineCount: &goroutines, ConcurrencyQueueDepth: &queueDepth,
 		}},
-		fakeExportSource{status: modeltrace.ExportStatus{
-			Enabled: true, EndedSpans: 50, AttemptedSpans: 45, ExportedSpans: 40,
-			FailedSpans: 5, Panics: 1,
-			FailedInvalidUTF8: 1, FailedCollectorRefused: 2, FailedTimeout: 1, FailedQueueFull: 1,
-		}},
+		fakeExportSource{
+			status: modeltrace.ExportStatus{
+				Enabled: true, EndedSpans: 50, AttemptedSpans: 45, ExportedSpans: 40,
+				FailedSpans: 5, Panics: 1,
+				FailedInvalidUTF8: 1, FailedCollectorRefused: 2, FailedTimeout: 1, FailedQueueFull: 1,
+			},
+			totals: modeltrace.ExportTotals{
+				EndedSpans: 150, AttemptedSpans: 145, ExportedSpans: 138, FailedSpans: 7, Panics: 2,
+				FailedInvalidUTF8: 1, FailedCollectorRefused: 2, FailedTimeout: 2, FailedQueueFull: 1, FailedOther: 1,
+			},
+		},
 	)
 	require.NoError(t, err)
 
@@ -158,6 +168,13 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 		`sub2api_modeltrace_export_failed_spans 5`,
 		`sub2api_modeltrace_export_panics 1`,
 		`sub2api_modeltrace_export_failed_spans_by_reason{reason="collector_refused"} 2`,
+		`# TYPE sub2api_modeltrace_export_attempted_spans_total counter`,
+		`sub2api_modeltrace_ended_spans_total 150`,
+		`sub2api_modeltrace_export_attempted_spans_total 145`,
+		`sub2api_modeltrace_export_terminal_spans_total{outcome="success"} 138`,
+		`sub2api_modeltrace_export_terminal_spans_total{outcome="failure"} 7`,
+		`sub2api_modeltrace_export_panics_total 2`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="timeout"} 2`,
 	} {
 		require.Contains(t, body, expected)
 	}
@@ -189,6 +206,43 @@ func TestRegistryOmitsOpsSeriesUntilOriginalCollectorHasSnapshot(t *testing.T) {
 	body := recorder.Body.String()
 	require.NotContains(t, body, "sub2api_ops_window_success_requests")
 	require.Contains(t, body, "sub2api_modeltrace_enabled 0")
+}
+
+func TestRegistryInitializesEveryProcessFailureReasonCounterAtZero(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true}, fakeOpsSource{}, fakeExportSource{})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	for _, reason := range []string{"invalid_utf8", "collector_refused", "timeout", "queue_full", "other"} {
+		require.Contains(t, body, `sub2api_modeltrace_export_failed_spans_total{reason="`+reason+`"} 0`)
+	}
+}
+
+func TestRegistryExportsExactFixedProcessCounterSeries(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true}, fakeOpsSource{}, fakeExportSource{})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	var samples []string
+	for _, line := range strings.Split(recorder.Body.String(), "\n") {
+		if strings.HasPrefix(line, "sub2api_modeltrace_") && strings.Contains(line, "_total") {
+			samples = append(samples, strings.Fields(line)[0])
+		}
+	}
+	require.ElementsMatch(t, []string{
+		"sub2api_modeltrace_ended_spans_total",
+		"sub2api_modeltrace_export_attempted_spans_total",
+		`sub2api_modeltrace_export_terminal_spans_total{outcome="success"}`,
+		`sub2api_modeltrace_export_terminal_spans_total{outcome="failure"}`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="invalid_utf8"}`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="collector_refused"}`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="timeout"}`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="queue_full"}`,
+		`sub2api_modeltrace_export_failed_spans_total{reason="other"}`,
+		"sub2api_modeltrace_export_panics_total",
+	}, samples)
 }
 
 func TestListenerUsesConfiguredExactPathAndShutsDown(t *testing.T) {
@@ -263,11 +317,14 @@ func TestNilOpsFieldsAreOmittedOnEachScrape(t *testing.T) {
 	require.NotContains(t, second.Body.String(), "sub2api_ops_qps")
 }
 
-func TestAllExportedSnapshotSamplesAreGauges(t *testing.T) {
+func TestAllExportedSnapshotSamplesUseTheirDeclaredLifecycleType(t *testing.T) {
 	metrics, err := New(
 		config.MetricsConfig{Enabled: true},
 		fakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{SuccessCount: 1}},
-		fakeExportSource{status: modeltrace.ExportStatus{Enabled: true, ExportedSpans: 1}},
+		fakeExportSource{
+			status: modeltrace.ExportStatus{Enabled: true, ExportedSpans: 1},
+			totals: modeltrace.ExportTotals{ExportedSpans: 1},
+		},
 	)
 	require.NoError(t, err)
 	recorder := httptest.NewRecorder()
@@ -275,5 +332,5 @@ func TestAllExportedSnapshotSamplesAreGauges(t *testing.T) {
 	body := recorder.Body.String()
 	require.Contains(t, body, "# TYPE sub2api_ops_window_success_requests gauge")
 	require.Contains(t, body, "# TYPE sub2api_modeltrace_exported_spans gauge")
-	require.NotContains(t, body, " counter\n")
+	require.Contains(t, body, "# TYPE sub2api_modeltrace_export_terminal_spans_total counter")
 }
