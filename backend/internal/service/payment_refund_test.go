@@ -343,7 +343,7 @@ func TestExecuteRefundReleasesReservationOnDefinitiveGatewayFailure(t *testing.T
 	restore := replacePaymentProviderFactoryForTest(t, &refundProviderTestDouble{
 		refundFn: func(context.Context, payment.RefundRequest) (*payment.RefundResponse, error) {
 			gatewayCalls++
-			return &payment.RefundResponse{Status: payment.ProviderStatusFailed}, nil
+			return &payment.RefundResponse{Status: payment.ProviderStatusFailed}, errors.New("gateway reported definitive failure")
 		},
 	})
 	defer restore()
@@ -1070,4 +1070,92 @@ func (p *refundQueryProviderTestDouble) QueryRefund(ctx context.Context, req pay
 		return p.queryFn(ctx, req)
 	}
 	return p.refundResponse, nil
+}
+
+type refundSubscriptionRepoStub struct {
+	userSubRepoNoop
+	sub         UserSubscription
+	extendCalls int
+	deleteCalls int
+}
+
+func (r *refundSubscriptionRepoStub) GetByID(context.Context, int64) (*UserSubscription, error) {
+	copy := r.sub
+	return &copy, nil
+}
+
+func (r *refundSubscriptionRepoStub) GetByIDForUpdate(context.Context, int64) (*UserSubscription, error) {
+	copy := r.sub
+	return &copy, nil
+}
+
+func (r *refundSubscriptionRepoStub) ExtendExpiry(_ context.Context, _ int64, expiresAt time.Time) error {
+	r.extendCalls++
+	r.sub.ExpiresAt = expiresAt
+	return nil
+}
+
+func (r *refundSubscriptionRepoStub) Delete(context.Context, int64) error {
+	r.deleteCalls++
+	now := time.Now()
+	r.sub.DeletedAt = &now
+	return nil
+}
+
+func TestFinalizePendingRefundSuccessAppliesSubscriptionDeductionOnce(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	order := createPendingRefundOrderForTest(t, ctx, client, "subscription-deduction")
+	order, err := client.PaymentOrder.UpdateOneID(order.ID).SetStatus(OrderStatusRefundPending).Save(ctx)
+	require.NoError(t, err)
+	initialExpiry := time.Now().AddDate(0, 0, 10)
+	repo := &refundSubscriptionRepoStub{sub: UserSubscription{
+		ID: 41, UserID: order.UserID, GroupID: 7, Status: SubscriptionStatusActive, ExpiresAt: initialExpiry,
+	}}
+	svc := &PaymentService{
+		entClient:       client,
+		subscriptionSvc: &SubscriptionService{userSubRepo: repo},
+	}
+	plan := svc.refundFinalizePlan(order)
+	plan.DeductionType = payment.DeductionTypeSubscription
+	plan.SubscriptionID = repo.sub.ID
+	plan.SubDaysToDeduct = 3
+
+	result, err := svc.finalizePendingRefundSuccess(ctx, plan)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, 3, result.SubDaysDeducted)
+	require.Equal(t, 1, repo.extendCalls)
+	require.WithinDuration(t, initialExpiry.AddDate(0, 0, -3), repo.sub.ExpiresAt, time.Second)
+
+	_, err = svc.finalizePendingRefundSuccess(ctx, plan)
+	require.Error(t, err)
+	require.Equal(t, 1, repo.extendCalls, "replaying a finalized refund must not deduct twice")
+}
+
+func TestFinalizePendingRefundSuccessRevokesSubscriptionWhenDeductionWouldExpire(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	order := createPendingRefundOrderForTest(t, ctx, client, "subscription-revoke")
+	order, err := client.PaymentOrder.UpdateOneID(order.ID).SetStatus(OrderStatusRefundPending).Save(ctx)
+	require.NoError(t, err)
+	repo := &refundSubscriptionRepoStub{sub: UserSubscription{
+		ID: 42, UserID: order.UserID, GroupID: 8, Status: SubscriptionStatusActive, ExpiresAt: time.Now().Add(24 * time.Hour),
+	}}
+	svc := &PaymentService{
+		entClient:       client,
+		subscriptionSvc: &SubscriptionService{userSubRepo: repo},
+	}
+	plan := svc.refundFinalizePlan(order)
+	plan.DeductionType = payment.DeductionTypeSubscription
+	plan.SubscriptionID = repo.sub.ID
+	plan.SubDaysToDeduct = 3
+
+	result, err := svc.finalizePendingRefundSuccess(ctx, plan)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, 3, result.SubDaysDeducted)
+	require.Equal(t, 0, repo.extendCalls)
+	require.Equal(t, 1, repo.deleteCalls)
+	require.NotNil(t, repo.sub.DeletedAt)
 }

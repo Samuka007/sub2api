@@ -74,6 +74,14 @@ func TestAliyunCaptchaVerifier_APIErrorNormalized(t *testing.T) {
 }
 
 func TestAliyunCaptchaVerifier_TransportError(t *testing.T) {
+	// The Alibaba Cloud SDK honors ambient proxy variables. A developer proxy can
+	// turn the deliberately unreachable endpoint into an HTTP 502 and make this
+	// transport-error test exercise the API-error branch instead.
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
 	// TCP port 0 is reserved and cannot host a listener. Unlike a closed ephemeral
 	// httptest port, it cannot be reused by another concurrent test process.
 	endpoint := "127.0.0.1:0"

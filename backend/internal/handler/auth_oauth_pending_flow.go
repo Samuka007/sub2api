@@ -59,10 +59,13 @@ type oauthAdoptionDecisionRequest struct {
 }
 
 type bindPendingOAuthLoginRequest struct {
-	Email            string `json:"email" binding:"required,email"`
-	Password         string `json:"password" binding:"required"`
-	AdoptDisplayName *bool  `json:"adopt_display_name,omitempty"`
-	AdoptAvatar      *bool  `json:"adopt_avatar,omitempty"`
+	Email                 string `json:"email" binding:"required,email"`
+	Password              string `json:"password" binding:"required"`
+	TurnstileToken        string `json:"turnstile_token,omitempty"`
+	TencentCaptchaTicket  string `json:"tencent_captcha_ticket,omitempty"`
+	TencentCaptchaRandstr string `json:"tencent_captcha_randstr,omitempty"`
+	AdoptDisplayName      *bool  `json:"adopt_display_name,omitempty"`
+	AdoptAvatar           *bool  `json:"adopt_avatar,omitempty"`
 }
 
 type createPendingOAuthAccountRequest struct {
@@ -1636,6 +1639,11 @@ func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
 		response.BadRequest(c, "Pending oauth session provider mismatch")
 		return
 	}
+	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
+	if err := h.authService.VerifyCaptcha(c.Request.Context(), proof, ip.GetClientIP(c)); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 
 	user, err := h.authService.ValidatePasswordCredentials(c.Request.Context(), strings.TrimSpace(req.Email), req.Password)
 	if err != nil {
@@ -1732,6 +1740,11 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 		response.ErrorFrom(c, infraerrors.ServiceUnavailable("PENDING_AUTH_NOT_READY", "pending auth service is not ready"))
 		return
 	}
+	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
+	if err := h.authService.VerifyCaptchaForPendingOAuthCreate(c.Request.Context(), proof, ip.GetClientIP(c), req.VerifyCode); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	existingUser, err := findUserByNormalizedEmail(c.Request.Context(), client, email)
@@ -1757,11 +1770,6 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 		return
 	}
 	if err := h.ensureBackendModeAllowsNewUserLogin(c.Request.Context()); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	proof := captchaProof(req.TurnstileToken, req.TencentCaptchaTicket, req.TencentCaptchaRandstr)
-	if err := h.authService.VerifyCaptchaForPendingOAuthCreate(c.Request.Context(), proof, ip.GetClientIP(c), req.VerifyCode); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}

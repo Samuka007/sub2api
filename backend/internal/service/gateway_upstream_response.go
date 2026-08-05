@@ -666,7 +666,32 @@ func (u *ClaudeUsage) hasObservedTokens() bool {
 // 不变式：UpstreamFailoverError 必须保持 result=nil——failover 重试成功后按成功请求
 // 计费，若同时返回部分 usage 会造成双重计费，此处显式拦截兜底。
 func partialStreamUsageResult(resp *http.Response, streamResult *streamingResult, model, upstreamModel string, startTime time.Time, err error) *ForwardResult {
-	if streamResult == nil || !streamResult.usage.hasObservedTokens() {
+	if streamResult == nil {
+		return nil
+	}
+	return partialObservedUsageResult(
+		resp,
+		streamResult.usage,
+		streamResult.firstTokenMs,
+		streamResult.clientDisconnect,
+		model,
+		upstreamModel,
+		startTime,
+		err,
+	)
+}
+
+func partialObservedUsageResult(
+	resp *http.Response,
+	usage *ClaudeUsage,
+	firstTokenMs *int,
+	clientDisconnect bool,
+	model string,
+	upstreamModel string,
+	startTime time.Time,
+	err error,
+) *ForwardResult {
+	if !usage.hasObservedTokens() {
 		return nil
 	}
 	var failoverErr *UpstreamFailoverError
@@ -675,13 +700,13 @@ func partialStreamUsageResult(resp *http.Response, streamResult *streamingResult
 	}
 	return &ForwardResult{
 		RequestID:        resp.Header.Get("x-request-id"),
-		Usage:            *streamResult.usage,
+		Usage:            *usage,
 		Model:            model,
 		UpstreamModel:    upstreamModel,
 		Stream:           true,
 		Duration:         time.Since(startTime),
-		FirstTokenMs:     streamResult.firstTokenMs,
-		ClientDisconnect: streamResult.clientDisconnect,
+		FirstTokenMs:     firstTokenMs,
+		ClientDisconnect: clientDisconnect,
 	}
 }
 

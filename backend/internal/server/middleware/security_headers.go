@@ -18,10 +18,21 @@ const (
 	NonceTemplate = "__CSP_NONCE__"
 	// CloudflareInsightsDomain is the domain for Cloudflare Web Analytics
 	CloudflareInsightsDomain = "https://static.cloudflareinsights.com"
-	// TencentCaptchaDomain is the Tencent Captcha 2.0 Web SDK domain.
+	// TencentCaptchaDomain is the Tencent Captcha 2.0 Web SDK and API domain.
 	TencentCaptchaDomain = "https://turing.captcha.qcloud.com"
-	// TencentCaptchaStaticDomain is the Tencent Captcha static asset domain.
+	// TencentCaptchaStaticDomain hosts Tencent Captcha scripts and static assets.
 	TencentCaptchaStaticDomain = "https://*.captcha.gtimg.com"
+	// AliyunCaptchaStaticDomain hosts the Aliyun Captcha 2.0 Web SDK and assets.
+	AliyunCaptchaStaticDomain = "https://*.alicdn.com"
+	// AliyunCaptchaCNStaticDomain hosts China-region Aliyun Captcha assets.
+	AliyunCaptchaCNStaticDomain = "https://static-captcha.aliyuncs.com"
+	// AliyunCaptchaSGPStaticDomain hosts Singapore-region Aliyun Captcha assets.
+	AliyunCaptchaSGPStaticDomain = "https://static-captcha-sgp.aliyuncs.com"
+	// Aliyun Captcha uses prefix-scoped API hosts from these four domain families.
+	AliyunCaptchaAPIDomain     = "https://*.captcha-open.aliyuncs.com"
+	AliyunCaptchaAPIBackup     = "https://*.captcha-open-b.aliyuncs.com"
+	AliyunCaptchaDualAPIDomain = "https://*.captcha-open-dual.aliyuncs.com"
+	AliyunCaptchaDualAPIBackup = "https://*.captcha-open-dual-b.aliyuncs.com"
 	// StripeDomain is the domain for Stripe.js SDK
 	StripeDomain = "https://*.stripe.com"
 	// AirwallexStaticDomain 是 Airwallex 生产环境 SDK 脚本域名。
@@ -40,8 +51,24 @@ var requiredCSPDirectiveValues = []struct {
 }{
 	{"script-src", CloudflareInsightsDomain},
 	{"script-src", TencentCaptchaDomain},
-	{"frame-src", TencentCaptchaDomain},
+	{"script-src", TencentCaptchaStaticDomain},
 	{"style-src", TencentCaptchaStaticDomain},
+	{"frame-src", TencentCaptchaDomain},
+	{"frame-src", TencentCaptchaStaticDomain},
+	{"connect-src", TencentCaptchaDomain},
+	{"connect-src", TencentCaptchaStaticDomain},
+	{"script-src", AliyunCaptchaStaticDomain},
+	{"style-src", AliyunCaptchaStaticDomain},
+	{"script-src", AliyunCaptchaCNStaticDomain},
+	{"style-src", AliyunCaptchaCNStaticDomain},
+	{"frame-src", AliyunCaptchaCNStaticDomain},
+	{"script-src", AliyunCaptchaSGPStaticDomain},
+	{"style-src", AliyunCaptchaSGPStaticDomain},
+	{"frame-src", AliyunCaptchaSGPStaticDomain},
+	{"connect-src", AliyunCaptchaAPIDomain},
+	{"connect-src", AliyunCaptchaAPIBackup},
+	{"connect-src", AliyunCaptchaDualAPIDomain},
+	{"connect-src", AliyunCaptchaDualAPIBackup},
 	{"script-src", StripeDomain},
 	{"frame-src", StripeDomain},
 	{"script-src", AirwallexStaticDomain},

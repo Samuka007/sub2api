@@ -44,6 +44,9 @@ func (r *settingRepository) GetValue(ctx context.Context, key string) (string, e
 }
 
 func (r *settingRepository) Set(ctx context.Context, key, value string) error {
+	if isCaptchaProviderSettingKey(key) {
+		return r.SetMultipleWithCaptchaProviderInvariant(ctx, map[string]string{key: value})
+	}
 	now := time.Now()
 	return r.client.Setting.
 		Create().
@@ -53,6 +56,26 @@ func (r *settingRepository) Set(ctx context.Context, key, value string) error {
 		OnConflictColumns(setting.FieldKey).
 		UpdateNewValues().
 		Exec(ctx)
+}
+
+func isCaptchaProviderSettingKey(key string) bool {
+	switch key {
+	case service.SettingKeyTurnstileEnabled,
+		service.SettingKeyTencentCaptchaEnabled,
+		service.SettingKeyAliyunCaptchaEnabled:
+		return true
+	default:
+		return false
+	}
+}
+
+func containsCaptchaProviderSetting(settingsToWrite map[string]string) bool {
+	for key := range settingsToWrite {
+		if isCaptchaProviderSettingKey(key) {
+			return true
+		}
+	}
+	return false
 }
 
 // CompareAndSet atomically replaces a setting only when its raw value still
@@ -178,21 +201,104 @@ func (r *settingRepository) GetMultiple(ctx context.Context, keys []string) (map
 	return result, nil
 }
 
-func (r *settingRepository) SetMultiple(ctx context.Context, settings map[string]string) error {
-	if len(settings) == 0 {
+func (r *settingRepository) SetMultiple(ctx context.Context, settingsToWrite map[string]string) error {
+	if containsCaptchaProviderSetting(settingsToWrite) {
+		return r.SetMultipleWithCaptchaProviderInvariant(ctx, settingsToWrite)
+	}
+	return r.setMultiple(ctx, r.client, settingsToWrite)
+}
+
+func (r *settingRepository) setMultiple(ctx context.Context, client *ent.Client, settingsToWrite map[string]string) error {
+	if len(settingsToWrite) == 0 {
 		return nil
 	}
 
 	now := time.Now()
-	builders := make([]*ent.SettingCreate, 0, len(settings))
-	for key, value := range settings {
-		builders = append(builders, r.client.Setting.Create().SetKey(key).SetValue(value).SetUpdatedAt(now))
+	builders := make([]*ent.SettingCreate, 0, len(settingsToWrite))
+	for key, value := range settingsToWrite {
+		builders = append(builders, client.Setting.Create().SetKey(key).SetValue(value).SetUpdatedAt(now))
 	}
-	return r.client.Setting.
+	return client.Setting.
 		CreateBulk(builders...).
 		OnConflictColumns(setting.FieldKey).
 		UpdateNewValues().
 		Exec(ctx)
+}
+
+func (r *settingRepository) SetMultipleWithCaptchaProviderInvariant(ctx context.Context, settingsToWrite map[string]string) (err error) {
+	if len(settingsToWrite) == 0 {
+		return nil
+	}
+
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	releaseLocks, err := lockRepositoryScopedKeys(
+		ctx,
+		tx.Client(),
+		sqlExecutorFromEntClient(tx.Client()),
+		"settings:captcha-provider-invariant",
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+		releaseLocks()
+	}()
+
+	now := time.Now()
+	captchaKeys := [...]string{
+		service.SettingKeyTurnstileEnabled,
+		service.SettingKeyTencentCaptchaEnabled,
+		service.SettingKeyAliyunCaptchaEnabled,
+	}
+	for _, key := range captchaKeys {
+		if createErr := tx.Setting.Create().
+			SetKey(key).
+			SetValue("false").
+			SetUpdatedAt(now).
+			OnConflictColumns(setting.FieldKey).
+			DoNothing().
+			Exec(ctx); createErr != nil && !errors.Is(createErr, sql.ErrNoRows) {
+			return createErr
+		}
+	}
+
+	locked, err := tx.Setting.Query().
+		Where(setting.KeyIn(captchaKeys[:]...)).
+		ForUpdate().
+		All(ctx)
+	if err != nil {
+		return err
+	}
+	values := make(map[string]string, len(captchaKeys))
+	for _, current := range locked {
+		values[current.Key] = current.Value
+	}
+	for _, key := range captchaKeys {
+		if value, ok := settingsToWrite[key]; ok {
+			values[key] = value
+		}
+	}
+	enabled := 0
+	for _, key := range captchaKeys {
+		if values[key] == "true" {
+			enabled++
+		}
+	}
+	if enabled > 1 {
+		return service.ErrCaptchaProviderSettingsConflict
+	}
+
+	if err = r.setMultiple(ctx, tx.Client(), settingsToWrite); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *settingRepository) GetAll(ctx context.Context) (map[string]string, error) {

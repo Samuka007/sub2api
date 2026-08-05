@@ -2350,6 +2350,77 @@ func newOAuthPendingFlowTestHandlerWithEmailVerification(
 	return newOAuthPendingFlowTestHandlerWithOptions(t, invitationEnabled, true, cache)
 }
 
+func TestBindOIDCOAuthLoginRejectsMissingProofForConfiguredCaptchaProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings map[string]string
+	}{
+		{
+			name: "turnstile",
+			settings: map[string]string{
+				service.SettingKeyTurnstileEnabled:   "true",
+				service.SettingKeyTurnstileSecretKey: "secret",
+			},
+		},
+		{
+			name: "tencent",
+			settings: map[string]string{
+				service.SettingKeyTencentCaptchaEnabled:        "true",
+				service.SettingKeyTencentCaptchaAppID:          "123456789",
+				service.SettingKeyTencentCaptchaAppSecretKey:   "app-secret",
+				service.SettingKeyTencentCaptchaCloudSecretID:  "cloud-secret-id",
+				service.SettingKeyTencentCaptchaCloudSecretKey: "cloud-secret-key",
+			},
+		},
+		{
+			name: "aliyun",
+			settings: map[string]string{
+				service.SettingKeyAliyunCaptchaEnabled:         "true",
+				service.SettingKeyAliyunCaptchaAccessKeyID:     "ak-id",
+				service.SettingKeyAliyunCaptchaAccessKeySecret: "ak-secret",
+				service.SettingKeyAliyunCaptchaSceneID:         "scene-id",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, client := newOAuthPendingFlowTestHandlerWithDependencies(t, oauthPendingFlowTestHandlerOptions{
+				settingValues:          tt.settings,
+				installCaptchaServices: true,
+			})
+			ctx := context.Background()
+			session, err := client.PendingAuthSession.Create().
+				SetSessionToken("captcha-bind-session-" + tt.name).
+				SetIntent("adopt_existing_user_by_email").
+				SetProviderType("oidc").
+				SetProviderKey("https://issuer.example").
+				SetProviderSubject("captcha-bind-" + tt.name).
+				SetResolvedEmail("owner@example.com").
+				SetBrowserSessionKey("captcha-bind-browser-" + tt.name).
+				SetExpiresAt(time.Now().UTC().Add(10 * time.Minute)).
+				Save(ctx)
+			require.NoError(t, err)
+
+			body := bytes.NewBufferString(`{"email":"owner@example.com","password":"secret-123"}`)
+			recorder := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(recorder)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/oidc/bind-login", body)
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(&http.Cookie{Name: oauthPendingSessionCookieName, Value: encodeCookieValue(session.SessionToken)})
+			req.AddCookie(&http.Cookie{Name: oauthPendingBrowserCookieName, Value: encodeCookieValue(session.BrowserSessionKey)})
+			ginCtx.Request = req
+
+			handler.BindOIDCOAuthLogin(ginCtx)
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code)
+			storedSession, err := client.PendingAuthSession.Get(ctx, session.ID)
+			require.NoError(t, err)
+			require.Nil(t, storedSession.ConsumedAt)
+		})
+	}
+}
+
 func newOAuthPendingFlowTestHandlerWithOptions(
 	t *testing.T,
 	invitationEnabled bool,
@@ -2364,17 +2435,18 @@ func newOAuthPendingFlowTestHandlerWithOptions(
 }
 
 type oauthPendingFlowTestHandlerOptions struct {
-	invitationEnabled  bool
-	emailVerifyEnabled bool
-	emailCache         service.EmailCache
-	settingValues      map[string]string
-	promoRepo          service.PromoCodeRepository
-	defaultSubAssigner service.DefaultSubscriptionAssigner
-	affiliateService   *service.AffiliateService
-	affiliateFactory   func(*dbent.Client, *service.SettingService) *service.AffiliateService
-	totpCache          service.TotpCache
-	totpEncryptor      service.SecretEncryptor
-	userRepoOptions    oauthPendingFlowUserRepoOptions
+	invitationEnabled      bool
+	emailVerifyEnabled     bool
+	emailCache             service.EmailCache
+	settingValues          map[string]string
+	promoRepo              service.PromoCodeRepository
+	defaultSubAssigner     service.DefaultSubscriptionAssigner
+	affiliateService       *service.AffiliateService
+	affiliateFactory       func(*dbent.Client, *service.SettingService) *service.AffiliateService
+	totpCache              service.TotpCache
+	totpEncryptor          service.SecretEncryptor
+	userRepoOptions        oauthPendingFlowUserRepoOptions
+	installCaptchaServices bool
 }
 
 func newOAuthPendingFlowTestHandlerWithDependencies(
@@ -2473,6 +2545,10 @@ CREATE TABLE IF NOT EXISTS user_affiliates (
 			},
 		}, options.emailCache)
 	}
+	var turnstileSvc *service.TurnstileService
+	if options.installCaptchaServices {
+		turnstileSvc = service.NewTurnstileService(settingSvc, oauthPendingFlowTurnstileVerifierStub{})
+	}
 	authSvc := service.NewAuthService(
 		client,
 		userRepo,
@@ -2481,13 +2557,17 @@ CREATE TABLE IF NOT EXISTS user_affiliates (
 		cfg,
 		settingSvc,
 		emailService,
-		nil,
+		turnstileSvc,
 		nil,
 		promoService,
 		options.defaultSubAssigner,
 		affiliateService,
 		nil,
 	)
+	if options.installCaptchaServices {
+		authSvc.SetTencentCaptchaService(service.NewTencentCaptchaService(settingSvc, oauthPendingFlowTencentVerifierStub{}))
+		authSvc.SetAliyunCaptchaService(service.NewAliyunCaptchaService(settingSvc, oauthPendingFlowAliyunVerifierStub{}))
+	}
 	userSvc := service.NewUserService(userRepo, nil, nil, nil)
 	var totpSvc *service.TotpService
 	if options.totpCache != nil || options.totpEncryptor != nil {
@@ -2520,6 +2600,24 @@ func boolSettingValue(v bool) string {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+type oauthPendingFlowTurnstileVerifierStub struct{}
+
+func (oauthPendingFlowTurnstileVerifierStub) VerifyToken(context.Context, string, string, string) (*service.TurnstileVerifyResponse, error) {
+	return &service.TurnstileVerifyResponse{Success: true}, nil
+}
+
+type oauthPendingFlowTencentVerifierStub struct{}
+
+func (oauthPendingFlowTencentVerifierStub) VerifyTicket(context.Context, service.TencentCaptchaCredentials, service.TencentCaptchaProof, string) (*service.TencentCaptchaVerifyResponse, error) {
+	return &service.TencentCaptchaVerifyResponse{CaptchaCode: 1}, nil
+}
+
+type oauthPendingFlowAliyunVerifierStub struct{}
+
+func (oauthPendingFlowAliyunVerifierStub) VerifyCaptcha(context.Context, service.AliyunCaptchaCredentials, string) (*service.AliyunCaptchaVerifyResult, error) {
+	return &service.AliyunCaptchaVerifyResult{VerifyResult: true}, nil
 }
 
 type oauthPendingFlowSettingRepoStub struct {

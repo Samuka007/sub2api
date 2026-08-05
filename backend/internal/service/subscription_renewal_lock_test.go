@@ -141,3 +141,49 @@ func TestAssignSubscriptionDoesNotReactivateRowSuspendedAfterStaleRead(t *testin
 	require.Equal(t, current.ExpiresAt, sub.ExpiresAt)
 	require.Equal(t, current.Notes, sub.Notes)
 }
+
+type concurrentSubscriptionAdjustmentRepo struct {
+	userSubRepoNoop
+	stale         UserSubscription
+	current       UserSubscription
+	unlockedReads int
+}
+
+func (r *concurrentSubscriptionAdjustmentRepo) GetByID(context.Context, int64) (*UserSubscription, error) {
+	r.unlockedReads++
+	copy := r.current
+	if r.unlockedReads == 1 {
+		copy = r.stale
+	}
+	return &copy, nil
+}
+
+func (r *concurrentSubscriptionAdjustmentRepo) GetByIDForUpdate(context.Context, int64) (*UserSubscription, error) {
+	copy := r.current
+	return &copy, nil
+}
+
+func (r *concurrentSubscriptionAdjustmentRepo) ExtendExpiry(_ context.Context, _ int64, expiresAt time.Time) error {
+	r.current.ExpiresAt = expiresAt
+	return nil
+}
+
+func TestExtendSubscriptionPreservesConcurrentRenewal(t *testing.T) {
+	now := time.Now()
+	staleExpiry := now.AddDate(0, 0, 1)
+	renewedExpiry := now.AddDate(0, 0, 10)
+	repo := &concurrentSubscriptionAdjustmentRepo{
+		stale: UserSubscription{
+			ID: 37, UserID: 41, GroupID: 43, ExpiresAt: staleExpiry, Status: SubscriptionStatusActive,
+		},
+		current: UserSubscription{
+			ID: 37, UserID: 41, GroupID: 43, ExpiresAt: renewedExpiry, Status: SubscriptionStatusActive,
+		},
+	}
+	svc := NewSubscriptionService(nil, repo, nil, nil, nil)
+
+	adjusted, err := svc.ExtendSubscription(context.Background(), 37, -3)
+
+	require.NoError(t, err)
+	require.WithinDuration(t, renewedExpiry.AddDate(0, 0, -3), adjusted.ExpiresAt, time.Second)
+}

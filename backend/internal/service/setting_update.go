@@ -44,7 +44,7 @@ func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *S
 	}
 	omitted.dropFrom(updates)
 
-	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+	if err := s.setMultipleWithCaptchaProviderInvariant(ctx, updates); err != nil {
 		return err
 	}
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
@@ -74,11 +74,28 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 	}
 	omitted.dropFrom(updates)
 
-	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+	if err := s.setMultipleWithCaptchaProviderInvariant(ctx, updates); err != nil {
 		return err
 	}
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
 	return nil
+}
+
+func (s *SettingService) setMultipleWithCaptchaProviderInvariant(ctx context.Context, updates map[string]string) error {
+	for _, key := range [...]string{
+		SettingKeyTurnstileEnabled,
+		SettingKeyTencentCaptchaEnabled,
+		SettingKeyAliyunCaptchaEnabled,
+	} {
+		if _, updatesCaptchaProvider := updates[key]; !updatesCaptchaProvider {
+			continue
+		}
+		if repo, ok := s.settingRepo.(captchaProviderInvariantSettingRepository); ok {
+			return repo.SetMultipleWithCaptchaProviderInvariant(ctx, updates)
+		}
+		break
+	}
+	return s.settingRepo.SetMultiple(ctx, updates)
 }
 
 // refreshCachedSettingsAfterWrite keeps the in-process caches in step with the

@@ -656,49 +656,63 @@ func (s *SubscriptionService) ExtendSubscription(ctx context.Context, subscripti
 }
 
 func (s *SubscriptionService) extendSubscription(ctx context.Context, subscriptionID int64, days int, deferCacheInvalidation bool) (*UserSubscription, error) {
-	sub, err := s.userSubRepo.GetByID(ctx, subscriptionID)
+	var adjusted *UserSubscription
+	err := s.withSubscriptionUpdateTx(ctx, func(txCtx context.Context) error {
+		sub, err := s.userSubRepo.GetByIDForUpdate(txCtx, subscriptionID)
+		if err != nil {
+			return ErrSubscriptionNotFound
+		}
+
+		if days > MaxValidityDays {
+			days = MaxValidityDays
+		}
+		if days < -MaxValidityDays {
+			days = -MaxValidityDays
+		}
+
+		now := time.Now()
+		isExpired := !sub.ExpiresAt.After(now)
+		if isExpired && days < 0 {
+			return infraerrors.BadRequest("CANNOT_SHORTEN_EXPIRED", "cannot shorten an expired subscription")
+		}
+
+		var newExpiresAt time.Time
+		if isExpired {
+			newExpiresAt = now.AddDate(0, 0, days)
+		} else {
+			newExpiresAt = sub.ExpiresAt.AddDate(0, 0, days)
+		}
+		if newExpiresAt.After(MaxExpiresAt) {
+			newExpiresAt = MaxExpiresAt
+		}
+		if !newExpiresAt.After(now) {
+			return ErrAdjustWouldExpire
+		}
+
+		if err := s.userSubRepo.ExtendExpiry(txCtx, subscriptionID, newExpiresAt); err != nil {
+			return err
+		}
+		status := sub.Status
+		if status == SubscriptionStatusExpired {
+			if err := s.userSubRepo.UpdateStatus(txCtx, subscriptionID, SubscriptionStatusActive); err != nil {
+				return err
+			}
+			status = SubscriptionStatusActive
+		}
+		copy := *sub
+		copy.ExpiresAt = newExpiresAt
+		copy.Status = status
+		adjusted = &copy
+		return nil
+	})
 	if err != nil {
-		return nil, ErrSubscriptionNotFound
-	}
-
-	if days > MaxValidityDays {
-		days = MaxValidityDays
-	}
-	if days < -MaxValidityDays {
-		days = -MaxValidityDays
-	}
-
-	now := time.Now()
-	isExpired := !sub.ExpiresAt.After(now)
-	if isExpired && days < 0 {
-		return nil, infraerrors.BadRequest("CANNOT_SHORTEN_EXPIRED", "cannot shorten an expired subscription")
-	}
-
-	var newExpiresAt time.Time
-	if isExpired {
-		newExpiresAt = now.AddDate(0, 0, days)
-	} else {
-		newExpiresAt = sub.ExpiresAt.AddDate(0, 0, days)
-	}
-	if newExpiresAt.After(MaxExpiresAt) {
-		newExpiresAt = MaxExpiresAt
-	}
-	if !newExpiresAt.After(now) {
-		return nil, ErrAdjustWouldExpire
-	}
-
-	if err := s.userSubRepo.ExtendExpiry(ctx, subscriptionID, newExpiresAt); err != nil {
 		return nil, err
 	}
-	if sub.Status == SubscriptionStatusExpired {
-		if err := s.userSubRepo.UpdateStatus(ctx, subscriptionID, SubscriptionStatusActive); err != nil {
-			return nil, err
-		}
-	}
+
 	if !deferCacheInvalidation {
-		s.InvalidateSubCache(sub.UserID, sub.GroupID)
+		s.InvalidateSubCache(adjusted.UserID, adjusted.GroupID)
 		if s.billingCacheService != nil {
-			userID, groupID := sub.UserID, sub.GroupID
+			userID, groupID := adjusted.UserID, adjusted.GroupID
 			go func() {
 				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
@@ -706,7 +720,7 @@ func (s *SubscriptionService) extendSubscription(ctx context.Context, subscripti
 			}()
 		}
 	}
-	return s.userSubRepo.GetByID(ctx, subscriptionID)
+	return adjusted, nil
 }
 
 // GetByID 根据ID获取订阅

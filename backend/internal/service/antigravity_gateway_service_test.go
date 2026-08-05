@@ -808,6 +808,41 @@ func TestAntigravityGatewayService_Forward_BillsWithMappedModel(t *testing.T) {
 	require.Equal(t, mappedModel, result.UpstreamModel)
 }
 
+func TestAntigravityGatewayServiceForwardPreservesUsageOnInterruptedClaudeStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	body := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}],"max_tokens":16,"stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	upstreamBody := []byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":3,\"cachedContentTokenCount\":2}}}\n\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"X-Request-Id": []string{"req-partial-usage"}},
+		Body:       &streamReadCloser{payload: upstreamBody, err: io.ErrUnexpectedEOF},
+	}
+	svc := &AntigravityGatewayService{
+		settingService: NewSettingService(&antigravitySettingRepoStub{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}),
+		tokenProvider:  &AntigravityTokenProvider{},
+		httpUpstream:   &httpUpstreamStub{resp: resp},
+	}
+	account := &Account{
+		ID: 6, Name: "antigravity-partial-usage", Platform: PlatformAntigravity,
+		Type: AccountTypeOAuth, Status: StatusActive, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "token", "project_id": "proj"},
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body, false)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NotNil(t, result)
+	require.Equal(t, "req-partial-usage", result.RequestID)
+	require.Equal(t, 6, result.Usage.InputTokens)
+	require.Equal(t, 3, result.Usage.OutputTokens)
+	require.Equal(t, 2, result.Usage.CacheReadInputTokens)
+}
+
 // TestAntigravityGatewayService_ForwardGemini_BillsWithMappedModel
 // 验证：Antigravity Gemini 转发返回的计费模型使用映射后的模型
 func TestAntigravityGatewayService_ForwardGemini_BillsWithMappedModel(t *testing.T) {

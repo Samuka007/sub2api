@@ -431,7 +431,19 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
-			return nil, err
+			if streamRes == nil {
+				return nil, err
+			}
+			return partialObservedUsageResult(
+				resp,
+				streamRes.usage,
+				streamRes.firstTokenMs,
+				streamRes.clientDisconnect,
+				originalModel,
+				billingModel,
+				startTime,
+				err,
+			), err
 		}
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs

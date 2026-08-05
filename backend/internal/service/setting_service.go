@@ -23,6 +23,10 @@ var (
 		"DEFAULT_SUBSCRIPTION_GROUP_DUPLICATE",
 		"default subscription group cannot be duplicated",
 	)
+	ErrCaptchaProviderSettingsConflict = infraerrors.BadRequest(
+		"CAPTCHA_PROVIDER_SETTINGS_CONFLICT",
+		"multiple captcha providers cannot be enabled at the same time",
+	)
 )
 
 type SettingRepository interface {
@@ -33,6 +37,10 @@ type SettingRepository interface {
 	SetMultiple(ctx context.Context, settings map[string]string) error
 	GetAll(ctx context.Context) (map[string]string, error)
 	Delete(ctx context.Context, key string) error
+}
+
+type captchaProviderInvariantSettingRepository interface {
+	SetMultipleWithCaptchaProviderInvariant(ctx context.Context, settings map[string]string) error
 }
 
 // DefaultSubscriptionGroupReader validates group references used by default subscriptions.

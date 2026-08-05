@@ -595,8 +595,11 @@ func (s *PaymentService) gwRefundWithProvider(ctx context.Context, p *RefundPlan
 	})
 	finishProviderCall()
 	if err != nil {
-		if resp != nil && strings.TrimSpace(resp.Status) == payment.ProviderStatusPending {
-			return resp, nil
+		if resp != nil {
+			switch strings.TrimSpace(resp.Status) {
+			case payment.ProviderStatusPending, payment.ProviderStatusFailed:
+				return resp, nil
+			}
 		}
 		return nil, err
 	}

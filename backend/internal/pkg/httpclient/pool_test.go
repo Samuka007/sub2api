@@ -17,6 +17,19 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+func TestBuildTransport_RejectsInsecureSkipVerify(t *testing.T) {
+	transport, err := buildTransport(Options{InsecureSkipVerify: true})
+
+	require.Nil(t, transport)
+	require.EqualError(t, err, "insecure_skip_verify is not allowed; install a trusted certificate instead")
+}
+
+func TestBuildTransport_UsesSystemCertificateVerification(t *testing.T) {
+	transport, err := buildTransport(Options{})
+
+	require.NoError(t, err)
+	require.Nil(t, transport.TLSClientConfig, "nil TLS config preserves Go's system trust store and certificate verification")
+}
 
 func TestValidatedTransport_CacheHostValidation(t *testing.T) {
 	originalValidate := validateResolvedIP

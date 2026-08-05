@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/suite"
 )
@@ -225,4 +226,81 @@ func (s *SettingRepoSuite) TestAdvanceOpenAICodexSyncedVersionConcurrentFirstWri
 	value, err := repo.GetValue(ctx, service.SettingKeyOpenAICodexClientVersionSynced)
 	s.Require().NoError(err)
 	s.Equal("0.152.0", value)
+}
+
+func (s *SettingRepoSuite) TestSettingServiceSerializesConcurrentPartialCaptchaProviderWrites() {
+	repoA := NewSettingRepository(integrationEntClient).(*settingRepository)
+	repoB := NewSettingRepository(integrationEntClient).(*settingRepository)
+	settingSvcA := service.NewSettingService(repoA, &config.Config{})
+	settingSvcB := service.NewSettingService(repoB, &config.Config{})
+	ctx := s.ctx
+	keys := []string{
+		service.SettingKeyTurnstileEnabled,
+		service.SettingKeyTencentCaptchaEnabled,
+		service.SettingKeyAliyunCaptchaEnabled,
+	}
+	previous, err := repoA.GetMultiple(ctx, keys)
+	s.Require().NoError(err)
+	s.Require().NoError(repoA.SetMultiple(ctx, map[string]string{
+		service.SettingKeyTurnstileEnabled:      "false",
+		service.SettingKeyTencentCaptchaEnabled: "false",
+		service.SettingKeyAliyunCaptchaEnabled:  "false",
+	}))
+	s.T().Cleanup(func() {
+		restore := make(map[string]string, len(keys))
+		for _, key := range keys {
+			restore[key] = previous[key]
+		}
+		_ = repoA.SetMultiple(context.Background(), restore)
+		for _, key := range keys {
+			if _, existed := previous[key]; !existed {
+				_ = repoA.Delete(context.Background(), key)
+			}
+		}
+	})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		errs <- settingSvcA.UpdateSettingsOmitting(ctx, &service.SystemSettings{TencentCaptchaEnabled: true}, service.OmittedSettingKeys{
+			service.SettingKeyTurnstileEnabled:     {},
+			service.SettingKeyAliyunCaptchaEnabled: {},
+		})
+	}()
+	go func() {
+		<-start
+		errs <- settingSvcB.UpdateSettingsWithAuthSourceDefaultsOmitting(
+			ctx,
+			&service.SystemSettings{AliyunCaptchaEnabled: true},
+			&service.AuthSourceDefaultSettings{},
+			service.OmittedSettingKeys{
+				service.SettingKeyTurnstileEnabled:      {},
+				service.SettingKeyTencentCaptchaEnabled: {},
+			},
+		)
+	}()
+	close(start)
+	firstErr, secondErr := <-errs, <-errs
+	s.Require().True(
+		(firstErr == nil && secondErr != nil) || (firstErr != nil && secondErr == nil),
+		"exactly one conflicting partial write must commit: first=%v second=%v",
+		firstErr,
+		secondErr,
+	)
+	if firstErr != nil {
+		s.ErrorIs(firstErr, service.ErrCaptchaProviderSettingsConflict)
+	} else {
+		s.ErrorIs(secondErr, service.ErrCaptchaProviderSettingsConflict)
+	}
+
+	stored, err := repoA.GetMultiple(ctx, keys)
+	s.Require().NoError(err)
+	enabled := 0
+	for _, key := range keys {
+		if stored[key] == "true" {
+			enabled++
+		}
+	}
+	s.Equal(1, enabled)
 }

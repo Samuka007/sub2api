@@ -1031,9 +1031,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				// Forward 与错误一起返回的部分结果：流中断前上游已计量的 usage 照常入账，
 				// 避免上游已产生消耗的请求完全漏记（#5148）。failover 错误恒定 result=nil，
 				// 不会走到这里重复计费。
-				if result != nil {
-					submitForwardUsage(result)
-				}
+				submitForwardUsageOnError(result, err, submitForwardUsage)
 				return
 			}
 
@@ -2385,6 +2383,15 @@ func (h *GatewayHandler) maybeLogCompatibilityFallbackMetrics(reqLog *zap.Logger
 		zap.Float64("session_hash_legacy_read_hit_rate", metrics.SessionHashLegacyReadHitRate),
 		zap.Int64("metadata_legacy_fallback_total", metrics.MetadataLegacyFallbackTotal),
 	)
+}
+func submitForwardUsageOnError(result *service.ForwardResult, forwardErr error, submit func(*service.ForwardResult)) bool {
+	if forwardErr == nil {
+		return false
+	}
+	if result != nil && submit != nil {
+		submit(result)
+	}
+	return true
 }
 
 func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task service.UsageRecordTask) {

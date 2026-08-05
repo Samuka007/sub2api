@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -146,6 +147,24 @@ func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *Upd
 	return proxy, nil
 }
 
+func (s *adminServiceImpl) contentModerationUsesProxy(ctx context.Context, proxyID int64) (bool, error) {
+	if s.settingService == nil || s.settingService.settingRepo == nil {
+		return false, nil
+	}
+	raw, err := s.settingService.settingRepo.GetValue(ctx, SettingKeyContentModerationConfig)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get content moderation proxy reference: %w", err)
+	}
+	cfg, err := parseContentModerationConfig(raw)
+	if err != nil {
+		return false, fmt.Errorf("parse content moderation proxy reference: %w", err)
+	}
+	return cfg.ProxyID != nil && *cfg.ProxyID == proxyID, nil
+}
+
 func (s *adminServiceImpl) DeleteProxy(ctx context.Context, id int64) error {
 	count, err := s.proxyRepo.CountAccountsByProxyID(ctx, id)
 	if err != nil {
@@ -153,6 +172,13 @@ func (s *adminServiceImpl) DeleteProxy(ctx context.Context, id int64) error {
 	}
 	if count > 0 {
 		return ErrProxyInUse
+	}
+	usedByModeration, err := s.contentModerationUsesProxy(ctx, id)
+	if err != nil {
+		return err
+	}
+	if usedByModeration {
+		return ErrProxyInUseByContentModeration
 	}
 	return s.proxyRepo.Delete(ctx, id)
 }
@@ -177,6 +203,15 @@ func (s *adminServiceImpl) BatchDeleteProxies(ctx context.Context, ids []int64) 
 				ID:     id,
 				Reason: ErrProxyInUse.Error(),
 			})
+			continue
+		}
+		usedByModeration, err := s.contentModerationUsesProxy(ctx, id)
+		if err != nil {
+			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{ID: id, Reason: err.Error()})
+			continue
+		}
+		if usedByModeration {
+			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{ID: id, Reason: ErrProxyInUseByContentModeration.Error()})
 			continue
 		}
 		if err := s.proxyRepo.Delete(ctx, id); err != nil {

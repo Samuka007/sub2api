@@ -830,7 +830,6 @@ type SecurityConfig struct {
 	ResponseHeaders ResponseHeaderConfig `mapstructure:"response_headers"`
 	CSP             CSPConfig            `mapstructure:"csp"`
 	ProxyFallback   ProxyFallbackConfig  `mapstructure:"proxy_fallback"`
-	ProxyProbe      ProxyProbeConfig     `mapstructure:"proxy_probe"`
 	// TrustForwardedIPForAPIKeyACL enables legacy raw forwarded-header takeover.
 	// When disabled, server.trusted_proxies is authoritative for all client-IP consumers.
 	TrustForwardedIPForAPIKeyACL  bool                                       `mapstructure:"trust_forwarded_ip_for_api_key_acl"`
@@ -947,10 +946,6 @@ type ProxyFallbackConfig struct {
 	// 这些关键路径的代理失败始终返回错误，不会回退直连。
 	// 默认 false：避免因代理配置错误导致服务器真实 IP 泄露。
 	AllowDirectOnError bool `mapstructure:"allow_direct_on_error"`
-}
-
-type ProxyProbeConfig struct {
-	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"` // 已禁用：禁止跳过 TLS 证书验证
 }
 
 type BillingConfig struct {
@@ -2065,7 +2060,6 @@ func setDefaults() {
 	viper.SetDefault("security.response_headers.force_remove", []string{})
 	viper.SetDefault("security.csp.enabled", true)
 	viper.SetDefault("security.csp.policy", DefaultCSPPolicy)
-	viper.SetDefault("security.proxy_probe.insecure_skip_verify", false)
 	viper.SetDefault("security.trust_forwarded_ip_for_api_key_acl", true)
 
 	// Security - disable direct fallback on proxy error

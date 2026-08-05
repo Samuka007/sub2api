@@ -132,7 +132,7 @@
                   <button
                     class="btn btn-primary w-full"
                     :disabled="isSubmitting"
-                    @click="switchToCreateAccountMode"
+                    @click="switchToCreateAccountMode()"
                   >
                     {{ t('auth.oauthFlow.createNewAccount') }}
                   </button>
@@ -155,47 +155,20 @@
             />
           </template>
 
-          <template v-else-if="needsBindLogin">
-            <p class="text-sm text-gray-700 dark:text-gray-300">
-              {{ t('auth.oauthFlow.bindLoginHint', { providerName }) }}
-            </p>
-            <div class="space-y-3">
-              <input
-                v-model="bindLoginEmail"
-                data-testid="dingtalk-bind-login-email"
-                type="email"
-                class="input w-full"
-                :placeholder="t('auth.emailPlaceholder')"
-                :disabled="isSubmitting"
-                @keyup.enter="handleBindLogin"
-              />
-              <input
-                v-model="bindLoginPassword"
-                data-testid="dingtalk-bind-login-password"
-                type="password"
-                class="input w-full"
-                :placeholder="t('auth.passwordPlaceholder')"
-                :disabled="isSubmitting"
-                @keyup.enter="handleBindLogin"
-              />
-              <button
-                data-testid="dingtalk-bind-login-submit"
-                class="btn btn-primary w-full"
-                :disabled="isSubmitting || !bindLoginEmail.trim() || !bindLoginPassword"
-                @click="handleBindLogin"
-              >
-                {{ isSubmitting ? t('common.processing') : t('auth.oauthFlow.logInAndBind') }}
-              </button>
-              <button
-                v-if="canReturnToCreateAccount"
-                class="btn btn-secondary w-full"
-                :disabled="isSubmitting"
-                @click="switchToCreateAccountMode"
-              >
-                {{ t('auth.oauthFlow.useDifferentEmail') }}
-              </button>
-            </div>
-          </template>
+		  <template v-else-if="needsBindLogin">
+			<p class="text-sm text-gray-700 dark:text-gray-300">
+			  {{ t('auth.oauthFlow.bindLoginHint', { providerName }) }}
+			</p>
+			<PendingOAuthBindLoginForm
+			  test-id-prefix="dingtalk"
+			  :initial-email="bindLoginEmail"
+			  :is-submitting="isSubmitting"
+			  :can-return-to-create-account="canReturnToCreateAccount"
+			  :error-message="accountActionError"
+			  @submit="handleBindLogin"
+			  @switch-to-create="switchToCreateAccountMode"
+			/>
+		  </template>
 
           <template v-else-if="needsTotpChallenge">
             <p class="text-sm text-gray-700 dark:text-gray-300">
@@ -242,6 +215,9 @@ import { AuthLayout } from '@/components/layout'
 import PendingOAuthCreateAccountForm, {
   type PendingOAuthCreateAccountPayload
 } from '@/components/auth/PendingOAuthCreateAccountForm.vue'
+import PendingOAuthBindLoginForm, {
+  type PendingOAuthBindLoginPayload
+} from '@/components/auth/PendingOAuthBindLoginForm.vue'
 import { apiClient } from '@/api/client'
 import { useAuthStore, useAppStore } from '@/stores'
 import {
@@ -285,7 +261,6 @@ const needsAdoptionConfirmation = ref(false)
 const pendingAccountAction = ref<'none' | 'choose_account_action' | 'create_account' | 'bind_login'>('none')
 const pendingAccountEmail = ref('')
 const bindLoginEmail = ref('')
-const bindLoginPassword = ref('')
 const legacyPendingOAuthToken = ref('')
 const accountActionError = ref('')
 const canReturnToCreateAccount = ref(false)
@@ -487,7 +462,6 @@ function applyPendingAccountAction(completion: DingTalkPendingActionResponse) {
   if (action === 'choose_account_action') {
     pendingAccountEmail.value = email
     bindLoginEmail.value = email
-    bindLoginPassword.value = ''
     canReturnToCreateAccount.value = false
     return
   }
@@ -500,7 +474,6 @@ function applyPendingAccountAction(completion: DingTalkPendingActionResponse) {
 
   if (action === 'bind_login') {
     bindLoginEmail.value = email
-    bindLoginPassword.value = ''
     canReturnToCreateAccount.value = false
     return
   }
@@ -528,14 +501,13 @@ function applyTotpChallenge(completion: DingTalkPendingActionResponse): boolean 
 function switchToBindLoginMode(nextEmail?: string) {
   pendingAccountAction.value = 'bind_login'
   bindLoginEmail.value = bindLoginEmail.value.trim() || nextEmail?.trim() || pendingAccountEmail.value.trim()
-  bindLoginPassword.value = ''
   accountActionError.value = ''
   canReturnToCreateAccount.value = true
 }
 
-function switchToCreateAccountMode() {
+function switchToCreateAccountMode(nextEmail?: string) {
   pendingAccountAction.value = 'create_account'
-  pendingAccountEmail.value = pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
+  pendingAccountEmail.value = nextEmail?.trim() || pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
   accountActionError.value = ''
 }
 
@@ -706,17 +678,20 @@ async function handleCreateAccount(payload: PendingOAuthCreateAccountPayload) {
   }
 }
 
-async function handleBindLogin() {
+async function handleBindLogin(payload: PendingOAuthBindLoginPayload) {
   accountActionError.value = ''
-  const email = bindLoginEmail.value.trim()
-  const password = bindLoginPassword.value
-  if (!email || !password) return
-
   isSubmitting.value = true
   try {
     const { data } = await apiClient.post<DingTalkPendingActionResponse>('/auth/oauth/pending/bind-login', {
-      email,
-      password,
+      email: payload.email,
+      password: payload.password,
+      ...(payload.turnstileToken ? { turnstile_token: payload.turnstileToken } : {}),
+      ...(payload.tencentCaptchaTicket
+        ? {
+            tencent_captcha_ticket: payload.tencentCaptchaTicket,
+            tencent_captcha_randstr: payload.tencentCaptchaRandstr
+          }
+        : {}),
       ...serializeAdoptionDecision(currentAdoptionDecision())
     })
     await finalizePendingAccountResponse(data)
@@ -800,7 +775,6 @@ onMounted(async () => {
       if (wantsBindExisting) {
         pendingAccountAction.value = 'bind_login'
         bindLoginEmail.value = presetEmail
-        bindLoginPassword.value = ''
         canReturnToCreateAccount.value = true
         isProcessing.value = false
         persistPendingAuthSession(completionRedirect)
