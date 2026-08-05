@@ -161,6 +161,7 @@ docs/*
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/BATCH_IMAGE_MVP.md
+!docs/LANGFUSE_SESSION_GRAPH.md
 !docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
 !docs/legal/
 !docs/legal/*.md
