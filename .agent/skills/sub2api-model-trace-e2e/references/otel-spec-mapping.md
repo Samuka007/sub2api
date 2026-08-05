@@ -11,12 +11,12 @@
 | 一个 Trace 必须保留完整尝试层级 | 本地 fixture 固定 429 后切换账号 200 | 一个根 Trace；`upstream.attempt.1/2` 两个真实 GENERATION 均为根的直接子项，账号和 ERROR/成功状态可区分 |
 | Trace 必须区分客户端与上游内容视角 | OpenAI Chat Completions → Anthropic Messages | 根保存客户端 input/output，attempt 保存转换后 input 与 Anthropic SSE output；上游响应 credential 字段只出现 `[REDACTED]` |
 | 有界内容、多模态和秘密隔离 | 2 KiB Prompt 上限 + Base64 图片 + 分离 canary | 有确定性截断标记和媒体 fingerprint/approx_bytes；请求字段 secret、媒体正文、用户/上游 API Key、上游响应 secret 在真实 Langfuse 中命中数为 0 |
-| 默认内容上限可部署并真实接收 | 启动不覆盖默认值；运行时恢复 1 MiB 后发送 1,040,000 字节正文 | admin GET 的 prompt/response/media 均为 1048576；Langfuse root input 保留 head/tail canary、长度接近上限且无截断标记 |
+| 部署与运行时内容上限可观察并真实生效 | 启动不覆盖 16/8/16 MiB 部署默认；运行时切到 1 MiB 后发送 1,040,000 字节正文 | admin GET 的 prompt/response/media 分别为 16777216/8388608/16777216；Langfuse root input 保留 head/tail canary、长度接近 1 MiB 且无截断标记 |
 | 流式请求正常完成 | 单成功账号返回完整 Anthropic SSE | 客户端 HTTP 200、`text/event-stream`、content/finish/[DONE] 帧；Langfuse 只有一个根 Trace，真实 attempt GENERATION 是根的直接子项，根状态为 `completed` |
 | 异步/批量模型执行必须续接提交 Trace | Gemini Batch API 200 item（一个成功、199 个 provider 失败） | API 200、worker `completed`；同一逻辑 Trace 下 1 个提交根 SPAN、200 个直系 `model.async.execution` GENERATION，API 与 Langfuse 的 `item_id` 均为精确且唯一的 `item-0..199` 集合，fingerprint 均匹配，终态 1 个 `completed` / 199 个 `failed`；媒体 canary 零泄露 |
 | 认证凭据永远不得进入 Trace | 配置 API、客户端 Header、上游请求/响应 | 配置响应不回显 secret；ClickHouse 对本次所有 observation/trace 执行完整 canary 零命中查询 |
 | Trace 必须发送到唯一的自部署 Langfuse 项目 | 本地目标可用 | 只配置 `http://127.0.0.1:3000`；公开 health 版本必须 `>=3.22.0`，并记录 OCI version/revision/digest |
-| 部署与运行时配置必须遵守确定优先级 | 部署默认、运行时小上限、恢复默认、secret 保留与 CAS | 先验证 deployment version 0，再运行时 version 1/2/3；远端明文 HTTP 被拒且不改旧配置，空 secret 保留，过期 version 返回 409 |
+| 部署与运行时配置必须遵守确定优先级 | 部署默认、运行时小上限、运行时 1 MiB 上限、secret 保留与 CAS | 先验证 deployment version 0，再运行时 version 1/2/3；远端明文 HTTP 被拒且不改旧配置，空 secret 保留，过期 version 返回 409 |
 | 观测故障必须 fail-open 且 MVP 不保证补送 | OTLP 端点固定 500 与 1.5 秒延迟 | 两次业务请求均在约 50ms 内返回 200；fixture 分别观测到 `otlp_500>=1`、`slow_exports>=1`，证明 exporter 错误与阻塞不拖住业务路径 |
 
 ## 503、failover、SSE 与异步 batch 的本地执行链

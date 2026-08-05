@@ -1,7 +1,11 @@
+x-e2e-labels: &e2e-labels
+  io.sub2api.modeltrace-e2e.owner: ${E2E_OWNER_ID}
+
 services:
   postgres:
     image: docker.io/postgres:17
     container_name: sub2api-deps-postgres-1
+    labels: *e2e-labels
     environment:
       POSTGRES_USER: sub2api
       POSTGRES_PASSWORD: sub2api
@@ -15,9 +19,14 @@ services:
   redis:
     image: docker.io/redis:7
     container_name: sub2api-deps-redis-1
+    labels: *e2e-labels
     ports: ["16379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 20
+
+networks:
+  default:
+    labels: *e2e-labels
