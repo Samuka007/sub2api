@@ -33,8 +33,6 @@
 - Public API base is derived by stripping path from model-tracing OTLP endpoint (e.g. `.../api/public/otel` → origin).
 - Read-back failure: warn log, do not block request, write all parsed items for the turn.
 - Compact detection only when read-back succeeds.
-- Export helper: `scripts/langfuse_session_export.py` (env `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`; dedupe by `message_id` earliest; optional `--include-ancestors`).
-- `--include-ancestors`: `fork_from_message_id=thread` takes the whole parent line; join drops `chat.fork`; final pass dedupes by `message_id` (keep earliest). Unit tests: `scripts/test_langfuse_session_export.py`.
 
 ### Verification
 
@@ -42,7 +40,6 @@
 - Internal test hooks: `backend/internal/modeltrace/testing_export.go` (`Testing*` only).
 - Run: `cd backend && go test ./internal/modeltrace/... -count=1`
 - Local stack image: `sub2api:model-trace-b4316e25-forkfix` via `/opt/sub2api-stack/compose.yml`.
-- Branching live check: parent unchanged; child emits one `chat.fork` with `fork_from_*`; second child turn does not duplicate fork; `--include-ancestors` export joins parent+child and drops `chat.fork`.
 
 ### Bug found in branching verify
 
@@ -79,16 +76,6 @@
   - child wrote one `chat.fork` with `fork_from_session_id=<parent>` and `fork_from_message_id=thread`
   - child wrote one `chat.compact` on the compaction turn
 
-### Complex scenario harness (nested fork + multi-compact)
-
-- Synthetic: `scripts/complex_conversation_scenarios.py` (`/v1/responses` against local stack).
-- **Real Codex**: `scripts/codex_complex_real_scenarios.py` (app-server fork/turn/compact via proxy `:18080`).
-- **Real Codex 20-turn cross-branch**: `scripts/codex_complex_20turn_scenarios.py`
-  - Topology: A (turns+compact) → fork B → fork C (nested); sibling fork D←A; then cross-back turns on A/B/C. Entirely via `thread/start` (exec sessions are not visible to app-server).
-  - Asserts: fork counts, multi-compact, C genealogy excludes D, D genealogy excludes B/C, ≥20 turns, no export `message_id` dupes.
-  - Artifacts: `tmp/codex_20turn_report.json`, `tmp/codex_20turn_C_ancestors_transcript.md`, `tmp/codex_20turn_D_ancestors_transcript.md`.
-  - Latest: VERDICT PASS (`T20-1784821818-c8ac`). Soft gap: assistant counts lag users on compacted lines; occasional `<turn_aborted>` noise.
-
 ### Credentials
 
 - No real or local test credentials recorded here. Use deployment/runtime config keys `public_key` / `secret_key` only.
@@ -114,7 +101,7 @@
 - HTTP 模型请求与 Responses WebSocket 回合只解析当前捕获的 input/output，并把所有可解析 `chat.*` 事件追加到 OTLP；重复 `message_id` 不在运行时过滤。
 - 模型请求路径不再从 OTLP endpoint 派生 Langfuse Public API 地址，也不请求 `/api/public/traces` 或 `/api/public/observations`。运行时不再依赖 Langfuse 历史、Public API 可用性或读取凭据。
 - 仅客户端明确声明 `request_kind=compaction` 时追加 `chat.compact`；显式 fork 继续追加 `chat.fork`。远端历史不再用于推断压缩或抑制重复 fork marker。
-- `scripts/langfuse_session_export.py` 保持为唯一允许读取 Langfuse Public API 的会话工具；事件抵达后由离线导出按非空 `message_id` 保留最早事件。
+- `scripts/langfuse_session_graph.py` 是唯一会话图与离线导出标准；其 `graph.json`、`assignments.jsonl` 和 `message-objects.jsonl` 共同构成会话导出产物。
 - Responses WebSocket `response.completed`/`response.done` JSON frame 现在归一化其 `response.output`，确保 WS 回合也能生成当前 assistant/tool 会话事件。
 
 ### RED / GREEN 证据
@@ -122,7 +109,7 @@
 - RED：`cd backend && go test ./internal/modeltrace/... -run 'TestExtractConversationDelta_(appendsRepeatedHistory|doesNotInferCompactionFromRemoteHistory)|TestModelTraceConversationHTTPAppendsWithoutLangfusePublicAPIRead|TestModelTraceResponsesWSTurnAppendsWithoutLangfusePublicAPIRead' -count=1`；旧实现观察到 HTTP/WS 各 2 次 Public API GET，重复历史被过滤，并从远端历史推断 compaction。
 - GREEN：`cd backend && go test ./internal/modeltrace/... -run 'TestModelTraceConversation|TestModelTraceResponsesWSTurn' -count=1`，退出 0；fake OTLP server 对任何 Public API GET 返回 405，并断言计数为 0、HTTP/WS 的重复 `u1`/`a1` message ID 均各追加两次、显式 compact/fork span 和 fork metadata 保留。
 - 受影响模块：`cd backend && go test ./internal/modeltrace/... -count=1`，退出 0。
-- 离线导出：`python3 scripts/test_langfuse_session_export.py`，4 项测试通过，包含 earliest-event 去重。
+- 会话图离线验证：`python3 scripts/test_langfuse_session_graph.py`。
 
 ### 剩余验证边界
 

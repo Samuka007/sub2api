@@ -140,11 +140,6 @@ scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 !scripts/
-!scripts/langfuse_session_export.py
-!scripts/test_langfuse_session_export.py
-!scripts/complex_conversation_scenarios.py
-!scripts/codex_complex_real_scenarios.py
-!scripts/codex_complex_20turn_scenarios.py
 .code-review-state
 /openspec/changes/
 code-reviews/
