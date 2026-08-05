@@ -630,6 +630,9 @@ func isURLStart(b byte) bool {
 // bypasses sanitization because "url" is neither a secret key nor a media
 // payload key.
 func scrubURLsInString(value string) string {
+	if !strings.Contains(value, "://") && !strings.Contains(value, "//") {
+		return value
+	}
 	return absoluteURLPattern.ReplaceAllStringFunc(value, sanitizeCapturedURL)
 }
 

@@ -281,6 +281,7 @@ type requestCaptureReadCloser struct {
 	limit     int
 	buf       bytes.Buffer
 	total     int
+	complete  bool
 	onCapture func([]byte)
 }
 
@@ -289,8 +290,8 @@ func (r *requestCaptureReadCloser) setCaptureObserver(onCapture func([]byte)) {
 		return
 	}
 	r.onCapture = onCapture
-	if r.onCapture != nil && r.buf.Len() > 0 {
-		r.onCapture(r.buf.Bytes())
+	if r.complete || r.buf.Len() > 0 {
+		r.notifyCaptureObserver()
 	}
 }
 
@@ -303,11 +304,21 @@ func (r *requestCaptureReadCloser) Read(p []byte) (int, error) {
 			remaining = n
 		}
 		_, _ = r.buf.Write(p[:remaining])
-		if r.onCapture != nil {
-			r.onCapture(r.buf.Bytes())
-		}
+	}
+	if errors.Is(err, io.EOF) {
+		r.complete = true
+		r.notifyCaptureObserver()
 	}
 	return n, err
+}
+
+func (r *requestCaptureReadCloser) notifyCaptureObserver() {
+	if r == nil || r.onCapture == nil {
+		return
+	}
+	onCapture := r.onCapture
+	r.onCapture = nil
+	onCapture(r.buf.Bytes())
 }
 
 func (r *requestCaptureReadCloser) bytesAndTotal() ([]byte, int) {

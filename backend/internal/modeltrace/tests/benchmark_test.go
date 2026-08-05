@@ -3,6 +3,8 @@ package modeltrace_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"io"
 	"net/http"
@@ -31,10 +33,45 @@ func BenchmarkModelTraceDisabled(b *testing.B) { benchmarkModelTraceMode(b, fals
 
 func BenchmarkModelTraceEnabled(b *testing.B) { benchmarkModelTraceMode(b, true) }
 
+func BenchmarkModelTraceCaptureLargeJSON(b *testing.B) {
+	for _, size := range []int{1 << 20, 4 << 20} {
+		size := size
+		b.Run(fmt.Sprintf("plain/%dMiB", size>>20), func(b *testing.B) {
+			benchmarkCaptureJSON(b, size, false)
+		})
+		b.Run(fmt.Sprintf("sensitive/%dMiB", size>>20), func(b *testing.B) {
+			benchmarkCaptureJSON(b, size, true)
+		})
+	}
+}
+
+func benchmarkCaptureJSON(b *testing.B, size int, sensitive bool) {
+	content := strings.Repeat("x", size)
+	if sensitive {
+		content = `https://user:password@example.test/path?token=canary#fragment` + content
+	}
+	raw := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":` + fmt.Sprintf("%q", content) + `}]}`)
+	if !json.Valid(raw) {
+		b.Fatal("benchmark fixture must be valid JSON")
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := modeltrace.TestingCaptureModelContent(raw, len(raw), modeltrace.TestingDefaultPromptBytes, modeltrace.TestingCapturePolicy{})
+		if sensitive && strings.Contains(got, "password") {
+			b.Fatal("credential leaked from captured URL")
+		}
+	}
+}
+
 func benchmarkModelTraceMode(b *testing.B, enabled bool) {
 	gin.SetMode(gin.TestMode)
 	longPromptSize := modeltrace.TestingDefaultPromptBytes - 128
 	longBody := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":"` + strings.Repeat("x", longPromptSize) + `"}]}`)
+	if !json.Valid(longBody) {
+		b.Fatal("long-context benchmark fixture must be valid JSON")
+	}
 	cases := []struct {
 		name        string
 		requestBody []byte
