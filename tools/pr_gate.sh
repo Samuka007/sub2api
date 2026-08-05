@@ -67,6 +67,7 @@ step "Model IQ Compose contract" /bin/bash deploy/tests/model-iq-compose-env-tes
 step "Install GitHub token contract" /bin/bash deploy/tests/install-github-token-test.sh
 step "Model tracing Compose contract" /bin/bash deploy/tests/model-tracing-compose-test.sh
 step "Langfuse deployment contract" /bin/bash deploy/tests/langfuse-deployment-test.sh
+step "Langfuse read isolation contract" /bin/bash deploy/tests/langfuse-read-isolation-test.sh
 
 step "Backend unit tests" make -C backend test-unit
 step "Backend integration tests" make -C backend test-integration

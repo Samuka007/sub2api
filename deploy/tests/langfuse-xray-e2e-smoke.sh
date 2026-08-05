@@ -7,7 +7,7 @@ suffix=$$
 network=sub2api-xray-smoke-$suffix
 portal=xray-portal-$suffix
 bridge=xray-bridge-$suffix
-backend=langfuse-web-$suffix
+backend=langfuse-ingest-$suffix
 tmp_dir=$(mktemp -d)
 
 cleanup() {
@@ -37,7 +37,7 @@ test -n "$xray_image"
 docker pull "$alpine_image" >/dev/null
 docker pull "$xray_image" >/dev/null
 docker network create "$network" >/dev/null
-docker run -d --name "$backend" --network "$network" --network-alias langfuse-web \
+docker run -d --name "$backend" --network "$network" --network-alias langfuse-ingest \
   "$alpine_image" sh -c 'while true; do printf "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nxray-e2e-ok" | nc -l -p 3000; done' >/dev/null
 docker run -d --name "$portal" --network "$network" --network-alias xray-portal \
   -v "$stack/main-server-xray/config.json:/usr/local/etc/xray/config.json:ro" \

@@ -55,6 +55,9 @@ grep -qx 'NEXTAUTH_URL=https://langfuse.example.com' "$stack/.env"
 grep -qx 'LANGFUSE_BIND_IP=127.0.0.1' "$stack/.env"
 test "$(stat -c %a "$stack/.env")" = 600
 test "$(stat -c %a "$stack/clickhouse-config.d/resource-logging.xml")" = 644
+test "$(stat -c %a "$stack/clickhouse-read-proxy-nginx.conf")" = 644
+test "$(stat -c %a "$stack/clickhouse-read-proxy.conf.template")" = 644
+test "$(stat -c %a "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
 test "$(stat -c %a "$stack/clickhouse-users.d/resource-profile.xml")" = 644
 test "$(stat -c %a "$stack/.xray")" = 700
 test "$(stat -c %a "$stack/main-server-xray")" = 700
@@ -63,6 +66,7 @@ test "$(stat -c %a "$stack/main-server-xray/config.json")" = 644
 test "$(stat -c %a "$stack/main-server-xray/.env")" = 600
 jq -e . "$stack/.xray/bridge.json" >/dev/null
 jq -e . "$stack/main-server-xray/config.json" >/dev/null
+grep -q '"redirect": "langfuse-ingest:3000"' "$stack/.xray/bridge.json"
 
 if grep -REn 'GENERATE_ME|__XRAY_[A-Z_]+__' \
   "$stack/.env" "$stack/.xray/bridge.json" "$stack/main-server-xray/config.json"; then
@@ -79,7 +83,7 @@ allowed = ("docker.m.daocloud.io/", "ghcr.nju.edu.cn/")
 digest = re.compile(r"@sha256:[0-9a-f]{64}$")
 for env_path in map(pathlib.Path, sys.argv[1:]):
     for line in env_path.read_text(encoding="utf-8").splitlines():
-        if not line.startswith(("LANGFUSE_WEB_IMAGE=", "LANGFUSE_WORKER_IMAGE=", "POSTGRES_IMAGE=", "CLICKHOUSE_IMAGE=", "MINIO_IMAGE=", "REDIS_IMAGE=", "XRAY_IMAGE=")):
+        if not line.startswith(("LANGFUSE_WEB_IMAGE=", "LANGFUSE_WORKER_IMAGE=", "POSTGRES_IMAGE=", "CLICKHOUSE_IMAGE=", "CLICKHOUSE_READ_PROXY_IMAGE=", "MINIO_IMAGE=", "REDIS_IMAGE=", "XRAY_IMAGE=")):
             continue
         image = line.split("=", 1)[1]
         if not image.startswith(allowed):
@@ -102,7 +106,10 @@ fi
 test "$(sha256sum "$stack/.env")" = "$env_hash"
 
 chmod 600 \
+  "$stack/clickhouse-read-proxy-nginx.conf" \
+  "$stack/clickhouse-read-proxy.conf.template" \
   "$stack/clickhouse-config.d/resource-logging.xml" \
+  "$stack/clickhouse-users.d/langfuse-read.xml" \
   "$stack/clickhouse-users.d/resource-profile.xml"
 sed -i \
   -e 's#^XRAY_IMAGE=.*#XRAY_IMAGE=ghcr.io/xtls/xray-core:26.5.9#' \
@@ -110,15 +117,25 @@ sed -i \
   -e 's#^XRAY_REALITY_TARGET=.*#XRAY_REALITY_TARGET=api.sub2api.com:443#' \
   -e 's/^XRAY_SERVER_ADDRESS=.*/XRAY_SERVER_ADDRESS=192.0.2.10/' \
   "$stack/.env"
-grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET)=' "$stack/.env" >"$tmp_dir/migration-unchanged.before"
+# Simulate an existing deployment created before read isolation was added.
+sed -i \
+  -e '/^CLICKHOUSE_READ_PROXY_IMAGE=/d' \
+  -e '/^CLICKHOUSE_READ_PASSWORD=/d' \
+  "$stack/.env"
+grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET|CLICKHOUSE_READ_PROXY_IMAGE|CLICKHOUSE_READ_PASSWORD)=' "$stack/.env" >"$tmp_dir/migration-unchanged.before"
 (cd "$stack" && ./generate-xray-config.sh) >/dev/null
 test "$(stat -c %a "$stack/clickhouse-config.d/resource-logging.xml")" = 644
+test "$(stat -c %a "$stack/clickhouse-read-proxy-nginx.conf")" = 644
+test "$(stat -c %a "$stack/clickhouse-read-proxy.conf.template")" = 644
+test "$(stat -c %a "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
 test "$(stat -c %a "$stack/clickhouse-users.d/resource-profile.xml")" = 644
 grep -qx 'XRAY_SERVER_PORT=443' "$stack/.env"
 grep -qx 'XRAY_REALITY_TARGET=host.docker.internal:8443' "$stack/.env"
 grep -qx 'XRAY_IMAGE=ghcr.nju.edu.cn/xtls/xray-core:26.5.9@sha256:933c868cbbb1ed632198c3ffeb99454709fa13dbb8c2a6f328d6a9a19e75269c' "$stack/.env"
 grep -qx 'XRAY_SERVER_ADDRESS=192.0.2.10' "$stack/.env"
-grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET)=' "$stack/.env" >"$tmp_dir/migration-unchanged.after"
+grep -qx 'CLICKHOUSE_READ_PROXY_IMAGE=docker.m.daocloud.io/library/nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236' "$stack/.env"
+grep -Eq '^CLICKHOUSE_READ_PASSWORD=[0-9a-f]{48}$' "$stack/.env"
+grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET|CLICKHOUSE_READ_PROXY_IMAGE|CLICKHOUSE_READ_PASSWORD)=' "$stack/.env" >"$tmp_dir/migration-unchanged.after"
 cmp "$tmp_dir/migration-unchanged.before" "$tmp_dir/migration-unchanged.after"
 
 sed -i \

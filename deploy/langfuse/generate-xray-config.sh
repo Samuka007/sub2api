@@ -16,7 +16,10 @@ fi
 # ClickHouse runs as UID 101 and must be able to read these non-secret bind
 # mounts on both fresh installs and existing-deployment upgrades.
 chmod 644 \
+  clickhouse-read-proxy-nginx.conf \
+  clickhouse-read-proxy.conf.template \
   clickhouse-config.d/resource-logging.xml \
+  clickhouse-users.d/langfuse-read.xml \
   clickhouse-users.d/resource-profile.xml
 
 env_value() {
@@ -62,7 +65,9 @@ migrate_default() {
 # Populate Xray settings when upgrading an existing deployment. Xray owns the
 # public 443 socket; normal HTTPS is sent to Caddy through the host gateway.
 default_xray_image=ghcr.nju.edu.cn/xtls/xray-core:26.5.9@sha256:933c868cbbb1ed632198c3ffeb99454709fa13dbb8c2a6f328d6a9a19e75269c
+default_clickhouse_read_proxy_image=docker.m.daocloud.io/library/nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
 ensure_default XRAY_IMAGE "$default_xray_image"
+ensure_default CLICKHOUSE_READ_PROXY_IMAGE "$default_clickhouse_read_proxy_image"
 ensure_default XRAY_SERVER_ADDRESS 38.244.20.220
 ensure_default XRAY_SERVER_PORT 443
 ensure_default XRAY_PORTAL_BIND_IP 172.18.0.1
@@ -76,6 +81,12 @@ ensure_default XRAY_REALITY_TARGET host.docker.internal:8443
 migrate_default XRAY_SERVER_PORT 31590 443
 migrate_default XRAY_REALITY_TARGET api.sub2api.com:443 host.docker.internal:8443
 migrate_default XRAY_IMAGE ghcr.io/xtls/xray-core:26.5.9 "$default_xray_image"
+
+# Existing deployments predate the read-only ClickHouse identity. Give it an
+# independent credential without rotating any credential already in .env.
+if [ -z "$(env_value CLICKHOUSE_READ_PASSWORD)" ]; then
+  set_env_value CLICKHOUSE_READ_PASSWORD "$(openssl rand -hex 24)"
+fi
 
 uuid="$(env_value XRAY_UUID)"
 private_key="$(env_value XRAY_REALITY_PRIVATE_KEY)"
