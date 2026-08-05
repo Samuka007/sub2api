@@ -31,6 +31,9 @@ LANGFUSE_TRACE_ENDPOINT="${LANGFUSE_TRACE_ENDPOINT:-$LANGFUSE_URL/api/public/ote
 LANGFUSE_PK="${LANGFUSE_PK:-pk-lf-local}"
 LANGFUSE_SK="${LANGFUSE_SK:-sk-lf-local}"
 TOTP_ENCRYPTION_KEY="${TOTP_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+DEFAULT_PROMPT_MAX_BYTES=16777216
+DEFAULT_RESPONSE_MAX_BYTES=8388608
+DEFAULT_MEDIA_MAX_BYTES=16777216
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
 fail() { printf '[e2e][ERROR] %s\n' "$*" >&2; exit 1; }
@@ -41,7 +44,8 @@ EXPECTED_BATCH_FAILED_ITEMS=$((BATCH_ITEM_COUNT - 1))
 
 
 clickhouse_query() {
-  docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "$1"
+  curl -fsS --user "${CLICKHOUSE_USER:-clickhouse}:${CLICKHOUSE_PASSWORD:-clickhouse}" \
+    --data-binary "$1" "${CLICKHOUSE_READ_PROXY_URL:-http://127.0.0.1:18123/}"
 }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
@@ -67,7 +71,7 @@ docker rm -f \
   sub2api-deps-postgres-1 sub2api-deps-redis-1 \
   sub2api-langfuse-langfuse-web-1 sub2api-langfuse-langfuse-worker-1 \
   sub2api-langfuse-postgres-1 sub2api-langfuse-redis-1 \
-  sub2api-langfuse-clickhouse-1 sub2api-langfuse-minio-1 \
+  sub2api-langfuse-clickhouse-1 langfuse-clickhouse-read-proxy-1 sub2api-langfuse-minio-1 \
   >/dev/null 2>&1 || true
 docker volume rm -f sub2api-e2e-data \
   langfuse_langfuse_postgres_data langfuse_langfuse_clickhouse_data langfuse_langfuse_clickhouse_logs langfuse_langfuse_minio_data langfuse_langfuse_redis_data \
@@ -75,14 +79,22 @@ docker volume rm -f sub2api-e2e-data \
   >/dev/null 2>&1 || true
 
 # 0.2 端口占用检查
-for p in 3000 15432 16379 18081 8080 5432 6379; do
+for p in 3000 15432 16379 18081 18123 8080 5432 6379; do
   if nc -z 127.0.0.1 "$p" 2>/dev/null; then
     fail "port $p is occupied after e2e-owned cleanup; identify owner with: lsof -i :$p"
   fi
 done
 mkdir -p "$LANGFUSE_DIR" "$DEPS_DIR" "$BIN_DIR"
 cp "$SKILL_DIR/assets/langfuse-compose.yml" "$LANGFUSE_DIR/docker-compose.yml"
+cp "$SKILL_DIR/assets/clickhouse-read-proxy.conf" "$LANGFUSE_DIR/clickhouse-read-proxy.conf"
 ( cd "$LANGFUSE_DIR" && docker-compose up -d )
+CLICKHOUSE_PROXY_HEALTH=""
+for i in {1..60}; do
+  CLICKHOUSE_PROXY_HEALTH=$(clickhouse_query "SELECT 1" 2>/dev/null || true)
+  [[ "$CLICKHOUSE_PROXY_HEALTH" == "1" ]] && break
+  sleep 1
+done
+[[ "$CLICKHOUSE_PROXY_HEALTH" == "1" ]] || fail "ClickHouse read proxy health check failed"
 for i in {1..60}; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$LANGFUSE_URL/api/public/health" || true)
   [[ "$code" == "200" ]] && break
@@ -128,6 +140,8 @@ BATCH_MEDIA_CANARY="e2e-batch-media-$(openssl rand -hex 16)"
 BATCH_MEDIA_CANARY_B64=$(printf '%s' "$BATCH_MEDIA_CANARY" | openssl base64 -A)
 rm -rf "$GEMINI_TLS_DIR"
 mkdir -p "$GEMINI_TLS_DIR"
+printf '%s' "$GEMINI_BATCH_API_KEY" >"$GEMINI_TLS_DIR/gemini-api-key"
+chmod 600 "$GEMINI_TLS_DIR/gemini-api-key"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=sub2api-e2e-ca' \
   -keyout "$GEMINI_TLS_DIR/ca.key" -out "$GEMINI_TLS_DIR/ca.crt" >/dev/null 2>&1
@@ -144,7 +158,7 @@ openssl verify -CAfile "$GEMINI_TLS_DIR/ca.crt" "$GEMINI_TLS_DIR/server.crt" >/d
 log "starting deterministic Anthropic failover fixture"
 colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e-upstream \
   --network host \
-  -e E2E_GEMINI_API_KEY="$GEMINI_BATCH_API_KEY" \
+  -e E2E_GEMINI_API_KEY_FILE=/tls/gemini-api-key \
   -e E2E_BATCH_MEDIA_CANARY="$BATCH_MEDIA_CANARY" \
   -e E2E_TLS_CERT_FILE=/tls/server.crt \
   -e E2E_TLS_KEY_FILE=/tls/server.key \
@@ -271,15 +285,18 @@ log "verifying runtime model tracing configuration"
 CONFIG_URL="http://localhost:8080/api/v1/admin/model-tracing/config"
 
 DEPLOYMENT_CONFIG=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$CONFIG_URL")
-echo "$DEPLOYMENT_CONFIG" | jq -e '
+echo "$DEPLOYMENT_CONFIG" | jq -e \
+  --argjson prompt_max "$DEFAULT_PROMPT_MAX_BYTES" \
+  --argjson response_max "$DEFAULT_RESPONSE_MAX_BYTES" \
+  --argjson media_max "$DEFAULT_MEDIA_MAX_BYTES" '
   .code == 0 and
   .data.source == "deployment" and
   .data.enabled == true and
   .data.has_secret == true and
   .data.config_version == 0 and
-  .data.prompt_max_bytes == 1048576 and
-  .data.response_max_bytes == 1048576 and
-  .data.media_max_bytes == 1048576 and
+  .data.prompt_max_bytes == $prompt_max and
+  .data.response_max_bytes == $response_max and
+  .data.media_max_bytes == $media_max and
   (.data | has("secret_key") | not) and
   (.data | has("secret_key_encrypted") | not)
 ' >/dev/null || fail "deployment model tracing config is not public or effective"
@@ -441,33 +458,39 @@ DISABLED_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
   -o /dev/null -w '%{http_code}')
 [[ "$DISABLED_CODE" == "401" ]] || fail "disabled-key candidate returned HTTP $DISABLED_CODE, want 401"
 
-# 6.1 小上限截断完成后恢复默认 1 MiB，并发送接近但不超过上限的真实 Prompt。
-log "restoring runtime limits to the 1 MiB deployment defaults"
+# 6.1 小上限截断完成后恢复 16/8/16 MiB 部署默认值，并发送接近 Prompt 上限的真实请求。
+log "restoring runtime limits to the 16/8/16 MiB deployment defaults"
 DEFAULT_LIMIT_CONFIG=$(jq -nc \
   --arg endpoint "$LANGFUSE_TRACE_ENDPOINT" \
   --arg public_key "$LANGFUSE_PK" \
-  '{expected_config_version:2,enabled:true,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:1048576,response_max_bytes:1048576,media_max_bytes:1048576,capture_media_content:false}')
+  --argjson prompt_max "$DEFAULT_PROMPT_MAX_BYTES" \
+  --argjson response_max "$DEFAULT_RESPONSE_MAX_BYTES" \
+  --argjson media_max "$DEFAULT_MEDIA_MAX_BYTES" \
+  '{expected_config_version:2,enabled:true,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:$prompt_max,response_max_bytes:$response_max,media_max_bytes:$media_max,capture_media_content:false}')
 DEFAULT_LIMIT_RESPONSE=$(curl -fsS -X PUT \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "$DEFAULT_LIMIT_CONFIG" "$CONFIG_URL")
-echo "$DEFAULT_LIMIT_RESPONSE" | jq -e '
+echo "$DEFAULT_LIMIT_RESPONSE" | jq -e \
+  --argjson prompt_max "$DEFAULT_PROMPT_MAX_BYTES" \
+  --argjson response_max "$DEFAULT_RESPONSE_MAX_BYTES" \
+  --argjson media_max "$DEFAULT_MEDIA_MAX_BYTES" '
   .data.source == "runtime" and
   .data.has_secret == true and
   .data.config_version == 3 and
-  .data.prompt_max_bytes == 1048576 and
-  .data.response_max_bytes == 1048576 and
-  .data.media_max_bytes == 1048576 and
+  .data.prompt_max_bytes == $prompt_max and
+  .data.response_max_bytes == $response_max and
+  .data.media_max_bytes == $media_max and
   (.data | has("secret_key") | not) and
   (.data | has("secret_key_encrypted") | not)
-' >/dev/null || fail "1 MiB runtime limits were not applied"
-[[ "$DEFAULT_LIMIT_RESPONSE" != *"$LANGFUSE_SK"* ]] || fail "1 MiB runtime update response leaked secret material"
+' >/dev/null || fail "16/8/16 MiB runtime limits were not applied"
+[[ "$DEFAULT_LIMIT_RESPONSE" != *"$LANGFUSE_SK"* ]] || fail "default runtime update response leaked secret material"
 
-LARGE_PROMPT_TEXT_BYTES=1040000
+LARGE_PROMPT_TEXT_BYTES=16760000
 LARGE_PROMPT_HEAD="e2e-near-limit-head-$RUN_ID"
 LARGE_PROMPT_TAIL="e2e-near-limit-tail-$RUN_ID"
 LARGE_REQUEST_FILE="$REPO_ROOT/.e2e-tmp/near-limit-request.json"
-LARGE_REQUEST_BYTES=$(python3 -c 'import json,sys; path,session,head,tail,size=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5]); content=head+("L"*(size-len(head)-len(tail)))+tail; raw=json.dumps({"model":"gpt-4","messages":[{"role":"user","content":content}],"session_id":session,"stream":False},separators=(",",":")).encode(); assert len(content.encode()) == size and len(raw) <= 1048576; open(path,"wb").write(raw); print(len(raw))' "$LARGE_REQUEST_FILE" "$LARGE_SESSION_ID" "$LARGE_PROMPT_HEAD" "$LARGE_PROMPT_TAIL" "$LARGE_PROMPT_TEXT_BYTES")
-(( LARGE_REQUEST_BYTES <= 1048576 )) || fail "near-limit request body unexpectedly exceeds 1 MiB: $LARGE_REQUEST_BYTES"
+LARGE_REQUEST_BYTES=$(python3 -c 'import json,sys; path,session,head,tail,size,limit=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5]),int(sys.argv[6]); content=head+("L"*(size-len(head)-len(tail)))+tail; raw=json.dumps({"model":"gpt-4","messages":[{"role":"user","content":content}],"session_id":session,"stream":False},separators=(",",":")).encode(); assert len(content.encode()) == size and len(raw) <= limit; open(path,"wb").write(raw); print(len(raw))' "$LARGE_REQUEST_FILE" "$LARGE_SESSION_ID" "$LARGE_PROMPT_HEAD" "$LARGE_PROMPT_TAIL" "$LARGE_PROMPT_TEXT_BYTES" "$DEFAULT_PROMPT_MAX_BYTES")
+(( LARGE_REQUEST_BYTES <= DEFAULT_PROMPT_MAX_BYTES )) || fail "near-limit request body exceeds the 16 MiB prompt limit: $LARGE_REQUEST_BYTES"
 LARGE_CODE=$(curl -sS -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $APIKEY" \
@@ -657,7 +680,10 @@ apply_runtime_tracing_config() {
     --argjson enabled "$enabled" \
     --arg endpoint "$endpoint" \
     --arg public_key "$LANGFUSE_PK" \
-    '{expected_config_version:$expected,enabled:$enabled,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:1048576,response_max_bytes:1048576,media_max_bytes:1048576,capture_media_content:false}')
+    --argjson prompt_max "$DEFAULT_PROMPT_MAX_BYTES" \
+    --argjson response_max "$DEFAULT_RESPONSE_MAX_BYTES" \
+    --argjson media_max "$DEFAULT_MEDIA_MAX_BYTES" \
+    '{expected_config_version:$expected,enabled:$enabled,endpoint:$endpoint,public_key:$public_key,prompt_max_bytes:$prompt_max,response_max_bytes:$response_max,media_max_bytes:$media_max,capture_media_content:false}')
   response=$(curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "$payload" "$CONFIG_URL")
   echo "$response" | jq -e --argjson version "$next_version" --argjson enabled "$enabled" --arg endpoint "$endpoint" '
     .data.config_version == $version and .data.enabled == $enabled and .data.endpoint == $endpoint and
@@ -876,6 +902,8 @@ docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api \
   -c "UPDATE api_keys SET key='$BATCH_APIKEY' WHERE name='e2e-batch-key';" >/dev/null
 BATCH_API_KEY_ID=$(docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc \
   "SELECT id FROM api_keys WHERE name='e2e-batch-key' LIMIT 1")
+BATCH_USER_ID=$(docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -tAc \
+  "SELECT user_id FROM api_keys WHERE id=$BATCH_API_KEY_ID")
 BATCH_ACCOUNT_PAYLOAD=$(jq -nc --argjson group_id "$BATCH_GROUP_ID" --arg api_key "$GEMINI_BATCH_API_KEY" '{
   name:"e2e-gemini-batch-account", platform:"gemini", type:"apikey", concurrency:1, priority:100,
   group_ids:[$group_id], credentials:{api_key:$api_key,model_mapping:{"gemini-2.5-flash-image":"gemini-2.5-flash-image"}}, extra:{}
@@ -1058,7 +1086,7 @@ ALL_FAIL_CHILDREN=$(clickhouse_query "SELECT count() FROM observations WHERE tra
   || fail "all-attempts-fail trace mismatch: observations=$ALL_FAIL_OBS_COUNT generations=$ALL_FAIL_GEN_COUNT error_generations=$ALL_FAIL_ERROR_GENS error_root=$ALL_FAIL_ERROR_ROOT unfinished=$ALL_FAIL_UNFINISHED children=$ALL_FAIL_CHILDREN"
 
 
-# 8.4 默认 1 MiB：Langfuse 必须收到接近上限的完整 Prompt，且没有意外截断。
+# 8.4 默认 16 MiB Prompt：Langfuse 必须收到接近上限的完整内容，且没有意外截断。
 LARGE_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE metadata['request_id'] = '$LARGE_REQUEST_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
 [[ -n "$LARGE_TRACE_ID" ]] || fail "near-limit request did not export a trace"
 LARGE_TRACE_COUNT=$(clickhouse_query "SELECT count() FROM traces WHERE metadata['request_id'] = '$LARGE_REQUEST_ID' FORMAT TabSeparated")
@@ -1072,8 +1100,8 @@ LARGE_INPUT_BYTES=$(echo "$LARGE_INPUT_ROW" | cut -f1)
 LARGE_HEAD_MATCH=$(echo "$LARGE_INPUT_ROW" | cut -f2)
 LARGE_TAIL_MATCH=$(echo "$LARGE_INPUT_ROW" | cut -f3)
 LARGE_TRUNCATED_MATCH=$(echo "$LARGE_INPUT_ROW" | cut -f4)
-(( LARGE_INPUT_BYTES >= LARGE_PROMPT_TEXT_BYTES && LARGE_INPUT_BYTES <= 1048576 )) \
-  || fail "Langfuse near-limit input length out of range: stored=$LARGE_INPUT_BYTES prompt=$LARGE_PROMPT_TEXT_BYTES limit=1048576"
+(( LARGE_INPUT_BYTES >= LARGE_PROMPT_TEXT_BYTES && LARGE_INPUT_BYTES <= DEFAULT_PROMPT_MAX_BYTES )) \
+  || fail "Langfuse near-limit input length out of range: stored=$LARGE_INPUT_BYTES prompt=$LARGE_PROMPT_TEXT_BYTES limit=$DEFAULT_PROMPT_MAX_BYTES"
 [[ "$LARGE_HEAD_MATCH" != "0" && "$LARGE_TAIL_MATCH" != "0" && "$LARGE_TRUNCATED_MATCH" == "0" ]] \
   || fail "Langfuse near-limit input lost a canary or was unexpectedly truncated: head=$LARGE_HEAD_MATCH tail=$LARGE_TAIL_MATCH truncated=$LARGE_TRUNCATED_MATCH"
 
@@ -1191,6 +1219,13 @@ done
 BATCH_TRACE_ID=$(clickhouse_query "SELECT id FROM traces WHERE metadata['task_id'] = '$BATCH_ID' AND metadata['request_id'] = '$BATCH_REQUEST_ID' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparated" 2>/dev/null || true)
 [[ -n "$BATCH_TRACE_ID" ]] || fail "batch request did not export a continued trace"
 BATCH_TRACE_COUNT=$(clickhouse_query "SELECT uniqExact(id) FROM traces WHERE metadata['task_id'] = '$BATCH_ID' AND metadata['request_id'] = '$BATCH_REQUEST_ID' FORMAT TabSeparated")
+BATCH_TRACE_IDENTITY=$(clickhouse_query "SELECT user_id, metadata['api_key_id'], metadata['group_id'] FROM traces WHERE id = '$BATCH_TRACE_ID' FORMAT TabSeparated")
+IFS=$'\t' read -r BATCH_TRACE_USER_ID BATCH_TRACE_API_KEY_ID BATCH_TRACE_GROUP_ID <<<"$BATCH_TRACE_IDENTITY"
+[[ "$BATCH_TRACE_USER_ID" == "$BATCH_USER_ID" && "$BATCH_TRACE_API_KEY_ID" == "$BATCH_API_KEY_ID" && "$BATCH_TRACE_GROUP_ID" == "$BATCH_GROUP_ID" ]] \
+  || fail "batch root identity mismatch: user=$BATCH_TRACE_USER_ID api_key=$BATCH_TRACE_API_KEY_ID group=$BATCH_TRACE_GROUP_ID"
+BATCH_GENERATION_IDENTITY_COUNT=$(clickhouse_query "SELECT countIf(name = 'model.async.execution' AND type = 'GENERATION' AND metadata['account_id'] = '$BATCH_ACCOUNT_ID' AND metadata['api_key_id'] = '$BATCH_API_KEY_ID' AND metadata['group_id'] = '$BATCH_GROUP_ID') FROM observations WHERE trace_id = '$BATCH_TRACE_ID' FORMAT TabSeparated")
+[[ "$BATCH_GENERATION_IDENTITY_COUNT" == "$BATCH_ITEM_COUNT" ]] \
+  || fail "batch Generation identity mismatch: matched=$BATCH_GENERATION_IDENTITY_COUNT expected=$BATCH_ITEM_COUNT account=$BATCH_ACCOUNT_ID api_key=$BATCH_API_KEY_ID group=$BATCH_GROUP_ID"
 BATCH_OBS_ROW=$(clickhouse_query "SELECT count(), countIf(name = 'model.request' AND type = 'SPAN'), countIf(name = 'model.async.execution' AND type = 'GENERATION'), countIf(name = 'model.async.execution' AND type = 'GENERATION' AND toString(parent_observation_id) = (SELECT id FROM observations WHERE trace_id = '$BATCH_TRACE_ID' AND name = 'model.request' AND type = 'SPAN' LIMIT 1)), countIf(name = 'model.async.execution' AND JSONExtractString(metadata['attributes'], 'modeltrace.async.continuation_matched') = 'true'), countIf(name = 'model.async.execution' AND JSONExtractString(metadata['attributes'], 'modeltrace.async.status') = 'completed'), countIf(name = 'model.async.execution' AND JSONExtractString(metadata['attributes'], 'modeltrace.async.status') = 'failed'), countIf(end_time IS NULL), countIf(name = 'model.async.execution' AND metadata['item_id'] = ''), uniqExactIf(metadata['item_id'], name = 'model.async.execution'), arraySort(groupUniqArrayIf(metadata['item_id'], name = 'model.async.execution')) = arraySort(arrayMap(i -> concat('item-', toString(i)), range($BATCH_ITEM_COUNT))) FROM observations WHERE trace_id = '$BATCH_TRACE_ID' FORMAT TabSeparated")
 BATCH_OBS_COUNT=$(echo "$BATCH_OBS_ROW" | cut -f1)
 BATCH_ROOT_COUNT=$(echo "$BATCH_OBS_ROW" | cut -f2)
@@ -1228,7 +1263,7 @@ log "http statuses: langfuse=200 sub2api=200 anonymous=$ANON_CODE unknown=$UNKNO
 log "session grouping passed: session=$SHARED_SESSION_ID traces=$SHARED_SESSION_TRACES cache_only_empty_session=$CACHE_EMPTY_SESSION_COUNT"
 log "failover trace passed: trace=$FAILOVER_TRACE_ID observations=$FAILOVER_OBS_COUNT generations=$FAILOVER_GEN_COUNT children=$FAILOVER_CHILDREN"
 log "all-attempts-fail trace passed: trace=$ALL_FAIL_TRACE_ID observations=$ALL_FAIL_OBS_COUNT generations=$ALL_FAIL_GEN_COUNT children=$ALL_FAIL_CHILDREN"
-log "near-limit trace passed: trace=$LARGE_TRACE_ID observations=$LARGE_OBS_COUNT generations=$LARGE_GEN_COUNT request_bytes=$LARGE_REQUEST_BYTES stored_input_bytes=$LARGE_INPUT_BYTES limit=1048576 truncated=0"
+log "near-limit trace passed: trace=$LARGE_TRACE_ID observations=$LARGE_OBS_COUNT generations=$LARGE_GEN_COUNT request_bytes=$LARGE_REQUEST_BYTES stored_input_bytes=$LARGE_INPUT_BYTES limit=$DEFAULT_PROMPT_MAX_BYTES truncated=0"
 log "stream trace passed: trace=$STREAM_TRACE_ID observations=$STREAM_OBS_COUNT generations=$STREAM_GEN_COUNT direct_attempt_children=$STREAM_CHILD_MATCH status=completed"
 log "config snapshot and export fail-open passed: in_flight_trace=$HOLD_TRACE_ID slow_business_ms=$SLOW_ELAPSED_MS"
 log "batch trace passed at configured scale: trace=$BATCH_TRACE_ID observations=$BATCH_OBS_COUNT generations=$BATCH_GEN_COUNT direct_async_children=$BATCH_DIRECT_CHILDREN unique_item_ids=$BATCH_UNIQUE_ITEM_IDS completed=1 failed=$EXPECTED_BATCH_FAILED_ITEMS status=$BATCH_STATUS"

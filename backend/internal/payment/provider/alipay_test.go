@@ -11,7 +11,56 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/smartwalle/alipay/v3"
+	"github.com/stretchr/testify/require"
 )
+
+func TestAlipayRefundRequestIDIsDeterministicAndAmountScoped(t *testing.T) {
+	first := alipayRefundRequestID("sub2_order_1", "10.00")
+	require.Equal(t, first, alipayRefundRequestID("sub2_order_1", "10.00"))
+	require.NotEqual(t, first, alipayRefundRequestID("sub2_order_1", "9.00"))
+	require.NotEqual(t, first, alipayRefundRequestID("sub2_order_2", "10.00"))
+	require.LessOrEqual(t, len(first), 64)
+}
+
+func TestAlipayRefundUsesDeterministicRequestID(t *testing.T) {
+	previous := alipayTradeRefund
+	t.Cleanup(func() { alipayTradeRefund = previous })
+	var captured alipay.TradeRefund
+	alipayTradeRefund = func(_ context.Context, _ *alipay.Client, param alipay.TradeRefund) (*alipay.TradeRefundRsp, error) {
+		captured = param
+		return &alipay.TradeRefundRsp{FundChange: alipayFundChangeYes}, nil
+	}
+	provider := &Alipay{client: &alipay.Client{}}
+	req := payment.RefundRequest{OrderID: "sub2_order_1", Amount: "10.00", Reason: "test"}
+	result, err := provider.Refund(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, payment.ProviderStatusSuccess, result.Status)
+	require.Equal(t, alipayRefundRequestID(req.OrderID, req.Amount), result.RefundID)
+	require.Equal(t, req.OrderID, captured.OutTradeNo)
+	require.Equal(t, req.Amount, captured.RefundAmount)
+	require.Equal(t, req.Reason, captured.RefundReason)
+	require.Equal(t, result.RefundID, captured.OutRequestNo)
+}
+
+func TestAlipayQueryRefundUsesOriginalRequestID(t *testing.T) {
+	previous := alipayTradeFastPayRefundQuery
+	t.Cleanup(func() { alipayTradeFastPayRefundQuery = previous })
+	var captured alipay.TradeFastPayRefundQuery
+	alipayTradeFastPayRefundQuery = func(_ context.Context, _ *alipay.Client, param alipay.TradeFastPayRefundQuery) (*alipay.TradeFastPayRefundQueryRsp, error) {
+		captured = param
+		return &alipay.TradeFastPayRefundQueryRsp{
+			Error:        alipay.Error{Code: alipay.CodeSuccess},
+			RefundStatus: "REFUND_SUCCESS",
+		}, nil
+	}
+	provider := &Alipay{client: &alipay.Client{}}
+	req := payment.RefundQueryRequest{OrderID: "sub2_order_1", Amount: "10.00"}
+	result, err := provider.QueryRefund(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, payment.ProviderStatusSuccess, result.Status)
+	require.Equal(t, alipayRefundRequestID(req.OrderID, req.Amount), captured.OutRequestNo)
+	require.Equal(t, req.OrderID, captured.OutTradeNo)
+}
 
 func TestIsTradeNotExist(t *testing.T) {
 	t.Parallel()

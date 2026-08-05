@@ -20,6 +20,9 @@ func contentModerationStatus(decision *service.ContentModerationDecision) int {
 }
 
 func contentModerationErrorCode(decision *service.ContentModerationDecision) string {
+	if decision != nil && decision.Action == service.ContentModerationActionError {
+		return "content_moderation_unavailable"
+	}
 	return "content_policy_violation"
 }
 

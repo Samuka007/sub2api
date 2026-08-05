@@ -20,10 +20,12 @@ func NewContentModerationHandler(svc *service.ContentModerationService) *Content
 }
 
 type contentModerationConfigRequest struct {
-	Enabled              *bool               `json:"enabled"`
-	Mode                 *string             `json:"mode"`
-	BaseURL              *string             `json:"base_url"`
-	Model                *string             `json:"model"`
+	Enabled *bool   `json:"enabled"`
+	Mode    *string `json:"mode"`
+	BaseURL *string `json:"base_url"`
+	Model   *string `json:"model"`
+	// 审计请求使用的代理服务器：null 不修改；0 清除（直连）；>0 指定代理。
+	ProxyID              *int64              `json:"proxy_id"`
 	APIKey               *string             `json:"api_key"`
 	APIKeys              *[]string           `json:"api_keys"`
 	APIKeysMode          string              `json:"api_keys_mode"`
@@ -61,6 +63,7 @@ type contentModerationAPIKeyTestRequest struct {
 	BaseURL   string   `json:"base_url"`
 	Model     string   `json:"model"`
 	TimeoutMS int      `json:"timeout_ms"`
+	ProxyID   *int64   `json:"proxy_id"`
 	Prompt    string   `json:"prompt"`
 	Images    []string `json:"images"`
 }
@@ -89,6 +92,7 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 		Mode:                           req.Mode,
 		BaseURL:                        req.BaseURL,
 		Model:                          req.Model,
+		ProxyID:                        req.ProxyID,
 		APIKey:                         req.APIKey,
 		APIKeys:                        req.APIKeys,
 		APIKeysMode:                    req.APIKeysMode,
@@ -136,6 +140,7 @@ func (h *ContentModerationHandler) TestAPIKeys(c *gin.Context) {
 		BaseURL:   req.BaseURL,
 		Model:     req.Model,
 		TimeoutMS: req.TimeoutMS,
+		ProxyID:   req.ProxyID,
 		Prompt:    req.Prompt,
 		Images:    req.Images,
 	})

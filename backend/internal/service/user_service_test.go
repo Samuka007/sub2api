@@ -26,6 +26,9 @@ type mockUserRepo struct {
 	updateBalanceErr        error
 	updateBalanceFn         func(ctx context.Context, id int64, amount float64) error
 	deductBalanceFn         func(ctx context.Context, id int64, amount float64) error
+	reserveRefundBalanceFn  func(ctx context.Context, id int64, amount float64) (float64, error)
+	captureRefundBalanceFn  func(ctx context.Context, id int64, amount float64) error
+	releaseRefundBalanceFn  func(ctx context.Context, id int64, amount float64) error
 	getByIDUser             *User
 	getByIDErr              error
 	identities              []UserAuthIdentityRecord
@@ -200,6 +203,27 @@ func (m *mockUserRepo) UpdateUserLastActiveAt(_ context.Context, userID int64, a
 func (m *mockUserRepo) DeductBalance(ctx context.Context, id int64, amount float64) error {
 	if m.deductBalanceFn != nil {
 		return m.deductBalanceFn(ctx, id, amount)
+	}
+	return nil
+}
+
+func (m *mockUserRepo) ReserveRefundBalance(ctx context.Context, id int64, amount float64) (float64, error) {
+	if m.reserveRefundBalanceFn != nil {
+		return m.reserveRefundBalanceFn(ctx, id, amount)
+	}
+	return amount, nil
+}
+
+func (m *mockUserRepo) CaptureRefundBalance(ctx context.Context, id int64, amount float64) error {
+	if m.captureRefundBalanceFn != nil {
+		return m.captureRefundBalanceFn(ctx, id, amount)
+	}
+	return nil
+}
+
+func (m *mockUserRepo) ReleaseRefundBalance(ctx context.Context, id int64, amount float64) error {
+	if m.releaseRefundBalanceFn != nil {
+		return m.releaseRefundBalanceFn(ctx, id, amount)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	entdialect "entgo.io/ent/dialect"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
 	"github.com/Wei-Shaw/sub2api/ent/authidentity"
@@ -855,6 +856,165 @@ func (r *userRepository) DeductBalance(ctx context.Context, id int64, amount flo
 	}
 	if n == 0 {
 		return service.ErrUserNotFound
+	}
+	return nil
+}
+
+// ReserveRefundBalance atomically moves available balance into frozen_balance.
+// The caller owns the transaction that also records the refund reservation.
+func (r *userRepository) ReserveRefundBalance(ctx context.Context, id int64, amount float64) (float64, error) {
+	if amount < 0 {
+		return 0, fmt.Errorf("refund reservation amount must be nonnegative")
+	}
+	client := clientFromContext(ctx, r.client)
+	if client.Driver().Dialect() == entdialect.Postgres {
+		return reserveRefundBalancePostgres(ctx, client, id, amount)
+	}
+	const updateSQL = `
+		UPDATE users
+		SET balance = balance - $1,
+			frozen_balance = COALESCE(frozen_balance, 0) + $1,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2 AND deleted_at IS NULL AND balance = $3
+	`
+	const maxReservationAttempts = 8
+	for attempt := 0; attempt < maxReservationAttempts; attempt++ {
+		balance, err := queryRefundReservableBalance(ctx, client, id)
+		if err != nil {
+			return 0, err
+		}
+		reserved := amount
+		if balance <= 0 {
+			reserved = 0
+		} else if balance < amount {
+			reserved = balance
+		}
+		if reserved == 0 {
+			return 0, nil
+		}
+		result, err := client.ExecContext(ctx, updateSQL, reserved, id, balance)
+		if err != nil {
+			return 0, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if affected == 1 {
+			return reserved, nil
+		}
+		if affected > 1 {
+			return 0, fmt.Errorf("refund reservation updated %d users", affected)
+		}
+		if attempt == maxReservationAttempts-1 {
+			return 0, fmt.Errorf("refund reservation did not stabilize after %d attempts", maxReservationAttempts)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Duration(1<<attempt) * time.Millisecond):
+		}
+	}
+	return 0, fmt.Errorf("refund reservation did not stabilize after %d attempts", maxReservationAttempts)
+}
+
+func reserveRefundBalancePostgres(ctx context.Context, client *dbent.Client, id int64, amount float64) (_ float64, err error) {
+	const query = `
+		WITH target AS (
+			SELECT id,
+				CASE WHEN balance <= 0 THEN 0 WHEN balance < $1 THEN balance ELSE $1 END AS reserved
+			FROM users
+			WHERE id = $2 AND deleted_at IS NULL
+			FOR UPDATE
+		)
+		UPDATE users AS u
+		SET balance = u.balance - target.reserved,
+			frozen_balance = COALESCE(u.frozen_balance, 0) + target.reserved,
+			updated_at = CURRENT_TIMESTAMP
+		FROM target
+		WHERE u.id = target.id
+		RETURNING target.reserved
+	`
+	rows, err := client.QueryContext(ctx, query, amount, id)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	if !rows.Next() {
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return 0, rowsErr
+		}
+		return 0, service.ErrUserNotFound
+	}
+	var reserved float64
+	if err := rows.Scan(&reserved); err != nil {
+		return 0, err
+	}
+	return reserved, rows.Err()
+}
+
+func queryRefundReservableBalance(ctx context.Context, client *dbent.Client, id int64) (_ float64, err error) {
+	rows, err := client.QueryContext(ctx, `SELECT balance FROM users WHERE id = $1 AND deleted_at IS NULL`, id)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	if !rows.Next() {
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return 0, rowsErr
+		}
+		return 0, service.ErrUserNotFound
+	}
+	var balance float64
+	if err := rows.Scan(&balance); err != nil {
+		return 0, err
+	}
+	return balance, rows.Err()
+}
+
+// CaptureRefundBalance consumes a previously reserved refund balance.
+func (r *userRepository) CaptureRefundBalance(ctx context.Context, id int64, amount float64) error {
+	return r.updateRefundReservation(ctx, id, amount, false)
+}
+
+// ReleaseRefundBalance returns a previously reserved refund balance to the user.
+func (r *userRepository) ReleaseRefundBalance(ctx context.Context, id int64, amount float64) error {
+	return r.updateRefundReservation(ctx, id, amount, true)
+}
+
+func (r *userRepository) updateRefundReservation(ctx context.Context, id int64, amount float64, release bool) error {
+	if amount < 0 {
+		return fmt.Errorf("refund reservation amount must be nonnegative")
+	}
+	balanceDelta := 0.0
+	if release {
+		balanceDelta = amount
+	}
+	const updateSQL = `
+		UPDATE users
+		SET balance = balance + $1,
+			frozen_balance = COALESCE(frozen_balance, 0) - $2,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $3 AND deleted_at IS NULL AND COALESCE(frozen_balance, 0) >= $2
+	`
+	result, err := clientFromContext(ctx, r.client).ExecContext(ctx, updateSQL, balanceDelta, amount, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("refund reserved balance is insufficient")
 	}
 	return nil
 }

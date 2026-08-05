@@ -133,13 +133,13 @@ E2E 使用完整端点 `http://127.0.0.1:3000/api/public/otel/v1/traces`。`--ne
 
 ## 默认内容上限门禁
 
-sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_content=false`，**不设置**三个 `MODEL_TRACING_*_MAX_BYTES` 环境变量。管理员 GET 首次必须返回部署来源且 `prompt_max_bytes`、`response_max_bytes`、`media_max_bytes` 均为 `1048576`。
+sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_content=false`，**不设置**三个 `MODEL_TRACING_*_MAX_BYTES` 环境变量。管理员 GET 首次必须返回部署来源，且 `prompt_max_bytes=16777216`、`response_max_bytes=8388608`、`media_max_bytes=16777216`。
 
 完整 smoke 随后按 CAS 版本执行两次运行时切换：
 1. 切到 `prompt=2048`、`response=3072`、`media=4096`，验证超限文本的确定性截断标记、默认媒体 descriptor 和 credential/media canary 零泄露。
-2. 切回三个 `1048576`，生成 1,040,000 字节正文（完整 JSON 请求体仍不超过 1 MiB），经真实 OTLP 写入 Langfuse；ClickHouse 必须同时保留 head/tail canary、存储长度在 `[1040000, 1048576]`，且不存在截断标记。
+2. 恢复 `prompt=16777216`、`response=8388608`、`media=16777216`，生成 16,760,000 字节正文（完整 JSON 请求体不超过 16 MiB），经真实 OTLP 写入 Langfuse；ClickHouse 必须同时保留 head/tail canary、存储长度在 `[16760000, 16777216]`，且不存在截断标记。
 
-这两步验证的是“部署默认可观察 + 运行时小上限真实生效 + 恢复默认后接近上限可真实接收”，不能用静态配置或 fake exporter 代替。
+这两步验证的是“部署默认可观察 + 运行时小上限真实生效 + 恢复默认后接近 Prompt 上限可真实接收”，不能用静态配置或 fake exporter 代替。
 
 ## ClickHouse 表结构（Langfuse v3）
 
@@ -183,8 +183,8 @@ sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_
 | `database connection failed: pq: password authentication failed for user "postgres"` | AUTO_SETUP 用 `DATABASE_*` 环境变量，不是 `DB_*` | 全部用 `DATABASE_HOST`/`DATABASE_PORT`/`DATABASE_USER`/... |
 | `NeedsSetup=false` 跳过 AUTO_SETUP | 上次写的 config.yaml 还在 /data 卷里 | `docker volume rm sub2api-e2e-data` 或脚本里 `DROP SCHEMA public CASCADE` 重置 |
 | API Key 响应里 `key: "[openai_token_redacted]"` | sub2api 对 OpenAI 平台 group 的 key 做了 redact 展示 | 直接 `docker exec` 进 PG 用 `UPDATE api_keys SET key='sk-...'` 改成可鉴权值 |
-| `/v1/chat/completions` 返回 503 | Key 所属 group 尚未配置上游账号 | 身份/截断/1 MiB 场景的**预期行为**；failover 和 SSE 场景随后挂载本地 fixture 账号并必须返回 200 |
-| Langfuse Postgres `traces` 表 0 条 | Langfuse v3 用 ClickHouse 存 traces，PG 只是 metadata | 查 `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client ...` |
+| `/v1/chat/completions` 返回 503 | Key 所属 group 尚未配置上游账号 | 身份、截断和 16 MiB Prompt 边界场景的**预期行为**；failover 和 SSE 场景随后挂载本地 fixture 账号并必须返回 200 |
+| Langfuse Postgres `traces` 表 0 条 | Langfuse v3 用 ClickHouse 存 traces，PG 只是 metadata | 通过 `langfuse-clickhouse-read-proxy-1` 查询：`curl -fsS --user clickhouse:clickhouse --data-binary "SELECT count() FROM traces" http://127.0.0.1:18123/` |
 | ClickHouse `traces` 表 0 条 | BatchSpanProcessor 默认 5 秒批次 + 网络 | `sleep 6` 后再查 |
 | `docker compose` 报 `unknown command` | Colima 内 docker 是老版本 | 用 `docker-compose`（带横线） |
 | `docker-compose` 报 `pull access denied for registry.cn-hangzhou.aliyuncs.com/...` | 中间尝试过第三方镜像但没权限 | 回到 `docker.io/library/...` 标准镜像，重试拉取 |

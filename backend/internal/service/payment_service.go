@@ -137,6 +137,7 @@ type RefundPlan struct {
 
 type RefundResult struct {
 	Success         bool    `json:"success"`
+	State           string  `json:"state,omitempty"`
 	Warning         string  `json:"warning,omitempty"`
 	RequireForce    bool    `json:"require_force,omitempty"`
 	BalanceDeducted float64 `json:"balance_deducted,omitempty"`

@@ -152,11 +152,25 @@ type AccountDuplicateRepository interface {
 	CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error
 }
 
+// AccountBillingSettingsRepository applies an admin edit without overwriting a
+// rate_multiplier that a successful upstream probe synchronized after the edit
+// form was loaded. A nil rateMultiplier means the request did not edit it.
+type AccountBillingSettingsRepository interface {
+	UpdateWithAccountBillingSettings(
+		ctx context.Context,
+		account *Account,
+		probeEnabled *bool,
+		rateSyncEnabled *bool,
+		rateMultiplier *float64,
+	) error
+}
+
 // AdminAccountRepository keeps admin-only write capabilities out of the shared
 // account interface so read-only gateway test doubles do not need to implement them.
 type AdminAccountRepository interface {
 	AccountRepository
 	AccountDuplicateRepository
+	AccountBillingSettingsRepository
 	// CreateSparkShadowWithGroups locks and revalidates the parent before
 	// atomically creating the Spark shadow, group bindings, and outbox event.
 	CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *Account, groups []AccountGroup) error

@@ -16,7 +16,7 @@ import (
 func TestContentModerationHandlerUpdateConfigPersistsTrustedAPIKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	repo := newTestSettingRepo()
-	svc := service.NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	svc := service.NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
 	handler := NewContentModerationHandler(svc)
 	router := gin.New()
 	router.PUT("/content-moderation/config", handler.UpdateConfig)
