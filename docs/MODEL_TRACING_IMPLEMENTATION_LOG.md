@@ -33,8 +33,6 @@
 - Public API base is derived by stripping path from model-tracing OTLP endpoint (e.g. `.../api/public/otel` → origin).
 - Read-back failure: warn log, do not block request, write all parsed items for the turn.
 - Compact detection only when read-back succeeds.
-- Export helper: `scripts/langfuse_session_export.py` (env `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`; dedupe by `message_id` earliest; optional `--include-ancestors`).
-- `--include-ancestors`: `fork_from_message_id=thread` takes the whole parent line; join drops `chat.fork`; final pass dedupes by `message_id` (keep earliest). Unit tests: `scripts/test_langfuse_session_export.py`.
 
 ### Verification
 
@@ -42,7 +40,6 @@
 - Internal test hooks: `backend/internal/modeltrace/testing_export.go` (`Testing*` only).
 - Run: `cd backend && go test ./internal/modeltrace/... -count=1`
 - Local stack image: `sub2api:model-trace-b4316e25-forkfix` via `/opt/sub2api-stack/compose.yml`.
-- Branching live check: parent unchanged; child emits one `chat.fork` with `fork_from_*`; second child turn does not duplicate fork; `--include-ancestors` export joins parent+child and drops `chat.fork`.
 
 ### Bug found in branching verify
 
@@ -79,16 +76,6 @@
   - child wrote one `chat.fork` with `fork_from_session_id=<parent>` and `fork_from_message_id=thread`
   - child wrote one `chat.compact` on the compaction turn
 
-### Complex scenario harness (nested fork + multi-compact)
-
-- Synthetic: `scripts/complex_conversation_scenarios.py` (`/v1/responses` against local stack).
-- **Real Codex**: `scripts/codex_complex_real_scenarios.py` (app-server fork/turn/compact via proxy `:18080`).
-- **Real Codex 20-turn cross-branch**: `scripts/codex_complex_20turn_scenarios.py`
-  - Topology: A (turns+compact) → fork B → fork C (nested); sibling fork D←A; then cross-back turns on A/B/C. Entirely via `thread/start` (exec sessions are not visible to app-server).
-  - Asserts: fork counts, multi-compact, C genealogy excludes D, D genealogy excludes B/C, ≥20 turns, no export `message_id` dupes.
-  - Artifacts: `tmp/codex_20turn_report.json`, `tmp/codex_20turn_C_ancestors_transcript.md`, `tmp/codex_20turn_D_ancestors_transcript.md`.
-  - Latest: VERDICT PASS (`T20-1784821818-c8ac`). Soft gap: assistant counts lag users on compacted lines; occasional `<turn_aborted>` noise.
-
 ### Credentials
 
 - No real or local test credentials recorded here. Use deployment/runtime config keys `public_key` / `secret_key` only.
@@ -114,7 +101,7 @@
 - HTTP 模型请求与 Responses WebSocket 回合只解析当前捕获的 input/output，并把所有可解析 `chat.*` 事件追加到 OTLP；重复 `message_id` 不在运行时过滤。
 - 模型请求路径不再从 OTLP endpoint 派生 Langfuse Public API 地址，也不请求 `/api/public/traces` 或 `/api/public/observations`。运行时不再依赖 Langfuse 历史、Public API 可用性或读取凭据。
 - 仅客户端明确声明 `request_kind=compaction` 时追加 `chat.compact`；显式 fork 继续追加 `chat.fork`。远端历史不再用于推断压缩或抑制重复 fork marker。
-- `scripts/langfuse_session_export.py` 保持为唯一允许读取 Langfuse Public API 的会话工具；事件抵达后由离线导出按非空 `message_id` 保留最早事件。
+- `scripts/langfuse_session_graph.py` 是唯一会话图与离线导出标准；其 `graph.json`、`assignments.jsonl` 和 `message-objects.jsonl` 共同构成会话导出产物。
 - Responses WebSocket `response.completed`/`response.done` JSON frame 现在归一化其 `response.output`，确保 WS 回合也能生成当前 assistant/tool 会话事件。
 
 ### RED / GREEN 证据
@@ -122,7 +109,7 @@
 - RED：`cd backend && go test ./internal/modeltrace/... -run 'TestExtractConversationDelta_(appendsRepeatedHistory|doesNotInferCompactionFromRemoteHistory)|TestModelTraceConversationHTTPAppendsWithoutLangfusePublicAPIRead|TestModelTraceResponsesWSTurnAppendsWithoutLangfusePublicAPIRead' -count=1`；旧实现观察到 HTTP/WS 各 2 次 Public API GET，重复历史被过滤，并从远端历史推断 compaction。
 - GREEN：`cd backend && go test ./internal/modeltrace/... -run 'TestModelTraceConversation|TestModelTraceResponsesWSTurn' -count=1`，退出 0；fake OTLP server 对任何 Public API GET 返回 405，并断言计数为 0、HTTP/WS 的重复 `u1`/`a1` message ID 均各追加两次、显式 compact/fork span 和 fork metadata 保留。
 - 受影响模块：`cd backend && go test ./internal/modeltrace/... -count=1`，退出 0。
-- 离线导出：`python3 scripts/test_langfuse_session_export.py`，4 项测试通过，包含 earliest-event 去重。
+- 会话图离线验证：`python3 scripts/test_langfuse_session_graph.py`。
 
 ### 剩余验证边界
 
@@ -234,3 +221,62 @@
 - 最终 Web 与 ingestion 健康、Worker 与 Bridge 稳定，所有核心容器 `RestartCount=0`；Web 的 `CLICKHOUSE_READ_ONLY_URL` 指向内部 read proxy，ingestion/Worker 的 `CLICKHOUSE_URL` 指向主 ClickHouse。Web 健康接口返回 `status=OK`、版本 `3.224.3`，迁移后再次直连 ingestion 的认证 OTLP envelope 返回 HTTP 200。
 - 最终 Compose reconcile 按依赖顺序再次重建 Web、ingestion、Worker 和 Bridge，形成第二个约几十秒的可重试窗口。实际 exporter/Collector 位于另一主机，本机无法读取其队列和 dropped 指标；队列排空及最终 Trace 入库仍需结合主服务器监控确认。
 - 既有正式 env 将 Web `3000/tcp` 绑定到 `0.0.0.0:3000`，本次为保留现有访问方式未修改该自定义值；它不同于仓库 loopback 默认值，后续应结合宿主防火墙和访问需求单独收紧。
+ ## 2026-08-03 — 提升模型追踪捕获上限（prompt 16M / response 8M / media 16M）
+
+### 背景与根因
+
+- Langfuse 观测：最近 24h input 高度集中于 8,388,665/8,388,666 bytes（合计 8,429 条）、output 集中于 1,048,629/1,048,633 bytes（合计 1,762 条），且全部为失效 JSON。截断值 = 捕获 limit + `[truncated:original_bytes=%d,captured_bytes=%d]` 标记（标记追加在 limit 之外，长度随 original_bytes 位数变化），确认是 Sub2API 捕获层硬截断，非 Langfuse/Collector 侧。
+- input 8 MiB = 面板运行时配置 `prompt_max_bytes=8MiB` 命中 `maxCaptureBytes = 8<<20` 硬顶；output 1 MiB = 部署 env `response_max_bytes=1MiB`。
+- 捕获顺序是先按 limit 截原始请求字节、再 sanitize：base64 媒体字节计入捕获预算，超限请求被截断后 JSON 解析失败，媒体摘要（media descriptor）机制无法生效，残留 input 是含 base64 的半截 JSON。请求数据一旦截断不可重来，上限过低导致不可恢复的信息丢失。
+
+### 行为变更
+
+- `backend/internal/modeltrace/exporter.go`：默认捕获上限调整为 prompt 16 MiB、response 8 MiB、media 16 MiB；`maxCaptureBytes` 硬顶 8 MiB → 32 MiB，解除 8 MiB 钳制。
+- `backend/internal/config/config.go`：`setModelTracingDefaults` 与 `normalizeModelTracingConfig` 缺省值对齐 16M/8M/16M。
+- `backend/internal/modeltrace/recording/recording.go`：`InputLimit` 非 recorder fallback 1 MiB → 16 MiB 对齐。
+- 运行时注意：面板运行时配置若仍保留 `prompt_max_bytes=8MiB`，会继续覆盖部署配置，升级后需把面板与 `model-tracing.env` 同步为 16M/8M/16M。
+
+### 验证
+
+- `gofmt -l` 无输出；`go test ./internal/modeltrace/... ./internal/config -count=1` 退出 0。
+- `tests/security_test.go` 通过 `TestingMaxCaptureBytes` 常量自适应新上限，断言无需改动。
+
+## 2026-08-03 — 移除 maxCaptureBytes 硬顶，捕获上限改为纯可选配置
+
+### 背景
+
+- #89 把硬顶从 8 MiB 提升到 32 MiB，但硬顶本身是多余约束：`prompt/response/media_max_bytes` 本来就是可选配置（≤0 时回落默认值），代码再设一个不可配置的硬顶会静默钳制用户明确配置的值；32 MiB 这个数字没有理由替用户决定边界。
+
+### 行为变更
+
+- `backend/internal/modeltrace/exporter.go`：删除 `maxCaptureBytes` 常量与 `boundedSizes` 中的三处钳制；显式配置值原样生效、无上限；≤0 仍回落默认（16M/8M/16M）。
+- `backend/internal/modeltrace/testing_export.go`：移除 `TestingMaxCaptureBytes` 导出。
+- `backend/internal/modeltrace/tests/security_test.go`：`TestModelTraceLargePayloadMemoryBound` 重写为 `TestModelTraceCaptureLimitsHonorConfigWithoutHardCap`——显式值不被钳制（含 MaxInt）、缺省回落默认、截断标记行为不变。
+
+### 验证
+
+- `gofmt -l` 无输出；`go test ./internal/modeltrace/... ./internal/config -count=1` 退出 0。
+
+### 运行时注意
+
+- 上限不再有代码硬顶：面板/部署配置设多大就生效多大。内存与单批 OTLP 导出载荷随配置线性放大，超大请求的导出失败仍为 fail-open、不影响业务。
+
+## 2026-08-03 — 移除前端 model-tracing 面板的 8M 捕获上限钳制
+
+### 背景
+
+- 后端 #89/#90 已移除 `maxCaptureBytes` 硬顶并提升默认值（prompt 16M / response 8M / media 16M），但前端面板 `frontend/src/features/model-tracing/ModelTracingSettings.vue` 仍硬编码 `MAX_CAPTURE_BYTES = 8 * 1024 * 1024`：输入框 `:max` 限制 + 提交时 `positiveInteger` 用 `Math.min(MAX_CAPTURE_BYTES, …)` 钳制。
+- 现象：面板把 prompt 改为 16M 保存后回弹为 8M——前端提交前把值钳到 8M，后端如实存储并回显，非后端/存储问题。
+
+### 行为变更
+
+- 删除 `MAX_CAPTURE_BYTES` 常量与输入框 `:max` 属性；
+- `positiveInteger` 不再做上限钳制，正值原样提交（`Math.floor`），与后端"显式配置无硬顶"契约一致。
+
+### 验证
+
+- `pnpm test:run src/features/model-tracing` 通过（vitest）。
+
+### 部署注意
+
+- 面板 UI 随前端构建发布（新 release）；生效后管理员可在面板保存 >8M 的捕获上限。

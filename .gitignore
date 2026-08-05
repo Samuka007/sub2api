@@ -140,11 +140,6 @@ scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 !scripts/
-!scripts/langfuse_session_export.py
-!scripts/test_langfuse_session_export.py
-!scripts/complex_conversation_scenarios.py
-!scripts/codex_complex_real_scenarios.py
-!scripts/codex_complex_20turn_scenarios.py
 .code-review-state
 /openspec/changes/
 code-reviews/
@@ -161,6 +156,7 @@ docs/*
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
 !docs/ASYNC_IMAGE_TASKS.md
 !docs/BATCH_IMAGE_MVP.md
+!docs/LANGFUSE_SESSION_GRAPH.md
 !docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
 !docs/legal/
 !docs/legal/*.md

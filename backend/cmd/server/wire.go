@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/appmetrics"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
@@ -29,7 +30,11 @@ type Application struct {
 	Server           *http.Server
 	PromptAudit      *securityaudit.PromptService
 	ModelTraceConfig *modeltrace.ConfigManager
+	ModelTrace       *modeltrace.Manager
+	Metrics          *appmetrics.Metrics
+	OpsMetrics       *service.OpsMetricsCollector
 	Cleanup          func()
+	cleanupOnce      sync.Once
 }
 
 func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.Manager) (*Application, error) {
@@ -57,12 +62,13 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 		// Model tracing runtime configuration provider
 		provideModelTraceConfigManager,
 		provideBatchImageTraceRecorder,
+		provideAppMetrics,
 
 		// Cleanup function provider
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "ModelTrace", "Metrics", "OpsMetrics", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -76,6 +82,14 @@ func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideAppMetrics(
+	cfg *config.Config,
+	opsMetrics *service.OpsMetricsCollector,
+	modelTrace *modeltrace.Manager,
+) (*appmetrics.Metrics, error) {
+	return appmetrics.New(cfg.Metrics, opsMetrics, modelTrace)
 }
 
 func provideModelTraceConfigManager(

@@ -35,9 +35,9 @@ const (
 	serviceName          = "sub2api"
 	tracerName           = "github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	langfuseIngestionHdr = "x-langfuse-ingestion-version"
-	defaultPromptBytes   = 1 << 20
-	defaultResponseBytes = 1 << 20
-	defaultMediaBytes    = 1 << 20
+	defaultPromptBytes   = 16 << 20
+	defaultResponseBytes = 8 << 20
+	defaultMediaBytes    = 16 << 20
 	// defaultExportTimeout is the single-batch OTLP export deadline including the
 	// OTLP exporter's internal retry loop. It must cover the full retry window so
 	// a transiently refused Collector is retried instead of discarded. <=0 config
@@ -46,30 +46,33 @@ const (
 	defaultRetryInitial     = 5 * time.Second
 	defaultRetryMaxInterval = 30 * time.Second
 	defaultRetryMaxElapsed  = 55 * time.Second
-	maxCaptureBytes         = 8 << 20
 	defaultMaxQueueSize     = 256
 	defaultMaxExportBatch   = 16
 	defaultBatchTimeout     = 1000 * time.Millisecond
 	exportHealthLogInterval = time.Minute
 )
 
-type exportStats struct {
-	endedSpans     atomic.Uint64
-	attemptedSpans atomic.Uint64
-	exportedSpans  atomic.Uint64
-	failedSpans    atomic.Uint64
-	panicCount     atomic.Uint64
-	// failedByReason records the last terminal export failure per reason so
-	// operators can distinguish invalid_utf8, collector_refused, timeout,
-	// queue_full and other errors without re-logging upstream content.
+type exportEventCounts struct {
+	endedSpans             atomic.Uint64
+	attemptedSpans         atomic.Uint64
+	exportedSpans          atomic.Uint64
+	failedSpans            atomic.Uint64
+	panicCount             atomic.Uint64
 	failedInvalidUTF8      atomic.Uint64
 	failedCollectorRefused atomic.Uint64
 	failedTimeout          atomic.Uint64
 	failedQueueFull        atomic.Uint64
 	failedOther            atomic.Uint64
-	lastLogNanos           atomic.Int64
-	source                 string
-	version                int64
+}
+
+type exportStats struct {
+	exportEventCounts
+	// totals is owned by Manager and survives active-generation replacement.
+	// The embedded counts continue to describe only this generation.
+	totals       *exportEventCounts
+	lastLogNanos atomic.Int64
+	source       string
+	version      int64
 }
 
 type exportStatsSnapshot struct {
@@ -77,7 +80,24 @@ type exportStatsSnapshot struct {
 	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout, FailedQueueFull, FailedOther uint64
 }
 
-func (s *exportStats) snapshot() exportStatsSnapshot {
+// ExportStatus is the active model-tracing generation's existing export-health
+// snapshot. Values reset when the active generation changes.
+type ExportStatus struct {
+	Enabled                                                        bool
+	EndedSpans, AttemptedSpans, ExportedSpans, FailedSpans, Panics uint64
+	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout       uint64
+	FailedQueueFull, FailedOther                                   uint64
+}
+
+// ExportTotals is the current process's model-trace export history. Values
+// survive active-generation replacement and reset only on process restart.
+type ExportTotals struct {
+	EndedSpans, AttemptedSpans, ExportedSpans, FailedSpans, Panics uint64
+	FailedInvalidUTF8, FailedCollectorRefused, FailedTimeout       uint64
+	FailedQueueFull, FailedOther                                   uint64
+}
+
+func (s *exportEventCounts) snapshot() exportStatsSnapshot {
 	if s == nil {
 		return exportStatsSnapshot{}
 	}
@@ -92,6 +112,13 @@ func (s *exportStats) snapshot() exportStatsSnapshot {
 		result.PendingOrDropped = result.Ended - result.Attempted
 	}
 	return result
+}
+
+func (s *exportStats) snapshot() exportStatsSnapshot {
+	if s == nil {
+		return exportStatsSnapshot{}
+	}
+	return s.exportEventCounts.snapshot()
 }
 
 func (s *exportStats) log(result string, force bool) {
@@ -219,7 +246,7 @@ func newRetryableOTLPHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-func (s *exportStats) recordFailure(reason string, n uint64) {
+func (s *exportEventCounts) addFailureReason(reason string, n uint64) {
 	if s == nil || n == 0 {
 		return
 	}
@@ -237,6 +264,71 @@ func (s *exportStats) recordFailure(reason string, n uint64) {
 	}
 }
 
+func (s *exportStats) addEnded(n uint64) {
+	if s == nil || n == 0 {
+		return
+	}
+	s.endedSpans.Add(n)
+	if s.totals != nil {
+		s.totals.endedSpans.Add(n)
+	}
+}
+
+func (s *exportStats) addAttempted(n uint64) {
+	if s == nil || n == 0 {
+		return
+	}
+	s.attemptedSpans.Add(n)
+	if s.totals != nil {
+		s.totals.attemptedSpans.Add(n)
+	}
+}
+
+func (s *exportStats) recordSuccess(n uint64) {
+	if s == nil || n == 0 {
+		return
+	}
+	s.exportedSpans.Add(n)
+	if s.totals != nil {
+		s.totals.exportedSpans.Add(n)
+	}
+}
+
+// recordFailure records one ordinary terminal exporter outcome. The reason is
+// classified once at the exporter boundary and projected into both the active
+// generation diagnostics and the Manager-owned process totals.
+func (s *exportStats) recordFailure(reason string, n uint64) {
+	if s == nil || n == 0 {
+		return
+	}
+	s.failedSpans.Add(n)
+	s.addFailureReason(reason, n)
+	if s.totals != nil {
+		s.totals.failedSpans.Add(n)
+		s.totals.addFailureReason(reason, n)
+	}
+}
+
+// recordPanic keeps the two honest units separate: failed is a span count,
+// while panicCount is an exporter-call/batch incident count. A recovered panic
+// has no trustworthy ordinary failure reason, so it is not fabricated as
+// reason="other".
+func (s *exportStats) recordPanic(n uint64) {
+	if s == nil {
+		return
+	}
+	if n > 0 {
+		s.failedSpans.Add(n)
+	}
+	s.panicCount.Add(1)
+	if s.totals != nil {
+		if n > 0 {
+			s.totals.failedSpans.Add(n)
+		}
+		s.totals.panicCount.Add(1)
+	}
+}
+
 type failOpenExporter struct {
 	delegate sdktrace.SpanExporter
 	stats    *exportStats
@@ -247,13 +339,12 @@ func (e failOpenExporter) ExportSpans(ctx context.Context, spans []sdktrace.Read
 		return nil
 	}
 	if e.stats != nil {
-		e.stats.attemptedSpans.Add(uint64(len(spans)))
+		e.stats.addAttempted(uint64(len(spans)))
 	}
 	defer func() {
 		if recover() != nil {
 			if e.stats != nil {
-				e.stats.failedSpans.Add(uint64(len(spans)))
-				e.stats.panicCount.Add(1)
+				e.stats.recordPanic(uint64(len(spans)))
 				e.stats.log("panic", false)
 			}
 			err = errors.New("modeltrace: exporter panic")
@@ -262,18 +353,18 @@ func (e failOpenExporter) ExportSpans(ctx context.Context, spans []sdktrace.Read
 	err = e.delegate.ExportSpans(ctx, spans)
 	if e.stats != nil {
 		if err != nil {
-			e.stats.failedSpans.Add(uint64(len(spans)))
-			e.stats.recordFailure(classifyExportError(err), uint64(len(spans)))
+			reason := classifyExportError(err)
+			e.stats.recordFailure(reason, uint64(len(spans)))
 			// Log only the classified reason and counts. The upstream error may
 			// embed the endpoint, request URL or captured content; never log it.
 			slog.Warn("model trace export failed",
 				"source", e.stats.source, "config_version", e.stats.version,
-				"reason", classifyExportError(err), "spans", len(spans),
+				"reason", reason, "spans", len(spans),
 				"failed_spans", e.stats.failedSpans.Load(),
 			)
 			e.stats.log("failure", false)
 		} else {
-			e.stats.exportedSpans.Add(uint64(len(spans)))
+			e.stats.recordSuccess(uint64(len(spans)))
 			e.stats.log("success", false)
 		}
 	}
@@ -303,7 +394,7 @@ func (p *monitoredSpanProcessor) OnStart(ctx context.Context, span sdktrace.Read
 
 func (p *monitoredSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 	if p.stats != nil {
-		p.stats.endedSpans.Add(1)
+		p.stats.addEnded(1)
 	}
 	p.delegate.OnEnd(span)
 }
@@ -405,33 +496,29 @@ func (s *GenerationSnapshot) Retain() *GenerationSnapshot {
 type Manager struct {
 	mu      sync.RWMutex
 	active  *generation
+	totals  *exportEventCounts
 	closed  bool
 	retired sync.WaitGroup
 }
 
 // NewManager constructs a Manager. Disabled or no endpoint => no-op.
 func NewManager(ctx context.Context, cfg config.ModelTracingConfig) (*Manager, error) {
-	g, err := buildGeneration(ctx, cfg, ConfigSourceDeployment, 0)
+	totals := &exportEventCounts{}
+	g, err := buildGeneration(ctx, cfg, ConfigSourceDeployment, 0, totals)
 	if err != nil {
 		return nil, err
 	}
 	logGenerationApplied(g)
-	return &Manager{active: g}, nil
+	return &Manager{active: g, totals: totals}, nil
 }
 
-func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source string, version int64) (*generation, error) {
-	prompt, response, media := boundedSizes(cfg)
-	cfg.PromptMaxBytes = prompt
-	cfg.ResponseMaxBytes = response
-	cfg.MediaMaxBytes = media
-	exportTimeout, retry, queueSize, batchSize, batchTimeout := resolveExportSettings(cfg)
-	cfg.ExportTimeoutSeconds = int(exportTimeout.Seconds())
-	cfg.ExportRetry = retry
-	cfg.ExportQueueSize = queueSize
-	cfg.ExportBatchSize = batchSize
-	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
-	cfg.Destination = config.NormalizeModelTracingDestination(cfg.Destination)
-	cfg.Endpoint = config.NormalizeModelTracingEndpoint(cfg.Destination, cfg.Endpoint)
+func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source string, version int64, totals *exportEventCounts) (*generation, error) {
+	cfg = canonicalGenerationConfig(cfg)
+	exportTimeout := time.Duration(cfg.ExportTimeoutSeconds) * time.Second
+	retry := cfg.ExportRetry
+	queueSize := cfg.ExportQueueSize
+	batchSize := cfg.ExportBatchSize
+	batchTimeout := time.Duration(cfg.ExportBatchTimeoutMs) * time.Millisecond
 	g := &generation{cfg: cfg, source: source, version: version}
 	g.fingerprint = generationFingerprint(cfg, source, version)
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
@@ -486,7 +573,7 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	if err != nil {
 		return nil, fmt.Errorf("modeltrace: build resource: %w", err)
 	}
-	stats := &exportStats{source: source, version: version}
+	stats := &exportStats{source: source, version: version, totals: totals}
 	g.stats = stats
 	batchProcessor := sdktrace.NewBatchSpanProcessor(
 		failOpenExporter{delegate: exporter, stats: stats},
@@ -507,6 +594,22 @@ func buildGeneration(ctx context.Context, cfg config.ModelTracingConfig, source 
 	return g, nil
 }
 
+func canonicalGenerationConfig(cfg config.ModelTracingConfig) config.ModelTracingConfig {
+	prompt, response, media := boundedSizes(cfg)
+	cfg.PromptMaxBytes = prompt
+	cfg.ResponseMaxBytes = response
+	cfg.MediaMaxBytes = media
+	exportTimeout, retry, queueSize, batchSize, batchTimeout := resolveExportSettings(cfg)
+	cfg.ExportTimeoutSeconds = int(exportTimeout.Seconds())
+	cfg.ExportRetry = retry
+	cfg.ExportQueueSize = queueSize
+	cfg.ExportBatchSize = batchSize
+	cfg.ExportBatchTimeoutMs = int(batchTimeout.Milliseconds())
+	cfg.Destination = config.NormalizeModelTracingDestination(cfg.Destination)
+	cfg.Endpoint = config.NormalizeModelTracingEndpoint(cfg.Destination, cfg.Endpoint)
+	return cfg
+}
+
 func generationFingerprint(cfg config.ModelTracingConfig, source string, version int64) string {
 	payload, _ := json.Marshal(struct {
 		Config  config.ModelTracingConfig `json:"config"`
@@ -518,26 +621,20 @@ func generationFingerprint(cfg config.ModelTracingConfig, source string, version
 }
 
 func boundedSizes(cfg config.ModelTracingConfig) (int, int, int) {
+	// The per-field limits are plain optional configuration: an explicit
+	// value is honored as-is (no hard cap), and <=0 falls back to the
+	// documented defaults.
 	p := cfg.PromptMaxBytes
 	if p <= 0 {
 		p = defaultPromptBytes
-	}
-	if p > maxCaptureBytes {
-		p = maxCaptureBytes
 	}
 	r := cfg.ResponseMaxBytes
 	if r <= 0 {
 		r = defaultResponseBytes
 	}
-	if r > maxCaptureBytes {
-		r = maxCaptureBytes
-	}
 	m := cfg.MediaMaxBytes
 	if m <= 0 {
 		m = defaultMediaBytes
-	}
-	if m > maxCaptureBytes {
-		m = maxCaptureBytes
 	}
 	return p, r, m
 }
@@ -672,6 +769,46 @@ func (m *Manager) Config() config.ModelTracingConfig {
 	return snapshot.Config()
 }
 
+// ExportStatus reads the counters already owned by the active immutable
+// generation; it does not install observers or duplicate exporter callbacks.
+func (m *Manager) ExportStatus() ExportStatus {
+	if m == nil {
+		return ExportStatus{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed || m.active == nil || !m.active.enabled() || m.active.stats == nil {
+		return ExportStatus{}
+	}
+	snapshot := m.active.stats.snapshot()
+	return ExportStatus{
+		Enabled:    true,
+		EndedSpans: snapshot.Ended, AttemptedSpans: snapshot.Attempted,
+		ExportedSpans: snapshot.Exported, FailedSpans: snapshot.Failed,
+		Panics:            snapshot.Panics,
+		FailedInvalidUTF8: snapshot.FailedInvalidUTF8, FailedCollectorRefused: snapshot.FailedCollectorRefused,
+		FailedTimeout: snapshot.FailedTimeout, FailedQueueFull: snapshot.FailedQueueFull,
+		FailedOther: snapshot.FailedOther,
+	}
+}
+
+// ExportTotals reads process-lifetime counters that span model-trace generation
+// replacement. Values reset only when this Sub2API process restarts.
+func (m *Manager) ExportTotals() ExportTotals {
+	if m == nil || m.totals == nil {
+		return ExportTotals{}
+	}
+	snapshot := m.totals.snapshot()
+	return ExportTotals{
+		EndedSpans: snapshot.Ended, AttemptedSpans: snapshot.Attempted,
+		ExportedSpans: snapshot.Exported, FailedSpans: snapshot.Failed,
+		Panics:            snapshot.Panics,
+		FailedInvalidUTF8: snapshot.FailedInvalidUTF8, FailedCollectorRefused: snapshot.FailedCollectorRefused,
+		FailedTimeout: snapshot.FailedTimeout, FailedQueueFull: snapshot.FailedQueueFull,
+		FailedOther: snapshot.FailedOther,
+	}
+}
+
 func (m *Manager) Fingerprint() string {
 	snapshot := m.Acquire()
 	defer snapshot.Release()
@@ -684,12 +821,11 @@ func (m *Manager) ApplySnapshot(ctx context.Context, snapshot ConfigSnapshot) er
 	if m == nil {
 		return errors.New("modeltrace: manager is nil")
 	}
-	cfg := snapshot.Config
-	cfg.PromptMaxBytes, cfg.ResponseMaxBytes, cfg.MediaMaxBytes = boundedSizes(cfg)
+	cfg := canonicalGenerationConfig(snapshot.Config)
 	if m.Fingerprint() == generationFingerprint(cfg, snapshot.Source, snapshot.ConfigVersion) {
 		return nil
 	}
-	next, err := buildGeneration(ctx, snapshot.Config, snapshot.Source, snapshot.ConfigVersion)
+	next, err := buildGeneration(ctx, snapshot.Config, snapshot.Source, snapshot.ConfigVersion, m.totals)
 	if err != nil {
 		return err
 	}

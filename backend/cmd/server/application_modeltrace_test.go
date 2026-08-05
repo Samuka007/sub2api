@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
@@ -65,14 +64,10 @@ func TestApplicationModelTracingActivationInstallsDeploymentConfigAndCleansUp(t 
 	settings := &applicationModelTraceSettings{}
 	runtime, err := modeltrace.NewManager(context.Background(), deployment)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		require.NoError(t, runtime.Shutdown(ctx))
-	})
+
 	manager := provideModelTraceConfigManager(cfg, settings, applicationModelTraceEncryptor{}, runtime)
-	app := &Application{ModelTraceConfig: manager, Cleanup: func() {}}
-	app.activate()
+	app := &Application{ModelTraceConfig: manager, ModelTrace: runtime, Cleanup: func() {}}
+	require.NoError(t, app.activate())
 
 	handler := modeltrace.DefaultAdminHandler()
 	require.NotNil(t, handler)

@@ -324,7 +324,7 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 	}
 	var prepared *generation
 	if m.runtime != nil {
-		prepared, err = buildGeneration(ctx, value, ConfigSourceRuntime, next.ConfigVersion)
+		prepared, err = buildGeneration(ctx, value, ConfigSourceRuntime, next.ConfigVersion, m.runtime.totals)
 		if err != nil {
 			return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "model tracing exporter could not be initialized").WithCause(err)
 		}

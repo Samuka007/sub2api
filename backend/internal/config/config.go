@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/textproto"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -102,7 +104,20 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	ModelTracing            ModelTracingConfig            `mapstructure:"model_tracing"`
+	Metrics                 MetricsConfig                 `mapstructure:"metrics"`
 	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
+}
+
+// MetricsConfig controls the optional private Prometheus listener.
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Host    string `mapstructure:"host"`
+	Port    int    `mapstructure:"port"`
+	Path    string `mapstructure:"path"`
+}
+
+func (c MetricsConfig) Address() string {
+	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
 
 const (
@@ -1816,6 +1831,8 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 	cfg.Server.FrontendURL = strings.TrimSpace(cfg.Server.FrontendURL)
 	normalizeModelTracingConfig(&cfg.ModelTracing)
+	cfg.Metrics.Host = strings.TrimSpace(cfg.Metrics.Host)
+	cfg.Metrics.Path = strings.TrimSpace(cfg.Metrics.Path)
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
 	cfg.LinuxDo.ClientID = strings.TrimSpace(cfg.LinuxDo.ClientID)
 	cfg.LinuxDo.ClientSecret = strings.TrimSpace(cfg.LinuxDo.ClientSecret)
@@ -1974,6 +1991,12 @@ func setDefaults() {
 	viper.SetDefault("server.h2c.max_read_frame_size", 1<<20)              // 1MB（够用）
 	viper.SetDefault("server.h2c.max_upload_buffer_per_connection", 2<<20) // 2MB
 	viper.SetDefault("server.h2c.max_upload_buffer_per_stream", 512<<10)   // 512KB
+
+	// Private Prometheus listener (disabled and loopback-bound by default).
+	viper.SetDefault("metrics.enabled", false)
+	viper.SetDefault("metrics.host", "127.0.0.1")
+	viper.SetDefault("metrics.port", 9091)
+	viper.SetDefault("metrics.path", "/metrics")
 
 	// Log
 	viper.SetDefault("log.level", "info")
@@ -2609,6 +2632,17 @@ func (c *Config) Validate() error {
 	}
 	c.Security.ForwardedClientIPHeaders = forwardedClientIPHeaders
 	c.SetForwardedClientIPSettings(c.Security.TrustForwardedIPForAPIKeyACL, forwardedClientIPHeaders)
+	if c.Metrics.Enabled {
+		if net.ParseIP(c.Metrics.Host) == nil {
+			return fmt.Errorf("metrics.host must be an IP address")
+		}
+		if c.Metrics.Port < 1 || c.Metrics.Port > 65535 {
+			return fmt.Errorf("metrics.port must be between 1 and 65535")
+		}
+		if c.Metrics.Path == "" || c.Metrics.Path[0] != '/' || c.Metrics.Path == "/" || strings.HasSuffix(c.Metrics.Path, "/") || strings.ContainsAny(c.Metrics.Path, "?#") {
+			return fmt.Errorf("metrics.path must be an exact non-root HTTP path without a trailing slash, query, or fragment")
+		}
+	}
 	if c.Server.ReadHeaderTimeout < 1 || c.Server.ReadHeaderTimeout > 60 {
 		return fmt.Errorf("server.read_header_timeout must be between 1 and 60 seconds")
 	}
@@ -3808,9 +3842,9 @@ func setModelTracingDefaults() {
 	viper.SetDefault("model_tracing.endpoint", "")
 	viper.SetDefault("model_tracing.public_key", "")
 	viper.SetDefault("model_tracing.secret_key", "")
-	viper.SetDefault("model_tracing.prompt_max_bytes", 1<<20)
-	viper.SetDefault("model_tracing.response_max_bytes", 1<<20)
-	viper.SetDefault("model_tracing.media_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.prompt_max_bytes", 16<<20)
+	viper.SetDefault("model_tracing.response_max_bytes", 8<<20)
+	viper.SetDefault("model_tracing.media_max_bytes", 16<<20)
 	viper.SetDefault("model_tracing.capture_media_content", false)
 	viper.SetDefault("model_tracing.export_timeout_seconds", 60)
 	viper.SetDefault("model_tracing.export_retry.enabled", true)
@@ -3833,13 +3867,13 @@ func normalizeModelTracingConfig(value *ModelTracingConfig) {
 	value.PublicKey = strings.TrimSpace(value.PublicKey)
 	value.SecretKey = strings.TrimSpace(value.SecretKey)
 	if value.PromptMaxBytes <= 0 {
-		value.PromptMaxBytes = 1 << 20
+		value.PromptMaxBytes = 16 << 20
 	}
 	if value.ResponseMaxBytes <= 0 {
-		value.ResponseMaxBytes = 1 << 20
+		value.ResponseMaxBytes = 8 << 20
 	}
 	if value.MediaMaxBytes <= 0 {
-		value.MediaMaxBytes = 1 << 20
+		value.MediaMaxBytes = 16 << 20
 	}
 	if value.ExportTimeoutSeconds <= 0 {
 		value.ExportTimeoutSeconds = 60
