@@ -661,6 +661,17 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64, 
 	plan.Force = plan.Force || force
 
 	pendingDetail := s.latestRefundPendingDetail(ctx, oid)
+	// Legacy pending audits record deductionRollbackOK=false when the original
+	// balance or subscription deduction could not be rolled back. Without a
+	// persisted intent, that deduction is still in effect, so finalization must
+	// persist and reuse a no-deduction intent instead of applying it again.
+	if !intentPersisted && !pendingDetail.DeductionRollbackOK {
+		plan.DeductBalance = false
+		plan.DeductionType = payment.DeductionTypeNone
+		plan.BalanceToDeduct = 0
+		plan.SubDaysToDeduct = 0
+		plan.SubscriptionID = 0
+	}
 	providerOutcomePersisted := pendingDetail.ProviderStatus == payment.ProviderStatusSuccess || pendingDetail.ProviderStatus == payment.ProviderStatusRefunded
 	var queryProvider payment.RefundQueryProvider
 	if !providerOutcomePersisted && strings.TrimSpace(o.PaymentTradeNo) != "" {
@@ -681,7 +692,7 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64, 
 			return early, err
 		}
 	} else {
-		if !intentPersisted && o.OrderType != payment.OrderTypeBalance {
+		if !intentPersisted && plan.DeductBalance && o.OrderType != payment.OrderTypeBalance {
 			if early := s.prepDeduct(ctx, o, plan, plan.Force); early != nil {
 				return early, nil
 			}

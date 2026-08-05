@@ -32,6 +32,15 @@ func (c *profitCountingConcurrencyCache) ReleaseAccountSlot(context.Context, int
 	return nil
 }
 
+type profitWaitConcurrencyCache struct {
+	profitCountingConcurrencyCache
+	acquireCalls atomic.Int64
+}
+
+func (c *profitWaitConcurrencyCache) AcquireAccountSlot(context.Context, int64, int, string) (bool, error) {
+	return c.acquireCalls.Add(1) > 1, nil
+}
+
 func profitSlotTestAccount(id int64, rate float64) *service.Account {
 	now := time.Now()
 	return &service.Account{
@@ -40,6 +49,7 @@ func profitSlotTestAccount(id int64, rate float64) *service.Account {
 		Type:           service.AccountTypeAPIKey,
 		Status:         service.StatusActive,
 		Schedulable:    true,
+		UpdatedAt:      now,
 		Concurrency:    2,
 		RateMultiplier: &rate,
 		Extra: map[string]any{
@@ -83,9 +93,9 @@ func TestAcquireResponsesAccountSlotProfitRecheck(t *testing.T) {
 	gw := &service.OpenAIGatewayService{}
 	groupID := int64(50)
 
-	newHandler := func(cache *profitCountingConcurrencyCache) *OpenAIGatewayHandler {
+	newHandler := func(gateway *service.OpenAIGatewayService, cache service.ConcurrencyCache) *OpenAIGatewayHandler {
 		return &OpenAIGatewayHandler{
-			gatewayService:    gw,
+			gatewayService:    gateway,
 			concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatClaude, 0),
 		}
 	}
@@ -99,7 +109,7 @@ func TestAcquireResponsesAccountSlotProfitRecheck(t *testing.T) {
 
 	t.Run("veto releases slot and requests reschedule without writing response", func(t *testing.T) {
 		cache := &profitCountingConcurrencyCache{}
-		h := newHandler(cache)
+		h := newHandler(gw, cache)
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil).WithContext(profitSlotTestContext(t, gw, groupID, false))
@@ -114,7 +124,7 @@ func TestAcquireResponsesAccountSlotProfitRecheck(t *testing.T) {
 
 	t.Run("qualifying account acquires normally", func(t *testing.T) {
 		cache := &profitCountingConcurrencyCache{}
-		h := newHandler(cache)
+		h := newHandler(gw, cache)
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil).WithContext(profitSlotTestContext(t, gw, groupID, false))
@@ -128,7 +138,7 @@ func TestAcquireResponsesAccountSlotProfitRecheck(t *testing.T) {
 
 	t.Run("image intent suppression keeps official behavior", func(t *testing.T) {
 		cache := &profitCountingConcurrencyCache{}
-		h := newHandler(cache)
+		h := newHandler(gw, cache)
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil).WithContext(profitSlotTestContext(t, gw, groupID, true))
@@ -138,6 +148,48 @@ func TestAcquireResponsesAccountSlotProfitRecheck(t *testing.T) {
 		require.Equal(t, openAISlotAcquireOK, result, "生图意图跳门：过贵账号照常获取（图片边界不装门）")
 		require.NotNil(t, release)
 		release()
+	})
+
+	t.Run("successful slot paths publish latest replacement snapshot", func(t *testing.T) {
+		for _, mode := range []string{"acquired", "fast", "wait"} {
+			t.Run(mode, func(t *testing.T) {
+				selected := profitSlotTestAccount(40, 0.20)
+				latest := profitSlotTestAccount(selected.ID, 0.30)
+				latest.UpdatedAt = selected.UpdatedAt.Add(time.Second)
+				snapshot := service.NewSchedulerSnapshotService(
+					&fakeSchedulerCache{accounts: []*service.Account{latest}}, nil, nil, nil, nil,
+				)
+				gateway := service.NewOpenAIGatewayService(
+					nil, nil, nil, nil, nil, nil, nil, nil, snapshot, nil, nil,
+					nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+				)
+
+				selection := newSelection(selected)
+				var cache service.ConcurrencyCache = &profitCountingConcurrencyCache{}
+				switch mode {
+				case "acquired":
+					selection.Acquired = true
+					selection.ReleaseFunc = func() {}
+					selection.WaitPlan = nil
+				case "wait":
+					cache = &profitWaitConcurrencyCache{}
+				}
+
+				h := newHandler(gateway, cache)
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				c.Request = httptest.NewRequest("POST", "/v1/responses", nil).WithContext(profitSlotTestContext(t, gateway, groupID, false))
+				streamStarted := false
+
+				release, result := h.acquireResponsesAccountSlot(c, &groupID, "", selection, false, &streamStarted, zap.NewNop())
+				require.Equal(t, openAISlotAcquireOK, result)
+				require.NotNil(t, release)
+				require.Same(t, latest, selection.Account, "成功合同必须向调用方发布终检后的 replacement pointer")
+				require.InDelta(t, 0.20, *selected.RateMultiplier, 1e-12, "终检不得原地改写选号快照")
+				require.InDelta(t, 0.30, *selection.Account.RateMultiplier, 1e-12)
+				release()
+			})
+		}
 	})
 }
 

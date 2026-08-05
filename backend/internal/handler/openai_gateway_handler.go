@@ -53,6 +53,11 @@ type openAIWSTurnChannelMappingSnapshot struct {
 	mapping service.ChannelMappingResult
 }
 
+type openAIWSTurnAccountSnapshot struct {
+	turn    int
+	account *service.Account
+}
+
 var errOpenAIWSUnsupportedModelSwitch = errors.New("selected account does not support websocket model switch")
 
 func newOpenAIWSUnsupportedModelSwitchError(model string) error {
@@ -562,6 +567,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if slotResult != openAISlotAcquireOK {
 			return
 		}
+		account = selection.Account
 
 		// Forward request
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
@@ -1121,6 +1127,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if slotResult != openAISlotAcquireOK {
 			return
 		}
+		account = selection.Account
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
@@ -2046,6 +2053,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		currentTurnTrustedObserve := trustedObserveHandshake
 		currentTurnCyberBlockKey := cyberBlockKey
 		var hooksMu sync.Mutex
+		// currentTurnAccount 只在 hooksMu 下读写；AfterTurn 会复制为 turn 局部
+		// 快照后再提交异步 usage，避免闭包捕获后续 turn 可变指针。
+		currentTurnAccount := openAIWSTurnAccountSnapshot{turn: 1, account: account}
 		// Passthrough rejects overlapping response.create frames, so one immutable
 		// turn-tagged slot preserves the exact mapping used for the in-flight request.
 		var turnChannelMapping atomic.Pointer[openAIWSTurnChannelMappingSnapshot]
@@ -2118,20 +2128,22 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
 				// 无法中途换号）。本 turn 的准入与计费共用同一 pricingAt。
 				turnCtx, turnAt := h.gatewayService.WithOpenAITurnPricingContext(ctx, apiKey.GroupID)
-				if _, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(turnCtx, account); vetoed {
+				latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(turnCtx, account)
+				if vetoed {
 					reqLog.Info("openai.websocket_turn_profit_vetoed",
 						zap.Int("turn", turn),
 						zap.Int64("account_id", account.ID),
 						zap.String("reason", reason))
 					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is no longer eligible for this connection, please reconnect", nil)
 				}
+				currentTurnAccount = openAIWSTurnAccountSnapshot{turn: turn, account: latest}
 				turnPricing.freeze(turnAt)
 				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
-					Provider:      string(account.Platform),
+					Provider:      string(latest.Platform),
 					Operation:     "responses_websocket",
 					ClientModel:   currentTurnModel,
-					UpstreamModel: account.GetMappedModel(currentTurnModel),
-					AccountID:     account.ID,
+					UpstreamModel: latest.GetMappedModel(currentTurnModel),
+					AccountID:     latest.ID,
 				})
 				if turn == 1 {
 					return nil
@@ -2162,11 +2174,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 				currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
 				traceTurns.beginAttempt(turn, recording.AttemptMetadata{
-					Provider:      string(account.Platform),
+					Provider:      string(latest.Platform),
 					Operation:     "responses_websocket",
 					ClientModel:   currentTurnModel,
-					UpstreamModel: account.GetMappedModel(currentTurnModel),
-					AccountID:     account.ID,
+					UpstreamModel: latest.GetMappedModel(currentTurnModel),
+					AccountID:     latest.ID,
 				})
 				return nil
 			},
@@ -2183,6 +2195,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				turnTrustedObserve := currentTurnTrustedObserve
 				turnCyberBlockKey := currentTurnCyberBlockKey
 				turnPayloadHash := requestPayloadHash
+				turnAccount := account
+				if currentTurnAccount.turn == turn && currentTurnAccount.account != nil {
+					turnAccount = currentTurnAccount.account
+				}
 				turnResult := openAIWSTurnResult(result, turnModel)
 				releaseTurnSlots()
 				turnRequestedModel := strings.TrimSpace(turnModel)
@@ -2203,7 +2219,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					turnUpstreamModel = turnRequestedModel
 				}
 				turnUsageFields := turnMapping.ToUsageFields(turnRequestedModel, turnUpstreamModel)
-				h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, turnRequestedModel, turnErr != nil, turnCyberBlockKey, turnUsageFields, turnPayloadHash, turnTrustedObserve)
+				h.recordCyberPolicyIfMarked(c, apiKey, turnAccount, subscription, turnRequestedModel, turnErr != nil, turnCyberBlockKey, turnUsageFields, turnPayloadHash, turnTrustedObserve)
 				if service.GetOpsCyberPolicy(c) != nil && !turnTrustedObserve {
 					cyberBlockedThisConn = true
 				}
@@ -2217,7 +2233,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						return
 					}
 					reqLog.Warn("openai.websocket_partial_error_with_image_result",
-						zap.Int64("account_id", account.ID),
+						zap.Int64("account_id", turnAccount.ID),
 						zap.Int("image_count", turnResult.ImageCount),
 						zap.Error(turnErr),
 					)
@@ -2233,26 +2249,27 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					zap.String("billing_model", turnResult.BillingModel),
 				)
 				// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
-				if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
-					h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, turnResult.ResponseHeaders)
+				if turnAccount.Type == service.AccountTypeOAuth && !turnAccount.IsShadow() {
+					h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, turnAccount.ID, turnResult.ResponseHeaders)
 				}
 				scheduleModel := turnUpstreamModel
 				if scheduleModel == "" {
 					scheduleModel = turnRequestedModel
 				}
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, scheduleModel, openAIForwardSucceededForScheduling(turnResult), turnResult.FirstTokenMs)
+				h.gatewayService.ReportOpenAIAccountScheduleResult(turnAccount.ID, scheduleModel, openAIForwardSucceededForScheduling(turnResult), turnResult.FirstTokenMs)
 				inboundEndpoint := GetInboundEndpoint(c)
-				upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, turnResult)
+				upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, turnAccount, turnResult)
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 				sessionID := service.ExtractClientSessionID(c)
 				turnRecordPricingAt := turnPricing.current()
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+				turnUsageAccount := turnAccount
 				h.submitOpenAIUsageRecordTask(turnTraceCtx, turnResult, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             turnResult,
 						APIKey:             apiKey,
 						User:               apiKey.User,
-						Account:            account,
+						Account:            turnUsageAccount,
 						Subscription:       subscription,
 						InboundEndpoint:    inboundEndpoint,
 						UpstreamEndpoint:   upstreamEndpoint,
@@ -2267,7 +2284,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						CyberBlocked:       cyberBlocked,
 					}); err != nil {
 						reqLog.Error("openai.websocket_record_usage_failed",
-							zap.Int64("account_id", account.ID),
+							zap.Int64("account_id", turnUsageAccount.ID),
 							zap.String("request_id", turnResult.RequestID),
 							zap.Error(err),
 						)

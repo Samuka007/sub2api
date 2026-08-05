@@ -84,6 +84,59 @@ func TestAdminAccountEditPreservesRateSynchronizedAfterLoad(t *testing.T) {
 	require.Equal(t, synchronizedRate, *got.RateMultiplier)
 }
 
+func TestCRSAccountUpdatePreservesConcurrentProbeRate(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+	initialRate := 0.1
+	const crsAccountID = "crs-concurrent-probe-rate"
+	account := &service.Account{
+		Name:           "crs-rate-before-sync",
+		Platform:       service.PlatformAnthropic,
+		Type:           service.AccountTypeAPIKey,
+		RateMultiplier: &initialRate,
+		Credentials:    map[string]any{"api_key": "sk-crs-test"},
+		Extra: map[string]any{
+			"crs_account_id": crsAccountID,
+			"crs_kind":       "claude-console",
+			service.UpstreamBillingProbeEnabledExtraKey:    true,
+			service.UpstreamBillingRateSyncEnabledExtraKey: true,
+		},
+		Concurrency: 3,
+		Priority:    50,
+		Status:      service.StatusActive,
+		Schedulable: true,
+	}
+	require.NoError(t, repo.Create(ctx, account))
+
+	staleCRSUpdate, err := repo.GetByCRSAccountID(ctx, crsAccountID)
+	require.NoError(t, err)
+	require.NotNil(t, staleCRSUpdate)
+	require.NotNil(t, staleCRSUpdate.RateMultiplier)
+	require.Equal(t, initialRate, *staleCRSUpdate.RateMultiplier)
+	probeAccount, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+
+	probedRate := 0.2
+	require.NoError(t, repo.UpdateUpstreamBillingProbeSnapshot(ctx, probeAccount, &service.UpstreamBillingProbeSnapshot{
+		Status:        service.UpstreamBillingProbeStatusOK,
+		LastAttemptAt: time.Now().UTC(),
+	}, &probedRate))
+
+	staleCRSUpdate.Name = "crs-rate-after-sync"
+	staleCRSUpdate.Status = service.StatusDisabled
+	staleCRSUpdate.Extra["crs_kind"] = "claude-console-updated"
+	require.NoError(t, repo.Update(ctx, staleCRSUpdate))
+
+	got, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, "crs-rate-after-sync", got.Name)
+	require.Equal(t, service.StatusDisabled, got.Status)
+	require.Equal(t, "claude-console-updated", got.Extra["crs_kind"])
+	require.NotNil(t, got.RateMultiplier)
+	require.Equal(t, probedRate, *got.RateMultiplier)
+}
+
 func TestProbeSnapshotSyncsRateOnlyForSuccessfulEnabledAccount(t *testing.T) {
 	ctx := context.Background()
 	tx := testEntTx(t)

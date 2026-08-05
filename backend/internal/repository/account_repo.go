@@ -481,8 +481,11 @@ func (r *accountRepository) ListCRSAccountIDs(ctx context.Context) (map[string]i
 	return result, nil
 }
 
+// Update persists general account fields. Rate changes require the explicit
+// UpdateWithAccountBillingSettings path so stale snapshots cannot overwrite a
+// concurrently probe-synchronized multiplier.
 func (r *accountRepository) Update(ctx context.Context, account *service.Account) error {
-	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier)
+	return r.updateAccount(ctx, account, nil, nil, nil)
 }
 
 // UpdateWithAccountBillingSettings applies an admin account edit while

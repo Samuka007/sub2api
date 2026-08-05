@@ -2,6 +2,126 @@
 # 真实 HTTP 协议矩阵：复用 run_e2e.sh 已启动的 sub2api、fixture 和 Langfuse。
 set -euo pipefail
 
+# 非流式响应必须先通过客户端 schema 与上游 fixture canary 门禁，才能计入矩阵。
+# canary_json 是 JSON 字面量；递归计数确保 fixture canary 在响应中精确出现一次。
+assert_protocol_response() {
+  local label="$1" contract="$2" canary_json="$3" response_file="$4" diagnostic
+  if [[ ! -f "$response_file" ]]; then
+    printf '[e2e-matrix][ERROR] case %s response file is missing\n' "$label" >&2
+    return 1
+  fi
+  if ! diagnostic=$(jq -er --arg contract "$contract" --arg canary_json "$canary_json" '
+    def nonempty_string:
+      if type == "string" then length > 0 else false end;
+    def nonnegative_integer:
+      if type == "number" then . >= 0 and floor == . else false end;
+    def nonempty_array:
+      if type == "array" then length > 0 else false end;
+    def non_error_object:
+      if type == "object" then
+        (has("error") | not) and ((.type? // "") != "error")
+      else
+        false
+      end;
+    def anthropic_message:
+      (.id | nonempty_string) and .type == "message" and .role == "assistant" and
+      (.model | nonempty_string) and (.content | nonempty_array) and
+      .content[0].type == "text" and (.content[0].text | nonempty_string) and
+      (.stop_reason | nonempty_string) and
+      (.usage.input_tokens | nonnegative_integer) and
+      (.usage.output_tokens | nonnegative_integer);
+    def openai_chat_completion:
+      (.id | nonempty_string) and .object == "chat.completion" and
+      (.model | nonempty_string) and (.choices | nonempty_array) and
+      (.choices[0].index | nonnegative_integer) and
+      .choices[0].message.role == "assistant" and
+      (.choices[0].message.content | nonempty_string) and
+      (.choices[0].finish_reason | nonempty_string) and
+      (.usage.prompt_tokens | nonnegative_integer) and
+      (.usage.completion_tokens | nonnegative_integer) and
+      (.usage.total_tokens | nonnegative_integer);
+    def openai_response:
+      (.id | nonempty_string) and .object == "response" and .status == "completed" and
+      (.model | nonempty_string) and (.output | nonempty_array) and
+      .output[0].type == "message" and .output[0].role == "assistant" and
+      (.output[0].content | nonempty_array) and
+      .output[0].content[0].type == "output_text" and
+      (.output[0].content[0].text | nonempty_string) and
+      (.usage.input_tokens | nonnegative_integer) and
+      (.usage.output_tokens | nonnegative_integer) and
+      (.usage.total_tokens | nonnegative_integer);
+    def openai_embeddings:
+      .object == "list" and (.data | nonempty_array) and
+      .data[0].object == "embedding" and
+      (.data[0].index | nonnegative_integer) and
+      (.data[0].embedding | nonempty_array) and
+      all((.data[0].embedding // [])[]; type == "number") and
+      (.model | nonempty_string) and
+      (.usage.prompt_tokens | nonnegative_integer) and
+      (.usage.total_tokens | nonnegative_integer);
+    def openai_search:
+      (.results | nonempty_array) and
+      (.results[0].title | nonempty_string) and
+      (.results[0].url | nonempty_string) and
+      (.results[0].snippet | nonempty_string);
+    def anthropic_count_tokens:
+      (.input_tokens | nonnegative_integer);
+    def openai_image:
+      (.created | nonnegative_integer) and (.data | nonempty_array) and
+      (.data[0].url | nonempty_string);
+    def grok_video_operation:
+      (.request_id | nonempty_string) and .status == "pending";
+    def gemini_generate_content:
+      (.candidates | nonempty_array) and
+      .candidates[0].content.role == "model" and
+      (.candidates[0].content.parts | nonempty_array) and
+      (.candidates[0].content.parts[0].text | nonempty_string) and
+      .candidates[0].finishReason == "STOP" and
+      (.usageMetadata.promptTokenCount | nonnegative_integer) and
+      (.usageMetadata.candidatesTokenCount | nonnegative_integer) and
+      (.usageMetadata.totalTokenCount | nonnegative_integer) and
+      (.modelVersion | nonempty_string);
+    def matches_contract($name):
+      if $name == "anthropic.message" then anthropic_message
+      elif $name == "openai.chat_completion" then openai_chat_completion
+      elif $name == "openai.response" then openai_response
+      elif $name == "openai.embeddings" then openai_embeddings
+      elif $name == "openai.search" then openai_search
+      elif $name == "anthropic.count_tokens" then anthropic_count_tokens
+      elif $name == "openai.image" then openai_image
+      elif $name == "grok.video_operation" then grok_video_operation
+      elif $name == "gemini.generate_content" then gemini_generate_content
+      else error("unsupported response contract: \($name)")
+      end;
+    ($canary_json | fromjson) as $canary
+    | if (non_error_object | not) then
+        error("expected a non-error JSON object")
+      elif (matches_contract($contract) | not) then
+        error("required schema mismatch for \($contract)")
+      elif ([.. | select(. == $canary)] | length) != 1 then
+        error("fixture canary must occur exactly once for \($contract)")
+      else
+        true
+      end
+  ' "$response_file" 2>&1); then
+    printf '[e2e-matrix][ERROR] case %s response contract %s failed: %s\n' \
+      "$label" "$contract" "$diagnostic" >&2
+    return 1
+  fi
+}
+
+record_validated_case() {
+  local label="$1" contract="$2" canary_json="$3" response_file="$4"
+  local request_id="$5" protocol="$6" account_id="$7"
+  assert_protocol_response "$label" "$contract" "$canary_json" "$response_file" || return 1
+  record_case "$request_id" "$protocol" "$account_id"
+}
+
+# 轻量回归测试只加载上述确定性 helper，不触发账号、网络或容器操作。
+if [[ "${PROTOCOL_MATRIX_CONTRACTS_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 BASE_URL="http://127.0.0.1:8080"
 TOKEN="${TOKEN:?TOKEN is required}"
@@ -158,7 +278,7 @@ account_for_key() {
   esac
 }
 post_json() {
-  local label="$1" key="$2" path="$3" protocol="$4" payload="$5" auth_header="${6:-Authorization}"
+  local label="$1" key="$2" path="$3" protocol="$4" contract="$5" canary_json="$6" payload="$7" auth_header="${8:-Authorization}"
   local request_id="$PREFIX-$label" response="$TMP_DIR/$label.json" code account_id auth_value="$key"
   if [[ "$auth_header" == "Authorization" ]]; then
     auth_value="Bearer $key"
@@ -167,27 +287,35 @@ post_json() {
     -H "Content-Type: application/json" -H "X-Client-Request-ID: $request_id" --data-binary @- \
     -o "$response" -w '%{http_code}')
   [[ "$code" == "200" ]] || { cat "$response" >&2; fail "$label returned HTTP $code"; }
-  jq -e . "$response" >/dev/null || { cat "$response" >&2; fail "$label returned invalid JSON"; }
   account_id=$(account_for_key "$key")
-  record_case "$request_id" "$protocol" "$account_id"
+  record_validated_case "$label" "$contract" "$canary_json" "$response" \
+    "$request_id" "$protocol" "$account_id" || return 1
 }
 
 CANARY="matrix-canary-$RUN_ID"
 post_json anthropic "$ANTHROPIC_KEY" /v1/messages anthropic.messages \
+  anthropic.message '"matrix anthropic"' \
   "$(jq -nc --arg model "$ANTHROPIC_MODEL" --arg prompt "$CANARY-anthropic" '{model:$model,max_tokens:32,messages:[{role:"user",content:$prompt}]}')"
 post_json chat "$OPENAI_CHAT_KEY" /v1/chat/completions openai.chat_completions \
+  openai.chat_completion '"matrix chat"' \
   "$(jq -nc --arg model "$OPENAI_CHAT_MODEL" --arg prompt "$CANARY-chat" '{model:$model,messages:[{role:"user",content:$prompt}]}')"
 post_json responses "$OPENAI_KEY" /v1/responses openai.responses \
+  openai.response '"matrix response"' \
   "$(jq -nc --arg model "$OPENAI_MODEL" --arg prompt "$CANARY-responses" '{model:$model,input:$prompt,stream:false}')"
 post_json embeddings "$OPENAI_KEY" /v1/embeddings openai.embeddings \
+  openai.embeddings '[0.125,-0.25,0.5]' \
   "$(jq -nc --arg prompt "$CANARY-embeddings" '{model:"embed-e2e-matrix",input:$prompt}')"
 post_json search "$OPENAI_KEY" /v1/alpha/search openai.search \
+  openai.search '"https://example.test/e2e"' \
   "$(jq -nc --arg model "$OPENAI_MODEL" --arg prompt "$CANARY-search" '{model:$model,query:$prompt}')"
 post_json anthropic-count "$ANTHROPIC_KEY" /v1/messages/count_tokens anthropic.count_tokens \
+  anthropic.count_tokens '11' \
   "$(jq -nc --arg model "$ANTHROPIC_MODEL" --arg prompt "$CANARY-anthropic-count" '{model:$model,messages:[{role:"user",content:$prompt}]}')"
 post_json openai-backed-count "$OPENAI_KEY" /v1/messages/count_tokens anthropic.count_tokens \
+  anthropic.count_tokens '11' \
   "$(jq -nc --arg model "$OPENAI_MODEL" --arg prompt "$CANARY-openai-backed-count" '{model:$model,messages:[{role:"user",content:$prompt}]}')"
 post_json openai-image-generation "$OPENAI_KEY" /v1/images/generations openai.images.generations \
+  openai.image '"https://example.test/matrix-generation.png"' \
   "$(jq -nc --arg prompt "$CANARY-openai-image-generation" '{model:"gpt-image-2",prompt:$prompt,size:"1024x1024"}')"
 
 printf '\x89PNG\r\n\x1a\n' >"$TMP_DIR/input.png"
@@ -197,20 +325,26 @@ OPENAI_EDIT_CODE=$(curl_secret_header "Authorization: Bearer $OPENAI_KEY" -sS -X
   -F "prompt=$CANARY-openai-image-edit" -F "image=@$TMP_DIR/input.png;type=image/png" \
   -o "$TMP_DIR/openai-image-edit.json" -w '%{http_code}')
 [[ "$OPENAI_EDIT_CODE" == "200" ]] || { cat "$TMP_DIR/openai-image-edit.json" >&2; fail "openai image edit returned HTTP $OPENAI_EDIT_CODE"; }
-jq -e . "$TMP_DIR/openai-image-edit.json" >/dev/null || fail "openai image edit returned invalid JSON"
-record_case "$OPENAI_EDIT_ID" openai.images.edits "$OPENAI_ACCOUNT"
+record_validated_case openai-image-edit openai.image '"https://example.test/matrix-edit.png"' \
+  "$TMP_DIR/openai-image-edit.json" "$OPENAI_EDIT_ID" openai.images.edits "$OPENAI_ACCOUNT" || exit 1
 
 post_json grok-image-generation "$GROK_KEY" /v1/images/generations openai.images.generations \
+  openai.image '"https://example.test/grok-generation.png"' \
   "$(jq -nc --arg prompt "$CANARY-grok-image-generation" '{model:"grok-imagine",prompt:$prompt,size:"1024x1024"}')"
 post_json grok-image-edit "$GROK_KEY" /v1/images/edits openai.images.edits \
+	openai.image '"https://example.test/grok-edit.png"' \
 	"$(jq -nc --arg prompt "$CANARY-grok-image-edit" '{model:"grok-imagine-edit",prompt:$prompt,image:{url:"https://example.test/source.png"},size:"1024x1024"}')"
 post_json grok-video-generation "$GROK_KEY" /v1/videos/generations openai.videos.generations \
+	grok.video_operation '"video_e2e_generation"' \
 	"$(jq -nc --arg prompt "$CANARY-grok-video-generation" '{model:"grok-imagine-video",prompt:$prompt,resolution:"480p",duration:1}')"
 post_json grok-video-edit "$GROK_KEY" /v1/videos/edits openai.videos.edits \
+	grok.video_operation '"video_e2e_edit"' \
 	"$(jq -nc --arg prompt "$CANARY-grok-video-edit" '{model:"grok-imagine-video",prompt:$prompt,video:{url:"https://example.test/source.mp4"},resolution:"480p",duration:1}')"
 post_json grok-video-extension "$GROK_KEY" /v1/videos/extensions openai.videos.extensions \
+	grok.video_operation '"video_e2e_extension"' \
 	"$(jq -nc --arg prompt "$CANARY-grok-video-extension" '{model:"grok-imagine-video",prompt:$prompt,video:{url:"https://example.test/source.mp4"},resolution:"480p",duration:1}')"
 post_json gemini "$GEMINI_KEY" "/v1beta/models/$GEMINI_MODEL:generateContent" gemini.generateContent \
+  gemini.generate_content '"matrix gemini"' \
   "$(jq -nc --arg prompt "$CANARY-gemini" '{contents:[{role:"user",parts:[{text:$prompt}]}]}')" x-goog-api-key
 
 GEMINI_STREAM_ID="$PREFIX-gemini-stream"
@@ -225,8 +359,10 @@ grep -q 'matrix gemini stream' "$TMP_DIR/gemini-stream.sse" || fail "Gemini stre
 record_case "$GEMINI_STREAM_ID" gemini.streamGenerateContent "$GEMINI_ACCOUNT"
 
 post_json antigravity-native "$ANTIGRAVITY_KEY" /antigravity/v1/messages anthropic.messages \
+  anthropic.message '"matrix antigravity"' \
   "$(jq -nc --arg model "$ANTIGRAVITY_ANTHROPIC_MODEL" --arg prompt "$CANARY-antigravity-native" '{model:$model,max_tokens:32,messages:[{role:"user",content:$prompt}]}')"
 post_json antigravity-gemini "$ANTIGRAVITY_KEY" "/antigravity/v1beta/models/$ANTIGRAVITY_GEMINI_MODEL:generateContent" gemini.generateContent \
+  gemini.generate_content '"matrix gemini"' \
   "$(jq -nc --arg prompt "$CANARY-antigravity-gemini" '{contents:[{role:"user",parts:[{text:$prompt}]}]}')" x-goog-api-key
 
 sort -o "$EXPECTED_MAP" "$EXPECTED_MAP"

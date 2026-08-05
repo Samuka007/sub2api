@@ -14,6 +14,7 @@ fail() { printf '[modeltrace-full-e2e][ERROR] %s\n' "$*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 
 need_cmd bash
+need_cmd jq
 need_cmd go
 need_cmd make
 need_cmd pnpm
@@ -33,6 +34,9 @@ resolve_arch
 log "phase 1/9: validating harness and deployment contracts"
 bash -n "$SCRIPT_DIR/runtime_adapter.sh"
 bash -n "$SCRIPT_DIR/run_e2e.sh"
+bash -n "$SCRIPT_DIR/run_protocol_matrix.sh"
+bash -n "$SCRIPT_DIR/test_protocol_matrix.sh"
+bash "$SCRIPT_DIR/test_protocol_matrix.sh"
 bash -n "$SCRIPT_DIR/teardown.sh"
 bash -n "$SCRIPT_DIR/test_runtime_adapter.sh"
 bash "$SCRIPT_DIR/test_runtime_adapter.sh"

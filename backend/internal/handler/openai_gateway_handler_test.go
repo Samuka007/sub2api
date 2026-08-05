@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -1435,6 +1436,28 @@ func TestOpenAIResponsesWebSocket_PassthroughTracksModelPerTurn(t *testing.T) {
 		"each turn must be billed with its own channel-mapped model")
 }
 
+func TestOpenAIResponsesWebSocket_PassthroughUsesLatestAccountSnapshotPerTurn(t *testing.T) {
+	initialRate := 0.20
+	refreshedRate := 0.30
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload:                     `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		secondPayload:                    `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		initialAccountRateMultiplier:     &initialRate,
+		replacementAccountRateMultiplier: &refreshedRate,
+	})
+
+	require.Len(t, got.logs, 2)
+	require.Equal(t, got.logs[0].AccountID, got.logs[1].AccountID, "replacement snapshot 必须保持同一账号 ID")
+	require.NotNil(t, got.logs[0].AccountRateMultiplier)
+	require.NotNil(t, got.logs[1].AccountRateMultiplier)
+	require.InDelta(t, initialRate, *got.logs[0].AccountRateMultiplier, 1e-12,
+		"首轮异步 usage 必须捕获本 turn 的不可变账号快照")
+	require.InDelta(t, refreshedRate, *got.logs[1].AccountRateMultiplier, 1e-12,
+		"后续 turn 必须使用同 ID、更新 UpdatedAt 的 latest 账号倍率")
+	require.InDelta(t, got.logs[0].ActualCost, got.logs[1].ActualCost, 1e-12,
+		"账号倍率刷新不得改变用户 ActualCost 语义")
+}
+
 func TestOpenAIResponsesWebSocket_UnchangedChannelTargetOutsideAccountMappingKeysRemainsValid(t *testing.T) {
 	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 		firstPayload:  `{"type":"response.create","model":"public-alias","stream":false}`,
@@ -1764,15 +1787,17 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 }
 
 type openAIResponsesWSUsageLogCase struct {
-	firstPayload              string
-	secondPayload             string
-	userAgent                 *string
-	ingressMode               string
-	channelMapping            map[string]string
-	billingModelSource        string
-	accountModelMapping       map[string]any
-	afterFirstUpstreamRequest func(channelSvc *service.ChannelService) error
-	traceManager              *modeltrace.Manager
+	firstPayload                     string
+	secondPayload                    string
+	userAgent                        *string
+	ingressMode                      string
+	channelMapping                   map[string]string
+	billingModelSource               string
+	accountModelMapping              map[string]any
+	initialAccountRateMultiplier     *float64
+	replacementAccountRateMultiplier *float64
+	afterFirstUpstreamRequest        func(channelSvc *service.ChannelService) error
+	traceManager                     *modeltrace.Manager
 }
 
 type openAIResponsesWSUsageLogResult struct {
@@ -1787,9 +1812,12 @@ type openAIResponsesWSUsageLogResult struct {
 type openAIWSUsageHandlerAccountRepoStub struct {
 	service.AccountRepository
 	account service.Account
+	mu      sync.RWMutex
 }
 
 func (s *openAIWSUsageHandlerAccountRepoStub) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.account.Platform != platform {
 		return nil, nil
 	}
@@ -1801,11 +1829,20 @@ func (s *openAIWSUsageHandlerAccountRepoStub) ListSchedulableByGroupIDAndPlatfor
 }
 
 func (s *openAIWSUsageHandlerAccountRepoStub) GetByID(ctx context.Context, id int64) (*service.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.account.ID != id {
 		return nil, nil
 	}
 	account := s.account
 	return &account, nil
+}
+
+func (s *openAIWSUsageHandlerAccountRepoStub) replaceRateMultiplier(rate float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.account.RateMultiplier = &rate
+	s.account.UpdatedAt = s.account.UpdatedAt.Add(time.Second)
 }
 
 type openAIWSFailoverHandlerAccountRepoStub struct {
@@ -2571,6 +2608,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	upstreamPayloadCh := make(chan []byte, turnCount)
 	upstreamErrCh := make(chan error, 1)
 	var channelSvc *service.ChannelService
+	var accountRepo *openAIWSUsageHandlerAccountRepoStub
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{
 			CompressionMode: coderws.CompressionContextTakeover,
@@ -2601,6 +2639,13 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 					upstreamErrCh <- callbackErr
 					return
 				}
+			}
+			if turn == 1 && tc.replacementAccountRateMultiplier != nil {
+				if accountRepo == nil {
+					upstreamErrCh <- errors.New("account repository is nil")
+					return
+				}
+				accountRepo.replaceRateMultiplier(*tc.replacementAccountRateMultiplier)
 			}
 
 			response := fmt.Sprintf(
@@ -2642,6 +2687,11 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	if strings.TrimSpace(tc.ingressMode) != "" {
 		account.Extra["openai_apikey_responses_websockets_v2_mode"] = tc.ingressMode
 	}
+	if tc.initialAccountRateMultiplier != nil {
+		rate := *tc.initialAccountRateMultiplier
+		account.RateMultiplier = &rate
+		account.UpdatedAt = time.Now()
+	}
 
 	cfg := &config.Config{}
 	cfg.RunMode = config.RunModeSimple
@@ -2656,7 +2706,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
 
-	accountRepo := &openAIWSUsageHandlerAccountRepoStub{account: account}
+	accountRepo = &openAIWSUsageHandlerAccountRepoStub{account: account}
 	usageRepo := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, turnCount)}
 	if tc.traceManager != nil {
 		usageRepo.traceContinuations = make(chan recording.TraceContinuation, turnCount)
@@ -2675,6 +2725,10 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		}, nil, nil, nil)
 	}
 
+	var schedulerSnapshot *service.SchedulerSnapshotService
+	if tc.replacementAccountRateMultiplier != nil {
+		schedulerSnapshot = service.NewSchedulerSnapshotService(nil, nil, accountRepo, nil, nil)
+	}
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo,
@@ -2685,7 +2739,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil,
 		nil,
 		cfg,
-		nil,
+		schedulerSnapshot,
 		nil,
 		service.NewBillingService(cfg, nil),
 		nil,
@@ -2724,10 +2778,25 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		GroupID: &groupID,
 		User:    &service.User{ID: 1701, Status: service.StatusActive},
 	}
+	if tc.replacementAccountRateMultiplier != nil {
+		apiKey.Group = &service.Group{
+			ID:                   groupID,
+			Platform:             service.PlatformOpenAI,
+			Status:               service.StatusActive,
+			Hydrated:             true,
+			RateMultiplier:       1,
+			ProfitControlEnabled: true,
+			ProfitMinMargin:      0.5,
+		}
+	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+		if apiKey.Group != nil {
+			requestCtx := context.WithValue(c.Request.Context(), ctxkey.Group, apiKey.Group)
+			c.Request = c.Request.WithContext(requestCtx)
+		}
 		c.Next()
 	})
 	router.GET("/openai/v1/responses", h.ResponsesWebSocket)
