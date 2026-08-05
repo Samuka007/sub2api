@@ -72,33 +72,6 @@ Model IQ 为已登录用户提供 GPT 模型测试结果对比页面。页面会
 - [`frontend/src/views/user/ModelIqView.vue`](frontend/src/views/user/ModelIqView.vue)
 - [`frontend/src/views/user/__tests__/ModelIqView.spec.ts`](frontend/src/views/user/__tests__/ModelIqView.spec.ts)
 
-### 2. 模型雷达
-
-模型雷达为管理员提供公开模型额度、速度和质量信息的结构化快照。
-
-后端职责：
-
-- 在严格的超时和响应大小限制下获取公开雷达页面。
-- 只解析需要的标题、摘要、表格和模型质量卡片。
-- 通过现有设置仓库保存结构化 JSON，不保存第三方原始 HTML。
-- 普通快照每 12 小时自动刷新一次。
-- 管理员手动刷新存在 30 分钟冷却时间。
-- 自动刷新失败时继续返回最后一次成功快照。
-
-前端职责：
-
-- 在管理后台展示额度、速度和质量三个区域。
-- 展示数据源时间、本地抓取时间、旧数据状态和下次可刷新时间。
-- 允许管理员发起受控的手动刷新。
-
-核心文件：
-
-- [`backend/internal/service/model_radar_service.go`](backend/internal/service/model_radar_service.go)
-- [`backend/internal/handler/admin/model_radar_handler.go`](backend/internal/handler/admin/model_radar_handler.go)
-- [`backend/internal/server/routes/model_radar.go`](backend/internal/server/routes/model_radar.go)
-- [`frontend/src/api/modelRadar.ts`](frontend/src/api/modelRadar.ts)
-- [`frontend/src/views/admin/ModelRadarView.vue`](frontend/src/views/admin/ModelRadarView.vue)
-
 ### 3. 分组模型价格展示
 
 用户可以在 API Key 页面查看每个可见分组支持的模型价格。鼠标悬停或键盘聚焦
@@ -261,7 +234,7 @@ View 可以组合完整业务流程，但应通过 API 模块调用后端。可�
 
 ### 运行依赖
 
-- PostgreSQL 保存用户、渠道、分组、订单等长期数据，模型雷达快照也通过现有设置存储路径保存。
+- PostgreSQL 保存用户、渠道、分组、订单等长期数据。
 - Redis 为上游 Sub2API 功能提供共享缓存、队列、限流和协调能力。
 - Model IQ 使用小型进程内缓存，因为它只代理一个有严格大小限制的比较快照。
 - Plus 配额自动化将配置和运行状态保存在设置表，将异常和重置状态保存在账号扩展字段，并使用
@@ -295,29 +268,6 @@ sequenceDiagram
     V-->>U: 展示排名和趋势
 ```
 
-### 模型雷达请求流程
-
-```mermaid
-sequenceDiagram
-    participant A as 管理员
-    participant V as ModelRadarView
-    participant H as ModelRadarHandler
-    participant S as ModelRadarService
-    participant R as 设置仓库
-    participant C as 公开雷达页面
-
-    A->>V: 打开后台模型雷达
-    V->>H: GET /api/v1/admin/model-radar
-    H->>S: 获取雷达快照
-    S->>R: 读取上次快照
-    opt 快照不存在或已经过期
-        S->>C: 获取受限制的 HTML
-        S->>S: 解析需要的结构化字段
-        S->>R: 保存 JSON 快照
-    end
-    S-->>H: 返回当前或旧快照
-    H-->>V: 返回雷达页面数据
-```
 
 ### 分组价格请求流程
 
@@ -338,8 +288,6 @@ KeysView
 | --- | --- | --- | --- |
 | `GET` | `/model-iq` | 已登录用户 | 获取当前 Model IQ 比较快照 |
 | `GET` | `/channels/group-pricing` | 已登录用户 | 获取可见分组与模型价格 |
-| `GET` | `/admin/model-radar` | 管理员 | 获取当前模型雷达快照 |
-| `POST` | `/admin/model-radar/refresh` | 管理员 | 发起受控的手动刷新 |
 | `GET` | `/admin/openai/plus-quota-automation` | 管理员 | 获取 Plus 自动化配置和运行状态 |
 | `PUT` | `/admin/openai/plus-quota-automation` | 管理员 | 更新目标分组、周期和用量阈值 |
 | `POST` | `/admin/openai/plus-quota-automation/run` | 管理员 | 立即发起一次 Plus 配额扫描 |
@@ -430,14 +378,11 @@ quota_recovery:
 私有功能的后端核心文件：
 
 ```text
-backend/internal/handler/admin/model_radar_handler.go
 backend/internal/handler/admin/plus_quota_automation_handler.go
 backend/internal/handler/model_iq_handler.go
 backend/internal/handler/model_iq_handler_test.go
-backend/internal/server/routes/model_radar.go
 backend/internal/service/model_iq_service.go
 backend/internal/service/model_iq_service_test.go
-backend/internal/service/model_radar_service.go
 backend/internal/service/plus_quota_automation_service.go
 backend/internal/service/plus_quota_automation_service_test.go
 backend/internal/service/quota_recovery_checker.go
@@ -448,11 +393,9 @@ backend/internal/service/quota_recovery_service.go
 
 ```text
 frontend/src/api/modelIq.ts
-frontend/src/api/modelRadar.ts
 frontend/src/api/admin/plusQuotaAutomation.ts
 frontend/src/components/keys/GroupPricingPopover.vue
 frontend/src/router/__tests__/model-iq-route.spec.ts
-frontend/src/views/admin/ModelRadarView.vue
 frontend/src/views/admin/PlusQuotaAutomationView.vue
 frontend/src/views/user/ModelIqView.vue
 frontend/src/views/user/__tests__/ModelIqView.spec.ts

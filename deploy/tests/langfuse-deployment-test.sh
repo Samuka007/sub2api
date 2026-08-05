@@ -18,6 +18,22 @@ trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/work"
 git ls-files -z deploy/langfuse | tar --null -T - -cf - | tar -xf - -C "$tmp_dir/work"
 stack="$tmp_dir/work/deploy/langfuse"
+file_mode() {
+  if stat -c %a "$1" >/dev/null 2>&1; then
+    stat -c %a "$1"
+  else
+    stat -f %Lp "$1"
+  fi
+}
+sed_in_place() {
+  if sed --version >/dev/null 2>&1; then
+    sed -i "$@"
+  else
+    sed -i '' "$@"
+  fi
+}
+
+
 
 invalid_urls=(
   ''
@@ -53,17 +69,17 @@ grep -qx 'Rendered Xray bridge and main-server portal configs. Secrets were not 
 grep -qx 'Created .env and Xray configs for https://langfuse.example.com. Secrets were not printed.' "$tmp_dir/generate.out"
 grep -qx 'NEXTAUTH_URL=https://langfuse.example.com' "$stack/.env"
 grep -qx 'LANGFUSE_BIND_IP=127.0.0.1' "$stack/.env"
-test "$(stat -c %a "$stack/.env")" = 600
-test "$(stat -c %a "$stack/clickhouse-config.d/resource-logging.xml")" = 644
-test "$(stat -c %a "$stack/clickhouse-read-proxy-nginx.conf")" = 644
-test "$(stat -c %a "$stack/clickhouse-read-proxy.conf.template")" = 644
-test "$(stat -c %a "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
-test "$(stat -c %a "$stack/clickhouse-users.d/resource-profile.xml")" = 644
-test "$(stat -c %a "$stack/.xray")" = 700
-test "$(stat -c %a "$stack/main-server-xray")" = 700
-test "$(stat -c %a "$stack/.xray/bridge.json")" = 644
-test "$(stat -c %a "$stack/main-server-xray/config.json")" = 644
-test "$(stat -c %a "$stack/main-server-xray/.env")" = 600
+test "$(file_mode "$stack/.env")" = 600
+test "$(file_mode "$stack/clickhouse-config.d/resource-logging.xml")" = 644
+test "$(file_mode "$stack/clickhouse-read-proxy-nginx.conf")" = 644
+test "$(file_mode "$stack/clickhouse-read-proxy.conf.template")" = 644
+test "$(file_mode "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
+test "$(file_mode "$stack/clickhouse-users.d/resource-profile.xml")" = 644
+test "$(file_mode "$stack/.xray")" = 700
+test "$(file_mode "$stack/main-server-xray")" = 700
+test "$(file_mode "$stack/.xray/bridge.json")" = 644
+test "$(file_mode "$stack/main-server-xray/config.json")" = 644
+test "$(file_mode "$stack/main-server-xray/.env")" = 600
 jq -e . "$stack/.xray/bridge.json" >/dev/null
 jq -e . "$stack/main-server-xray/config.json" >/dev/null
 grep -q '"redirect": "langfuse-ingest:3000"' "$stack/.xray/bridge.json"
@@ -111,24 +127,24 @@ chmod 600 \
   "$stack/clickhouse-config.d/resource-logging.xml" \
   "$stack/clickhouse-users.d/langfuse-read.xml" \
   "$stack/clickhouse-users.d/resource-profile.xml"
-sed -i \
+sed_in_place \
   -e 's#^XRAY_IMAGE=.*#XRAY_IMAGE=ghcr.io/xtls/xray-core:26.5.9#' \
   -e 's/^XRAY_SERVER_PORT=.*/XRAY_SERVER_PORT=31590/' \
   -e 's#^XRAY_REALITY_TARGET=.*#XRAY_REALITY_TARGET=api.sub2api.com:443#' \
   -e 's/^XRAY_SERVER_ADDRESS=.*/XRAY_SERVER_ADDRESS=192.0.2.10/' \
   "$stack/.env"
 # Simulate an existing deployment created before read isolation was added.
-sed -i \
+sed_in_place \
   -e '/^CLICKHOUSE_READ_PROXY_IMAGE=/d' \
   -e '/^CLICKHOUSE_READ_PASSWORD=/d' \
   "$stack/.env"
 grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET|CLICKHOUSE_READ_PROXY_IMAGE|CLICKHOUSE_READ_PASSWORD)=' "$stack/.env" >"$tmp_dir/migration-unchanged.before"
 (cd "$stack" && ./generate-xray-config.sh) >/dev/null
-test "$(stat -c %a "$stack/clickhouse-config.d/resource-logging.xml")" = 644
-test "$(stat -c %a "$stack/clickhouse-read-proxy-nginx.conf")" = 644
-test "$(stat -c %a "$stack/clickhouse-read-proxy.conf.template")" = 644
-test "$(stat -c %a "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
-test "$(stat -c %a "$stack/clickhouse-users.d/resource-profile.xml")" = 644
+test "$(file_mode "$stack/clickhouse-config.d/resource-logging.xml")" = 644
+test "$(file_mode "$stack/clickhouse-read-proxy-nginx.conf")" = 644
+test "$(file_mode "$stack/clickhouse-read-proxy.conf.template")" = 644
+test "$(file_mode "$stack/clickhouse-users.d/langfuse-read.xml")" = 644
+test "$(file_mode "$stack/clickhouse-users.d/resource-profile.xml")" = 644
 grep -qx 'XRAY_SERVER_PORT=443' "$stack/.env"
 grep -qx 'XRAY_REALITY_TARGET=host.docker.internal:8443' "$stack/.env"
 grep -qx 'XRAY_IMAGE=ghcr.nju.edu.cn/xtls/xray-core:26.5.9@sha256:933c868cbbb1ed632198c3ffeb99454709fa13dbb8c2a6f328d6a9a19e75269c' "$stack/.env"
@@ -138,7 +154,7 @@ grep -Eq '^CLICKHOUSE_READ_PASSWORD=[0-9a-f]{48}$' "$stack/.env"
 grep -vE '^(XRAY_IMAGE|XRAY_SERVER_PORT|XRAY_REALITY_TARGET|CLICKHOUSE_READ_PROXY_IMAGE|CLICKHOUSE_READ_PASSWORD)=' "$stack/.env" >"$tmp_dir/migration-unchanged.after"
 cmp "$tmp_dir/migration-unchanged.before" "$tmp_dir/migration-unchanged.after"
 
-sed -i \
+sed_in_place \
   -e 's/^XRAY_SERVER_PORT=.*/XRAY_SERVER_PORT=24443/' \
   -e 's#^XRAY_REALITY_TARGET=.*#XRAY_REALITY_TARGET=caddy.internal:9443#' \
   "$stack/.env"
@@ -159,7 +175,7 @@ flock -u 8
 exec 8>&-
 
 cp "$stack/.env" "$tmp_dir/valid.env"
-sed -i 's/^XRAY_SERVER_PORT=.*/XRAY_SERVER_PORT=0/' "$stack/.env"
+sed_in_place 's/^XRAY_SERVER_PORT=.*/XRAY_SERVER_PORT=0/' "$stack/.env"
 if (cd "$stack" && ./generate-xray-config.sh) >/dev/null 2>&1; then
   echo "generate-xray-config.sh must reject port zero" >&2
   exit 1
