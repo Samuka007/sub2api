@@ -50,10 +50,14 @@ func TestBatchImageTraceRecorder_SuccessfulIndexEmitsItemResults(t *testing.T) {
 	manager, exportedSpans := newBatchTraceTestManager(t)
 	recorder := provideBatchImageTraceRecorder(manager)
 	continuation := batchTraceTestContinuation()
+	continuation.GroupID = 43
+	apiKeyID := int64(42)
+	accountID := int64(44)
 	errorCode := "SAFETY_BLOCKED"
 
 	recorder.RecordBatchImageResult(context.Background(), &service.BatchImageJob{
-		BatchID: "batch-items", Model: "imagen-test", TraceContinuation: &continuation,
+		BatchID: "batch-items", UserID: 41, APIKeyID: &apiKeyID, AccountID: &accountID,
+		Model: "imagen-test", TraceContinuation: &continuation,
 	}, service.BatchImageTraceResult{
 		ProviderState: "JOB_STATE_SUCCEEDED",
 		Items: []service.CreateBatchImageItemParams{
@@ -67,10 +71,21 @@ func TestBatchImageTraceRecorder_SuccessfulIndexEmitsItemResults(t *testing.T) {
 	seen := make(map[string]string, 2)
 	for _, span := range spans {
 		attrs := batchTraceAttributes(span)
-		var metadata map[string]string
+		var metadata struct {
+			TaskID    string `json:"task_id"`
+			ItemID    string `json:"item_id"`
+			AccountID int64  `json:"account_id"`
+			APIKeyID  int64  `json:"api_key_id"`
+			UserID    int64  `json:"user_id"`
+			GroupID   int64  `json:"group_id"`
+		}
 		require.NoError(t, json.Unmarshal([]byte(batchTraceStringAttribute(t, attrs, "langfuse.observation.metadata")), &metadata))
-		require.Equal(t, "batch-items", metadata["task_id"])
-		itemID := metadata["item_id"]
+		require.Equal(t, "batch-items", metadata.TaskID)
+		require.Equal(t, int64(44), metadata.AccountID)
+		require.Equal(t, int64(42), metadata.APIKeyID)
+		require.Equal(t, int64(41), metadata.UserID)
+		require.Equal(t, int64(43), metadata.GroupID)
+		itemID := metadata.ItemID
 		require.NotEmpty(t, itemID)
 		var output map[string]any
 		require.NoError(t, json.Unmarshal([]byte(batchTraceStringAttribute(t, attrs, "langfuse.observation.output")), &output))

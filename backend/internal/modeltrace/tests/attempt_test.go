@@ -64,6 +64,25 @@ func TestModelTraceProtocolConversion(t *testing.T) {
 	require.Equal(t, tracepb.Status_STATUS_CODE_OK, attempt.Status.Code)
 }
 
+func TestModelTraceAttemptKeepsBodySessionAfterChunkedRead(t *testing.T) {
+	clientInput := []byte(`{"model":"gpt-4","session_id":"chunked-session","messages":[{"role":"user","content":"hello"}]}`)
+	spans := runAttemptTrace(t, clientInput, func(c *gin.Context) {
+		var body bytes.Buffer
+		_, err := io.CopyBuffer(&body, c.Request.Body, make([]byte, 7))
+		require.NoError(t, err)
+		require.Equal(t, clientInput, body.Bytes())
+
+		attempt := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{
+			Provider: "openai", Operation: "chat", AccountID: 41,
+		}, []byte(`{"model":"gpt-4"}`))
+		attempt.End(recording.AttemptResult{Output: []byte(`{"ok":true}`), HTTPStatus: http.StatusOK})
+		c.Data(http.StatusOK, "application/json", []byte(`{"ok":true}`))
+	})
+
+	attempt := spanNamed(t, spans, "upstream.attempt.1")
+	require.Equal(t, "chunked-session", stringAttribute(t, attributesByKey(attempt.Attributes), "langfuse.session.id"))
+}
+
 func TestModelTraceContentCaptureRedactsRootAndAttempt(t *testing.T) {
 	media := base64.StdEncoding.EncodeToString([]byte("private-image-bytes"))
 	clientInput := []byte(fmt.Sprintf(`{"model":"gpt-4","api_key":"client-secret","messages":[{"role":"user","content":[{"type":"image_url","image_url":"data:image/png;base64,%s"}]}]}`, media))

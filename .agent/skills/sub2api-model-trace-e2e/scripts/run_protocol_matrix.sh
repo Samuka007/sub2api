@@ -193,7 +193,7 @@ post_json openai-image-generation "$OPENAI_KEY" /v1/images/generations openai.im
 printf '\x89PNG\r\n\x1a\n' >"$TMP_DIR/input.png"
 OPENAI_EDIT_ID="$PREFIX-openai-image-edit"
 OPENAI_EDIT_CODE=$(curl_secret_header "Authorization: Bearer $OPENAI_KEY" -sS -X POST "$BASE_URL/v1/images/edits" \
-  -H "X-Client-Request-ID: $OPENAI_EDIT_ID" -F 'model=gpt-image-2' \
+  -H "X-Client-Request-ID: $OPENAI_EDIT_ID" -F 'model=gpt-image-2' -F 'size=1024x1024' \
   -F "prompt=$CANARY-openai-image-edit" -F "image=@$TMP_DIR/input.png;type=image/png" \
   -o "$TMP_DIR/openai-image-edit.json" -w '%{http_code}')
 [[ "$OPENAI_EDIT_CODE" == "200" ]] || { cat "$TMP_DIR/openai-image-edit.json" >&2; fail "openai image edit returned HTTP $OPENAI_EDIT_CODE"; }
@@ -201,9 +201,9 @@ jq -e . "$TMP_DIR/openai-image-edit.json" >/dev/null || fail "openai image edit 
 record_case "$OPENAI_EDIT_ID" openai.images.edits "$OPENAI_ACCOUNT"
 
 post_json grok-image-generation "$GROK_KEY" /v1/images/generations openai.images.generations \
-  "$(jq -nc --arg prompt "$CANARY-grok-image-generation" '{model:"grok-imagine",prompt:$prompt}')"
+  "$(jq -nc --arg prompt "$CANARY-grok-image-generation" '{model:"grok-imagine",prompt:$prompt,size:"1024x1024"}')"
 post_json grok-image-edit "$GROK_KEY" /v1/images/edits openai.images.edits \
-	"$(jq -nc --arg prompt "$CANARY-grok-image-edit" '{model:"grok-imagine-edit",prompt:$prompt,image:{url:"https://example.test/source.png"}}')"
+	"$(jq -nc --arg prompt "$CANARY-grok-image-edit" '{model:"grok-imagine-edit",prompt:$prompt,image:{url:"https://example.test/source.png"},size:"1024x1024"}')"
 post_json grok-video-generation "$GROK_KEY" /v1/videos/generations openai.videos.generations \
 	"$(jq -nc --arg prompt "$CANARY-grok-video-generation" '{model:"grok-imagine-video",prompt:$prompt,resolution:"480p",duration:1}')"
 post_json grok-video-edit "$GROK_KEY" /v1/videos/edits openai.videos.edits \

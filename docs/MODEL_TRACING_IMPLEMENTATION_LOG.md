@@ -33,8 +33,6 @@
 - Public API base is derived by stripping path from model-tracing OTLP endpoint (e.g. `.../api/public/otel` → origin).
 - Read-back failure: warn log, do not block request, write all parsed items for the turn.
 - Compact detection only when read-back succeeds.
-- Export helper: `scripts/langfuse_session_export.py` (env `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`; dedupe by `message_id` earliest; optional `--include-ancestors`).
-- `--include-ancestors`: `fork_from_message_id=thread` takes the whole parent line; join drops `chat.fork`; final pass dedupes by `message_id` (keep earliest). Unit tests: `scripts/test_langfuse_session_export.py`.
 
 ### Verification
 
@@ -42,7 +40,6 @@
 - Internal test hooks: `backend/internal/modeltrace/testing_export.go` (`Testing*` only).
 - Run: `cd backend && go test ./internal/modeltrace/... -count=1`
 - Local stack image: `sub2api:model-trace-b4316e25-forkfix` via `/opt/sub2api-stack/compose.yml`.
-- Branching live check: parent unchanged; child emits one `chat.fork` with `fork_from_*`; second child turn does not duplicate fork; `--include-ancestors` export joins parent+child and drops `chat.fork`.
 
 ### Bug found in branching verify
 
@@ -79,16 +76,6 @@
   - child wrote one `chat.fork` with `fork_from_session_id=<parent>` and `fork_from_message_id=thread`
   - child wrote one `chat.compact` on the compaction turn
 
-### Complex scenario harness (nested fork + multi-compact)
-
-- Synthetic: `scripts/complex_conversation_scenarios.py` (`/v1/responses` against local stack).
-- **Real Codex**: `scripts/codex_complex_real_scenarios.py` (app-server fork/turn/compact via proxy `:18080`).
-- **Real Codex 20-turn cross-branch**: `scripts/codex_complex_20turn_scenarios.py`
-  - Topology: A (turns+compact) → fork B → fork C (nested); sibling fork D←A; then cross-back turns on A/B/C. Entirely via `thread/start` (exec sessions are not visible to app-server).
-  - Asserts: fork counts, multi-compact, C genealogy excludes D, D genealogy excludes B/C, ≥20 turns, no export `message_id` dupes.
-  - Artifacts: `tmp/codex_20turn_report.json`, `tmp/codex_20turn_C_ancestors_transcript.md`, `tmp/codex_20turn_D_ancestors_transcript.md`.
-  - Latest: VERDICT PASS (`T20-1784821818-c8ac`). Soft gap: assistant counts lag users on compacted lines; occasional `<turn_aborted>` noise.
-
 ### Credentials
 
 - No real or local test credentials recorded here. Use deployment/runtime config keys `public_key` / `secret_key` only.
@@ -114,7 +101,7 @@
 - HTTP 模型请求与 Responses WebSocket 回合只解析当前捕获的 input/output，并把所有可解析 `chat.*` 事件追加到 OTLP；重复 `message_id` 不在运行时过滤。
 - 模型请求路径不再从 OTLP endpoint 派生 Langfuse Public API 地址，也不请求 `/api/public/traces` 或 `/api/public/observations`。运行时不再依赖 Langfuse 历史、Public API 可用性或读取凭据。
 - 仅客户端明确声明 `request_kind=compaction` 时追加 `chat.compact`；显式 fork 继续追加 `chat.fork`。远端历史不再用于推断压缩或抑制重复 fork marker。
-- `scripts/langfuse_session_export.py` 保持为唯一允许读取 Langfuse Public API 的会话工具；事件抵达后由离线导出按非空 `message_id` 保留最早事件。
+- `scripts/langfuse_session_graph.py` 是唯一会话图与离线导出标准；其 `graph.json`、`assignments.jsonl` 和 `message-objects.jsonl` 共同构成会话导出产物。
 - Responses WebSocket `response.completed`/`response.done` JSON frame 现在归一化其 `response.output`，确保 WS 回合也能生成当前 assistant/tool 会话事件。
 
 ### RED / GREEN 证据
@@ -122,7 +109,7 @@
 - RED：`cd backend && go test ./internal/modeltrace/... -run 'TestExtractConversationDelta_(appendsRepeatedHistory|doesNotInferCompactionFromRemoteHistory)|TestModelTraceConversationHTTPAppendsWithoutLangfusePublicAPIRead|TestModelTraceResponsesWSTurnAppendsWithoutLangfusePublicAPIRead' -count=1`；旧实现观察到 HTTP/WS 各 2 次 Public API GET，重复历史被过滤，并从远端历史推断 compaction。
 - GREEN：`cd backend && go test ./internal/modeltrace/... -run 'TestModelTraceConversation|TestModelTraceResponsesWSTurn' -count=1`，退出 0；fake OTLP server 对任何 Public API GET 返回 405，并断言计数为 0、HTTP/WS 的重复 `u1`/`a1` message ID 均各追加两次、显式 compact/fork span 和 fork metadata 保留。
 - 受影响模块：`cd backend && go test ./internal/modeltrace/... -count=1`，退出 0。
-- 离线导出：`python3 scripts/test_langfuse_session_export.py`，4 项测试通过，包含 earliest-event 去重。
+- 会话图离线验证：`python3 scripts/test_langfuse_session_graph.py`。
 
 ### 剩余验证边界
 
@@ -179,7 +166,62 @@
 - `run_e2e.sh` 完整 smoke 通过：Langfuse `3.224.2`，stdout 为 `trace_id=174c92bd5cb108117971adb3a9bead20`、观测数 `1`、`VERIFY_OK`；日志含 `full-scale e2e passed`，HTTP/WS、failover、断连、配置快照、OTLP fail-open、200 项 batch 续接及敏感内容门禁均通过。
 - 单测与 race 使用 `golang:1.26.5` 容器完成；本记录不包含任何 Langfuse、模型供应商或本地测试凭据。
 
-## 2026-08-03 — 提升模型追踪捕获上限（prompt 16M / response 8M / media 16M）
+## 2026-08-02 — Issue #75 Langfuse 单节点读写保护
+
+### 当前事实与实施边界
+
+- 当前正式部署真源 `deploy/langfuse/docker-compose.yml` 只有一个 Langfuse Web 实例；UI/Public API 查询与 Xray反向链路送入的 `/api/public/otel` 接收共享进程，Web 与 Worker 也都通过同一个 ClickHouse HTTP endpoint 和同一组安全注入的凭据访问数据库。
+- 本阶段不修改 `backend/internal/modeltrace/`，不修改 Langfuse 上游源码，也不引入第二套 ClickHouse compute。目标是在单节点部署内将读请求导向受限代理，并把 UI 与 OTLP ingestion 拆成独立 Web 进程，使高成本读查询在代理和 ClickHouse 查询级约束内失败。
+- Langfuse UI Web 使用 `CLICKHOUSE_READ_ONLY_URL` 访问内部 read proxy；Worker、OTLP ingestion Web、迁移及写操作继续使用 `CLICKHOUSE_URL` 直连 ClickHouse。Xray Bridge 的受限出站只指向 ingestion Web。
+- ClickHouse 25.12 黑盒验证证明，不能通过 HTTP URL 为主用户动态注入 `readonly=1`：即使仅携带该 setting 的 `SELECT 1` 也返回 `READONLY: Cannot modify 'readonly' setting in readonly mode`。因此不采用同用户 URL settings 方案。
+- 修正方案是在 ClickHouse `users.d` 中定义专用 `langfuse_read` 用户和 `langfuse_read` profile，由 profile 固定只读、最大内存、用户总内存、最大执行时间、最大扫描行/字节、最大结果行/字节、最大线程、并发和临时磁盘边界；read proxy 负责专用用户认证转换、请求速率、连接并发和 upstream deadline。
+- 正式部署延续 main 的策略，不为 Web、Worker、ClickHouse增加容器 CPU/内存上限；读查询通过 ClickHouse `max_threads`、查询/用户内存、用户并发和代理限流建立独立边界。默认值只提供可运行基线，正式部署必须按 Issue #75 的基线与混合压力结果定容。
+
+### 安全取值位置与验证计划
+
+- ClickHouse、PostgreSQL、Redis/Valkey、对象存储和 Langfuse 的凭据继续只从未跟踪的部署 env/secret 位置注入。新增的 `CLICKHOUSE_READ_PASSWORD` 只用于 read proxy 到 ClickHouse 的专用只读用户，必须从同一安全位置生成和注入，不得与主 ClickHouse 密码复用。
+- read proxy 访问日志不记录请求 URI、查询参数、Authorization 或 SQL 正文；ClickHouse 验收报告只导出资源统计、异常码和低基数 workload 标记。
+- 增加独立的 Compose 部署契约测试，验证 Web 进程隔离、read-only 路由、查询限制、资源边界、网络暴露和日志脱敏；该测试不读取或运行仓库 e2e Skill。
+- 真实混合压力、OTEL 最终入库和队列恢复仍按 Issue #75 收紧后的验收标准执行，并与静态 Compose 契约测试分开记录。
+- 2026-08-02 当前宿主观测为 64 CPU、约 251 GiB 内存；运行栈 ClickHouse 25.12 约使用 35.8 GiB、MinIO 约使用 21.5 GiB，核心容器此前均未设置 cgroup CPU/内存上限。当前 rootless Docker 报告不支持 CFS quota、CPU shares 或 cpuset，声明 `cpus` 会导致容器创建失败，因此本次不加入不可执行的容器 CPU 配额。该快照用于解释本次默认资源基线，不替代上线前定容。
+
+### 实现与验证结果
+
+- Compose 新增独立 `langfuse-ingest` Web 进程；Xray Bridge 的受限出站从 `langfuse-web:3000` 改为 `langfuse-ingest:3000`。UI Web继续发布 loopback 3000 端口并通过 `CLICKHOUSE_READ_ONLY_URL` 访问内部 read proxy。ingestion 与 Worker 保持主 ClickHouse endpoint，ingestion 禁用自动 PostgreSQL/ClickHouse migration。
+- ClickHouse 新增从安全 env 注入密码的 `langfuse_read` 用户/profile；read proxy 清除来访认证并转换为该专用用户。代理以非 root、只读根文件系统、capabilities 全移除和 PID/内存限制运行，不发布宿主端口；访问日志排除 URI、参数、Header 与 SQL。
+- `deploy/tests/langfuse-read-isolation-test.sh` 覆盖进程/Xray路由、迁移归属、专用凭据、只读 profile、查询限制、代理加固和日志字段；该测试接入 Code Quality workflow 与 `tools/pr_gate.sh`。
+- 初始黑盒只覆盖未附带 query settings 的裸 `SELECT 1`，因此没有发现 `readonly=1` 与真实 Langfuse 客户端的兼容性问题；该证据已由下方评审修复验证取代，不作为最终通过依据。
+- 按用户要求未读取或运行仓库 model-trace e2e Skill。真实生产数据的持续 OTEL 写入、混合筛选压力、最终入库、队列回落和连续三次验收仍属于 Issue #75 上线验收，不由本次隔离黑盒测试替代。
+
+### 评审修复计划
+
+- Langfuse 3.224.3 的只读客户端会随查询发送 `max_execution_time`、`log_comment` 等 query settings；ClickHouse 25.12 实测 `readonly=1` 会在执行 `SELECT` 前以 Code 164 拒绝这些设置。调整为 `readonly=2`，并对资源类 settings 增加硬上限 constraints；超过部署上限的请求保持拒绝，不做自动压缩。
+- Nginx upstream 故障日志实测会在 `error` 级别记录完整 request/upstream URI。将 read proxy error log 提升到 `crit`，并增加带 canary 的故障路径日志验证，避免筛选参数形成旁路日志副本。
+- ingestion Web 禁用自动迁移后不得早于迁移 owner 对外服务；让 `langfuse-ingest` 等待 `langfuse-web` 健康，确保首次部署和镜像升级期间 PostgreSQL/ClickHouse migration 已成功完成。
+
+### 评审修复结果
+
+- `langfuse_read` 改为 `readonly=2`，资源类 settings 同时配置 profile 默认值、正数下限和同源 env 最大 constraints，避免用表示“不限”的零值绕过；`readonly` 本身设为不可修改。ClickHouse 25.12 黑盒验证：带 `max_execution_time=5` 和自定义 `log_comment` 的 `SELECT 1` 成功，`max_execution_time=0.5` 也保持可用；请求 11 秒执行时间、零执行时间、零/超限线程、切换 `readonly=0` 和执行 DDL 分别以 constraint/readonly 错误被拒绝。
+- read proxy 主配置与 server 配置的 error log 均提升为 `crit`。无 upstream 的 Nginx 1.28 黑盒返回 HTTP 502 后，stderr 只包含脱敏 access log 的状态与耗时，虚构 canary 查询参数未出现。
+- `langfuse-ingest` 新增对 `langfuse-web: service_healthy` 的依赖；迁移 owner 完成 entrypoint migration 并健康后，ingestion 才能启动并接管 Xray OTLP流量。Compose契约测试已增加该顺序断言。
+- 持久化查询归属按 `system.query_log.user = 'langfuse_read'` 识别，不依赖可能被 Langfuse query tags 覆盖的默认 `log_comment`。上述临时容器均已删除。
+
+### main 同步与部署真源修正
+
+- `otel/langfuse-read-isolation` 最初基于 `6960dcb73`，遗漏了之后通过 PR #82 合入的正式 `deploy/langfuse/`。2026-08-02 已将分支快进合并最新 `origin/main` `5c0a6e0a6`。
+- `.local-deploy/langfuse/docker-compose.yml` 于 2026-07-24 的 `011fb6911` 随本地运行时修复材料加入，不是当前生产部署真源；此前在该路径上的 Issue #75改动已撤销。实现已迁移到 `deploy/langfuse/`，并复用其中的固定镜像、持久卷、env生成器、Xray链路和部署门禁。
+
+### 2026-08-02 正式栈迁移记录
+
+- 迁移前正式 Compose 项目为 `langfuse`，配置真源为主工作区 `deploy/langfuse/docker-compose.yml`。迁移未执行 `down -v`，未重启 Sub2API，也未升级 Langfuse、PostgreSQL、ClickHouse、Redis 或 MinIO 的运行镜像。
+- 迁移前 PostgreSQL 逻辑备份、ClickHouse schema、未跟踪 env 副本和卷挂载清单保存在 Git 忽略的 `deploy/langfuse/backups/issue75-20260802-2320/`，文件权限为 600。现场 ClickHouse 数据目录约 312 GiB、MinIO 数据目录约 907 GiB；本次拓扑迁移未额外制作这两个卷的全量副本。
+- 现有 env 升级只新增独立读密码和固定 digest 的读代理镜像，并按 main 既有迁移规则固定 Xray 镜像；其他既有 env 键值未改变。读密码只从未跟踪的正式部署 env 注入，本记录不包含其值。
+- ClickHouse 使用原 `langfuse_clickhouse_data` / `langfuse_clickhouse_logs` 卷重建并加载 `langfuse_read` 用户；read proxy 实测 `SELECT 1` 成功、DDL 被拒绝。PostgreSQL、MinIO、Redis 继续挂载原 `langfuse_postgres_data`、`langfuse_minio_data`、`langfuse_redis_data`。
+- 新 `langfuse-ingest` 在切换前通过现有项目凭据提交空 OTLP envelope，返回 HTTP 200；随后重建 Xray Bridge，宿主观测到 1 条到 Portal 的 established TCP 连接。使用文档示例公网 URL 的额外探测返回 404，该 URL 不是本机保存的实际 exporter endpoint，因此不作为链路失败或成功证据。
+- 最终 Web 与 ingestion 健康、Worker 与 Bridge 稳定，所有核心容器 `RestartCount=0`；Web 的 `CLICKHOUSE_READ_ONLY_URL` 指向内部 read proxy，ingestion/Worker 的 `CLICKHOUSE_URL` 指向主 ClickHouse。Web 健康接口返回 `status=OK`、版本 `3.224.3`，迁移后再次直连 ingestion 的认证 OTLP envelope 返回 HTTP 200。
+- 最终 Compose reconcile 按依赖顺序再次重建 Web、ingestion、Worker 和 Bridge，形成第二个约几十秒的可重试窗口。实际 exporter/Collector 位于另一主机，本机无法读取其队列和 dropped 指标；队列排空及最终 Trace 入库仍需结合主服务器监控确认。
+- 既有正式 env 将 Web `3000/tcp` 绑定到 `0.0.0.0:3000`，本次为保留现有访问方式未修改该自定义值；它不同于仓库 loopback 默认值，后续应结合宿主防火墙和访问需求单独收紧。
+ ## 2026-08-03 — 提升模型追踪捕获上限（prompt 16M / response 8M / media 16M）
 
 ### 背景与根因
 

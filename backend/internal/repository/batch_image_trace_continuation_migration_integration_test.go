@@ -39,6 +39,7 @@ SELECT EXISTS (
 		TraceFlags:            1,
 		TraceState:            "vendor=value",
 		GenerationFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		GroupID:               43,
 	}
 	batchID := batchImageTestID(t, "trace-continuation")
 

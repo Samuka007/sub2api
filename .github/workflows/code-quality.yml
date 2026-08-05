@@ -174,3 +174,7 @@ jobs:
         run: /bin/bash deploy/tests/model-iq-compose-env-test.sh
       - name: Test install GitHub token handling
         run: /bin/bash deploy/tests/install-github-token-test.sh
+      - name: Test Langfuse deployment
+        run: /bin/bash deploy/tests/langfuse-deployment-test.sh
+      - name: Test Langfuse read isolation
+        run: /bin/bash deploy/tests/langfuse-read-isolation-test.sh

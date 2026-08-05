@@ -27,8 +27,12 @@ func (r *batchImageTraceRecorder) RecordBatchImageResult(_ context.Context, job 
 	if job.APIKeyID != nil {
 		apiKeyID = *job.APIKeyID
 	}
-	identity := servermiddleware.ResolvedIdentity{UserID: job.UserID, APIKeyID: apiKeyID}
 	continuation := *job.TraceContinuation
+	identity := servermiddleware.ResolvedIdentity{UserID: job.UserID, APIKeyID: apiKeyID, GroupID: continuation.GroupID}
+	accountID := int64(0)
+	if job.AccountID != nil {
+		accountID = *job.AccountID
+	}
 	record := func(status, itemID string, imageCount int, providerState, errorStage, errorCode string) {
 		var traceErr error
 		if status == service.BatchImageJobStatusFailed || status == service.BatchImageJobStatusCancelled {
@@ -53,6 +57,7 @@ func (r *batchImageTraceRecorder) RecordBatchImageResult(_ context.Context, job 
 		})
 		execution := r.manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{
 			Identity:  identity,
+			AccountID: accountID,
 			TaskID:    job.BatchID,
 			ItemID:    itemID,
 			Model:     job.Model,
