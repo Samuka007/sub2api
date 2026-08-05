@@ -199,18 +199,22 @@ func TestGuardEvaluatorFlagSharedDeadlineFailClosedAndContextCancel(t *testing.T
 
 	t.Run("all failovers share first endpoint deadline", func(t *testing.T) {
 		calls := 0
+		var firstDeadline, secondDeadline time.Time
+		var firstHasDeadline, secondHasDeadline bool
 		scanner := PromptScannerFunc(func(ctx context.Context, endpoint ActiveEndpoint, _ string, _ []string) (*NormalizedResult, error) {
 			calls++
-			if endpoint.ID == "first" {
-				select {
-				case <-time.After(35 * time.Millisecond):
-					return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true}
-				case <-ctx.Done():
-					return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: true, Cause: ctx.Err()}
-				}
+			deadline, ok := ctx.Deadline()
+			switch endpoint.ID {
+			case "first":
+				firstDeadline, firstHasDeadline = deadline, ok
+				return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true}
+			case "second":
+				secondDeadline, secondHasDeadline = deadline, ok
+				return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: true, Cause: context.DeadlineExceeded}
+			default:
+				t.Fatalf("unexpected endpoint %q", endpoint.ID)
+				return nil, nil
 			}
-			<-ctx.Done()
-			return nil, &GuardError{Code: ErrorCodeUnavailable, Retryable: true, Timeout: true, Cause: ctx.Err()}
 		})
 		metrics := NewAtomicMetrics()
 		evaluator := newGuardEvaluator(scanner, nil, metrics, 2, 2)
@@ -219,16 +223,12 @@ func TestGuardEvaluatorFlagSharedDeadlineFailClosedAndContextCancel(t *testing.T
 			ActiveEndpoint{ID: "first", Enabled: true, TimeoutMS: 70, InputLimit: 100},
 			ActiveEndpoint{ID: "second", Enabled: true, TimeoutMS: 500, InputLimit: 100},
 		), PromptSnapshot{ScanText: "deadline", PromptLength: 8})
-		elapsed := time.Since(started)
 		require.Error(t, err)
 		require.Equal(t, 2, calls)
-		// The bound only has to prove the failover shared the first endpoint's
-		// 70ms deadline instead of taking the second endpoint's own 500ms one.
-		// An unshared deadline lands at ~535ms, so 350ms still fails loudly
-		// while leaving room for scheduler delay on a busy CI machine. A
-		// tighter bound made this test flaky, not stricter.
-		require.Less(t, elapsed, 350*time.Millisecond)
-		require.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
+		require.True(t, firstHasDeadline)
+		require.True(t, secondHasDeadline)
+		require.Equal(t, firstDeadline, secondDeadline)
+		require.Less(t, firstDeadline, started.Add(250*time.Millisecond))
 		require.Equal(t, int64(1), metrics.Snapshot().Failovers)
 		require.Equal(t, int64(1), metrics.Snapshot().Timeouts)
 	})
