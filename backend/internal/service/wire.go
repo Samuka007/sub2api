@@ -755,7 +755,6 @@ var ProviderSet = wire.NewSet(
 	ProvideOpsSystemLogSink,
 	ProvideOpsService,
 	ProvideOpsIngressRejectAggregator,
-	NewModelRadarService,
 	ProvideAuditLogService,
 	ProvideOpsMetricsCollector,
 	ProvideOpsAggregationService,

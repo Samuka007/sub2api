@@ -200,7 +200,6 @@ export default {
     channelStatus: '渠道状态',
     modelIq: 'GPT模型智商排行',
     riskControl: '风控中心',
-    modelRadar: '模型雷达',
     securityAudit: '安全审计',
     contentModeration: '内容审核',
     promptAudit: '提示词审计',
