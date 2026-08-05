@@ -19,7 +19,7 @@
 | 18080 | 预留 sub2api 宿主映射（未使用） | — |
 | 18081 | 本地确定性 Anthropic fixture（`/fail` 429、`/ok` 200 SSE） | `upstream-fixture.go` + `run_e2e.sh --network host` |
 
-实际从宿主访问 sub2api 用 `http://localhost:8080`，因为 `--network host` + Colima 端口转发。
+宿主通过 `http://localhost:8080` 访问 sub2api。native Linux 使用 Docker `--network host`；Colima adapter 在 VM 内使用 host network，并依赖 Colima 端口转发。
 
 ## 凭据
 
@@ -51,9 +51,13 @@ docker hub 偶发拉取超时（`EOF` / `failed to fetch anonymous token`），�
 
 `run_e2e.sh` 不靠 `:3` 标签猜版本：health JSON 的 `version` 是运行时公开证据，OCI `org.opencontainers.image.version` 必须与之相同；脚本还记录 `RepoDigest` 与 `org.opencontainers.image.revision`，任何一项缺失或版本低于 `3.22.0` 都失败。
 
-## 远端 Linux 构建与持久部署
+## 运行时选择与远端 Linux 构建
 
-`run_e2e.sh` 当前是 Colima 专用测试 harness：它调用 `colima ssh`、使用 legacy `docker-compose`，并固定编译 `linux/arm64`。在原生 Linux/x86_64 服务器上，不要原样执行该脚本；应复用本 reference 的端口、loopback endpoint、版本门禁和 ClickHouse 断言作为部署契约。
+`run_e2e.sh` 默认使用 `E2E_RUNTIME=native`。该模式按 Docker CLI 优先级解析 effective context/endpoint，要求宿主与 Docker server 都为 `linux`，并拒绝非 Unix 的远端 Docker endpoint。脚本优先使用 `docker compose`，并在 Compose v2 不可用时回退到 legacy `docker-compose`。server、raw RST client 和 Responses WebSocket client 都只按 Docker server architecture 编译；继承的 `E2E_GOARCH` 会被实际 server architecture 覆盖。
+
+Colima 是显式兼容模式。运行 `E2E_RUNTIME=colima COLIMA_PROFILE=swebench bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh`。该模式会清除继承的 `DOCKER_CONTEXT`、设置 profile socket，并仅对必须在 VM 内执行的命令使用 `colima ssh`。
+
+每个 checkout 由仓库绝对路径的 checksum 派生 `E2E_OWNER_ID` 和唯一 Compose project name。Compose 容器、卷、网络以及直接启动的 fixture/server 都必须带 `io.sub2api.modeltrace-e2e.owner` label。正常启动和 teardown 只按该 label 清理；不会按通用名称删除其他 Docker 项目。旧版无 label 资源只在确认归属并显式设置 `E2E_CLEAN_LEGACY=1` 时迁移清理。
 
 ### Slash 分支与源码校验
 
@@ -178,15 +182,16 @@ sub2api 启动时只设置 tracing endpoint、公钥、秘密和 `capture_media_
 
 | 现象 | 原因 | 解法 |
 |------|------|------|
-| `config file creation failed: open /data/config.yaml: no such file or directory` | `DATA_DIR` 没挂卷 | `docker volume create sub2api-e2e-data` + `-v sub2api-e2e-data:/data` |
+| `config file creation failed: open /data/config.yaml: no such file or directory` | `DATA_DIR` 没挂载当前 E2E owner label 的数据卷 | 用相同 runtime/profile 重跑 `run_e2e.sh`，不要手工复用无 label 的通用卷 |
 | `invalid model_tracing deployment config; tracing disabled` | endpoint 不是合法的完整 HTTP(S) URL，或含 userinfo/query/fragment | 改为完整 OTLP Trace endpoint，例如 `http://127.0.0.1:3000/api/public/otel/v1/traces` |
 | `database connection failed: pq: password authentication failed for user "postgres"` | AUTO_SETUP 用 `DATABASE_*` 环境变量，不是 `DB_*` | 全部用 `DATABASE_HOST`/`DATABASE_PORT`/`DATABASE_USER`/... |
-| `NeedsSetup=false` 跳过 AUTO_SETUP | 上次写的 config.yaml 还在 /data 卷里 | `docker volume rm sub2api-e2e-data` 或脚本里 `DROP SCHEMA public CASCADE` 重置 |
+| `NeedsSetup=false` 跳过 AUTO_SETUP | 上次写的 config.yaml 还在当前 checkout 的 E2E 卷里 | 用相同 runtime/profile 运行 `scripts/teardown.sh` 后重跑；不要直接删除不明归属的同名卷 |
 | API Key 响应里 `key: "[openai_token_redacted]"` | sub2api 对 OpenAI 平台 group 的 key 做了 redact 展示 | 直接 `docker exec` 进 PG 用 `UPDATE api_keys SET key='sk-...'` 改成可鉴权值 |
 | `/v1/chat/completions` 返回 503 | Key 所属 group 尚未配置上游账号 | 身份、截断和 16 MiB Prompt 边界场景的**预期行为**；failover 和 SSE 场景随后挂载本地 fixture 账号并必须返回 200 |
 | Langfuse Postgres `traces` 表 0 条 | Langfuse v3 用 ClickHouse 存 traces，PG 只是 metadata | 通过 `langfuse-clickhouse-read-proxy-1` 查询：`curl -fsS --user clickhouse:clickhouse --data-binary "SELECT count() FROM traces" http://127.0.0.1:18123/` |
 | ClickHouse `traces` 表 0 条 | BatchSpanProcessor 默认 5 秒批次 + 网络 | `sleep 6` 后再查 |
-| `docker compose` 报 `unknown command` | Colima 内 docker 是老版本 | 用 `docker-compose`（带横线） |
+| `docker compose` 报 `unknown command` | Docker CLI 不含 Compose v2 plugin | adapter 自动回退到 `docker-compose`；两者都不可用时脚本在启动容器前失败 |
+| E2E 端口被占用，且容器来自旧版无 owner label harness | 安全门禁不会自动删除无归属资源 | 确认容器和卷确属旧版 E2E 后，运行 `E2E_CLEAN_LEGACY=1` 加原 runtime/profile 前缀的 `scripts/teardown.sh` |
 | `docker-compose` 报 `pull access denied for registry.cn-hangzhou.aliyuncs.com/...` | 中间尝试过第三方镜像但没权限 | 回到 `docker.io/library/...` 标准镜像，重试拉取 |
 | `git clone` 报 `GnuTLS recv error (-110)` 或 GitHub 443 timeout | 远端 DNS/出口不可用，不是 slash 分支不存在 | 用 `curl -x "$PROXY_URL"` 分别验证 GitHub、Docker Registry、npm；配置 Git 与 Docker daemon 代理后重新 clone/pull |
 | legacy builder 报 `${BUILDPLATFORM}` 为空或 `invalid OS component` | Ubuntu `docker.io` 未安装 Buildx，Dockerfile 被旧 builder 解析 | 安装 `docker-buildx`，确认 `docker buildx ls` 为 running，再用 `docker buildx build --load` |

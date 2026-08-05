@@ -41,7 +41,7 @@
     "id": "negative-unit-test-only",
     "prompt": "只跑 modeltrace 的 Go 单元测试，不用启动 Langfuse",
     "should_trigger": false,
-    "expected_behavior": "不触发本 skill 的 run_e2e.sh。主 agent 直接用 colima 跑 go test ./internal/modeltrace/... -count=1。本 skill 的 SKILL.md 场景五明确把这种情况路由掉。",
+    "expected_behavior": "不触发本 skill 的 run_e2e.sh。主 agent 直接在当前可用的 Go 或 Docker 环境运行 go test ./internal/modeltrace/... -count=1。本 skill 的 SKILL.md 场景五明确把这种情况路由掉。",
     "assertions": [
       "不启动 docker compose",
       "不调用 run_e2e.sh",

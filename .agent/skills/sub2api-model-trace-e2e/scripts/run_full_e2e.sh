@@ -4,7 +4,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-export PATH="/opt/homebrew/bin:$PATH"
+
+E2E_RUNTIME="${E2E_RUNTIME:-native}"
+COLIMA_PROFILE="${COLIMA_PROFILE:-swebench}"
+source "$SCRIPT_DIR/runtime_adapter.sh"
 
 log() { printf '[modeltrace-full-e2e] %s\n' "$*" >&2; }
 fail() { printf '[modeltrace-full-e2e][ERROR] %s\n' "$*" >&2; exit 1; }
@@ -17,9 +20,22 @@ need_cmd pnpm
 
 [[ -f "$REPO_ROOT/backend/go.mod" ]] || fail "repository root not found: $REPO_ROOT"
 
+resolve_runtime
+need_cmd docker
+if [[ "$E2E_RUNTIME" == colima ]]; then
+  need_cmd colima
+  colima status "$COLIMA_PROFILE" >/dev/null 2>&1 \
+    || fail "colima profile $COLIMA_PROFILE not running; run: colima start $COLIMA_PROFILE"
+fi
+resolve_compose
+resolve_arch
+
 log "phase 1/9: validating harness and deployment contracts"
+bash -n "$SCRIPT_DIR/runtime_adapter.sh"
 bash -n "$SCRIPT_DIR/run_e2e.sh"
 bash -n "$SCRIPT_DIR/teardown.sh"
+bash -n "$SCRIPT_DIR/test_runtime_adapter.sh"
+bash "$SCRIPT_DIR/test_runtime_adapter.sh"
 bash "$REPO_ROOT/deploy/tests/model-tracing-compose-test.sh"
 
 log "phase 2/9: running complete backend test suite"

@@ -34,11 +34,11 @@ description: |
 
 | 类型 | 名称 | 用途 | 必须/可选 |
 |------|------|------|-----------|
-| 容器 | Colima profile `swebench` | 本地 Docker 引擎与端口转发 | 必须 |
-| CLI | `docker`、legacy `docker-compose` | 启动 Langfuse 与 sub2api 依赖；当前 runner 直接调用带横线命令 | 必须 |
-| CLI | `colima` | 跨 VM SSH 与端口转发 | 必须 |
+| 运行时 | 本地 Docker Engine | server OS 必须为 `linux`；native 模式必须使用本地 Unix endpoint | 必须 |
+| CLI | `docker`，以及 Compose v2 `docker compose` 或 legacy `docker-compose` | 启动 Langfuse 与 sub2api 依赖 | 必须 |
+| CLI | `colima` | 设置 profile socket，并执行 VM 内命令 | 仅 `E2E_RUNTIME=colima` 时必须 |
 | CLI | `curl`、`jq`、`openssl`、`nc` | API 调用、JSON 解析、生成随机 key、端口占用检查 | 必须 |
-| 镜像 | `golang:1.26.5` | 编译 sub2api linux/arm64 二进制（非 alpine，带 git） | 必须 |
+| 镜像 | `golang:1.26.5` | 按 Docker server architecture 编译 Linux 二进制（非 alpine，带 git） | 必须 |
 | 镜像 | `langfuse/langfuse:3`、`langfuse-worker:3`、`clickhouse-server`、`nginx:1.27-alpine`、`postgres:17`、`redis:7`、`minio/minio` | Langfuse 全栈、ClickHouse 只读查询代理与 sub2api 依赖 | 必须 |
 | 代码 | 仓库 `backend/` 目录 + `-tags embed` 前端 dist | 编译带嵌入前端的二进制 | 必须 |
 | 文件 | `assets/langfuse-compose.yml` | Langfuse 全栈编排 | 必须 |
@@ -56,16 +56,14 @@ description: |
 
 **步骤**：
 
-1. 确认 sub2api 仓库根目录、Colima profile `swebench` 已启动：
+1. 确认当前目录是 sub2api 仓库根目录。确认 active Docker server 是 Linux，且 Compose v2 或 legacy Compose 可用：
    ```bash
-   colima status swebench
+   docker info --format '{{.OSType}}/{{.Architecture}}'
+   docker compose version || docker-compose version
    ```
-   失败则停止并提示 `colima start swebench`，不自动启动。
-2. 确认宿主端口 3000、15432、16379、8080 未被占用；占用时停止并报告哪个端口占用了什么，不自动 kill。
-3. 运行一键脚本，**不要**并行执行其他写容器操作：
-   ```bash
-   bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
-   ```
+   默认 `E2E_RUNTIME=native` 使用当前本地 Unix Docker endpoint。使用 Colima 时，先运行 `colima status swebench`，再显式设置 `E2E_RUNTIME=colima COLIMA_PROFILE=swebench`。脚本不自动启动 Colima，也不接受远端 TCP/SSH Docker endpoint。
+2. 确认宿主端口 3000、15432、16379、18081、18123、8080、5432、6379 未被占用。脚本先检查端口，再清理当前 checkout 以 owner label 标记的旧资源；不会停止其他 checkout 或普通 Docker 项目。
+3. 运行一键脚本，**不要**并行执行其他写容器操作。native Docker 使用 `bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh`。Colima 使用 `E2E_RUNTIME=colima COLIMA_PROFILE=swebench bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh`。脚本按 checkout 派生唯一 Compose project name，并验证容器、卷和网络的 owner label。
 4. 脚本内部顺序为：启动 Langfuse 与 sub2api 依赖 → 编译并启动服务 → 验证完整 endpoint、部署/运行时配置闭环 → 建立身份和本地 provider fixtures → 覆盖匿名/未知/控制面、503 单根、截断与媒体、disabled、16 MiB Prompt 边界、session/cache-key、429→200、所有尝试失败、SSE、进行中配置快照、500/慢 exporter fail-open、Gemini batch → 查询真实 Langfuse ClickHouse 并执行 cardinality、父子、状态和秘密零泄漏断言。
 5. 成功的合并命令输出必须包含 `trace_id`、整数 `1`、`VERIFY_OK` 和末尾的 `full-scale e2e passed`；失败时 stderr 含 `[e2e][ERROR]` 行，按行内容定位失败阶段，不自动缩窄覆盖重试。
 6. 验证通过后向用户报告：
@@ -78,10 +76,11 @@ description: |
 **成功信号**：退出码为 0，合并命令输出同时包含 `VERIFY_OK`、`batch trace passed at configured scale`、`sensitive-content gate passed` 和 `full-scale e2e passed`。其中 `VERIFY_OK` 写入 stdout，其余诊断日志写入 stderr；任一缺失均视为失败。
 
 **失败分支**：
-- Langfuse health 不通：检查 `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`。本地偶发镜像拉取超时可重试；远端 Linux 出现 DNS、代理、Buildx 或 Corepack 错误时，按 `references/environment.md` 的“远端 Linux 构建与持久部署”逐层验证，不要直接换不可信镜像。
+- Langfuse health 不通：使用 `docker logs sub2api-langfuse-langfuse-web-1`。本地偶发镜像拉取超时可重试；远端 Linux 出现 DNS、代理、Buildx 或 Corepack 错误时，按 `references/environment.md` 的“运行时选择与远端 Linux 构建”逐层验证，不要直接换不可信镜像。
 - sub2api 启动失败：`docker logs sub2api-e2e` 看 `Failed to initialize application`，常见是 DB 连接（检查 15432 占用）或 endpoint 不是完整的可达 OTLP Trace URL。
 - trace 不落库：检查 sub2api 日志中的 `modeltrace` error 和 ClickHouse `system.errors`；脚本自身负责 bounded wait，不用手工 sleep 冒充稳定性。
 - ClickHouse 查询语法错：通过 `langfuse-clickhouse-read-proxy-1` 的宿主端口运行 `curl -fsS --user clickhouse:clickhouse --data-binary "DESCRIBE traces" http://127.0.0.1:18123/` 核对列名；Langfuse v3 的 `metadata` 是 `Map`，`session_id` 是 `Nullable(String)`。
+- 端口被旧版 E2E 资源占用：先确认资源确属本 harness，再显式运行 `E2E_CLEAN_LEGACY=1` 加相同 runtime/profile 前缀的 `scripts/teardown.sh`。不设置该变量时，脚本不会按旧版通用名称删除无 owner label 的容器或卷。
 
 ### 场景二：跑全规模验收
 
@@ -136,16 +135,16 @@ description: |
 
 **步骤**：
 
-1. 运行：
+1. 必须复用 smoke 的 runtime/profile。native 与 Colima 分别运行：
    ```bash
    bash .agent/skills/sub2api-model-trace-e2e/scripts/teardown.sh
+   E2E_RUNTIME=colima COLIMA_PROFILE=swebench bash .agent/skills/sub2api-model-trace-e2e/scripts/teardown.sh
    ```
-2. 脚本停止 sub2api-e2e、sub2api-deps、langfuse 全栈，删 docker volume `sub2api-e2e-data`。
+2. 脚本只删除当前 checkout owner label 匹配的容器、卷和网络。native 模式拒绝远端 TCP/SSH endpoint。旧版无 label 资源必须在确认归属后显式设置 `E2E_CLEAN_LEGACY=1`；该开关会按旧版固定名称删除资源，不用于日常清理。
 3. `.agent/skills/` 目录、`.e2e-bin/sub2api` 二进制、`.e2e-tmp/` compose 副本保留，下次 `run_e2e.sh` 会复用或重建。
-4. 完全清理（含二进制）：
+4. 完全清理本地生成物（E2E volumes 已由上一步删除）：
    ```bash
    rm -rf .e2e-bin .e2e-tmp
-   docker volume prune -f
    ```
 
 ### 场景五：负向路由
@@ -156,7 +155,7 @@ description: |
 
 1. 只跑单元测试：不启动脚本，主 agent 直接：
    ```bash
-   colima ssh --profile swebench -- docker run --rm -e GOPROXY=https://goproxy.cn,direct \
+   docker run --rm -e GOPROXY=https://goproxy.cn,direct \
      -v sub2api-go-mod-cache:/go/pkg/mod -v sub2api-go-build-cache:/root/.cache/go-build \
      -v "$PWD/backend:/app" -w /app golang:1.26.5 \
      go test ./internal/modeltrace/... -count=1
@@ -170,15 +169,17 @@ description: |
 
 | 需求 | 完整命令 |
 |------|----------|
-| 跑完整 e2e smoke | `bash $SKILL_DIR/scripts/run_e2e.sh` |
-| 跑全规模完整验收 | `bash $SKILL_DIR/scripts/run_full_e2e.sh` |
-| 清理环境 | `bash $SKILL_DIR/scripts/teardown.sh` |
+| 跑 native Docker e2e smoke | `bash $SKILL_DIR/scripts/run_e2e.sh` |
+| 跑 Colima e2e smoke | `E2E_RUNTIME=colima COLIMA_PROFILE=swebench bash $SKILL_DIR/scripts/run_e2e.sh` |
+| 跑全规模完整验收 | `bash $SKILL_DIR/scripts/run_full_e2e.sh`；Colima 使用相同的 `E2E_RUNTIME`/`COLIMA_PROFILE` 前缀 |
+| 清理环境 | `bash $SKILL_DIR/scripts/teardown.sh`；必须使用与 smoke 相同的 runtime 前缀 |
+| 迁移清理旧版无 label 资源 | 确认归属后运行 `E2E_CLEAN_LEGACY=1 bash $SKILL_DIR/scripts/teardown.sh`；Colima 必须同时加原 runtime/profile 前缀 |
 | 查 Langfuse 健康 | `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/public/health` |
 | 查 sub2api 健康 | `curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health` |
 | 查 Langfuse traces | `curl -fsS --user clickhouse:clickhouse --data-binary "SELECT id, name, user_id, session_id FROM traces ORDER BY timestamp DESC LIMIT 5 FORMAT TabSeparated" http://127.0.0.1:18123/` |
 | 查 observations | `curl -fsS --user clickhouse:clickhouse --data-binary "SELECT name, type, provided_model_name, parent_observation_id FROM observations ORDER BY start_time DESC LIMIT 10 FORMAT TabSeparated" http://127.0.0.1:18123/` |
 | 看 sub2api 日志 | `docker logs sub2api-e2e 2>&1 \| tail -50` |
-| 看 Langfuse 日志 | `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web 2>&1 \| tail -50` |
+| 看 Langfuse 日志 | `docker logs sub2api-langfuse-langfuse-web-1 2>&1 \| tail -50` |
 | 跑 Go 单测（不启动 Langfuse） | 见场景五 |
 | 切回主分支 | `git checkout main`（**不**主动执行，除非用户要求） |
 
