@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     siteVersion: '1.0.0',
     publicSettingsLoaded: true,
     backendModeEnabled: false,
-    cachedPublicSettings: { custom_menu_items: [] },
+    cachedPublicSettings: { custom_menu_items: [], channel_monitor_enabled: true },
     sidebarScrollTop: 0,
     toggleSidebar: vi.fn(),
     setMobileOpen: vi.fn(),
@@ -62,13 +62,15 @@ vi.mock('@/stores', () => ({
 
 vi.mock('@/utils/featureFlags', () => ({
   FeatureFlags: {
-    channelMonitor: {},
+    channelMonitor: { key: 'channel_monitor_enabled' },
     payment: {},
     availableChannels: {},
     affiliate: {},
     riskControl: {},
   },
-  makeSidebarFlag: () => () => true,
+  makeSidebarFlag: (flag: { key?: string }) => () =>
+    flag.key !== 'channel_monitor_enabled' ||
+    mocks.appStore.cachedPublicSettings?.channel_monitor_enabled !== false,
 }))
 
 vi.mock('@/composables/useBatchImageAccess', () => ({
@@ -89,11 +91,23 @@ describe('AppSidebar channel monitor navigation', () => {
   beforeEach(() => {
     mocks.route.path = '/dashboard'
     mocks.authStore.isAdmin = false
+    mocks.appStore.cachedPublicSettings.channel_monitor_enabled = true
     mocks.adminSettingsStore.fetch.mockClear()
     mocks.refreshBatchImageAccess.mockClear()
   })
 
-  it('does not render channel status in the regular user sidebar', () => {
+  it('renders channel status in the regular user sidebar', () => {
+    const wrapper = shallowMount(AppSidebar, {
+      props: { variant: 'user' },
+      global: { stubs: { RouterLink: RouterLinkStub, VersionBadge: true } },
+    })
+
+    expect(wrapper.find('[data-to="/monitor"]').exists()).toBe(true)
+  })
+
+  it('hides channel status when the feature is explicitly disabled', () => {
+    mocks.appStore.cachedPublicSettings.channel_monitor_enabled = false
+
     const wrapper = shallowMount(AppSidebar, {
       props: { variant: 'user' },
       global: { stubs: { RouterLink: RouterLinkStub, VersionBadge: true } },

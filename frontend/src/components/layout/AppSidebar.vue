@@ -749,7 +749,7 @@ function finalizeNav(items: NavItem[]): NavItem[] {
 
 // User navigation items (for regular users)
 const userNavItems = computed((): NavItem[] =>
-  finalizeNav(buildSelfNavItems(true)).filter(item => item.path !== '/monitor')
+  finalizeNav(buildSelfNavItems(true))
 )
 
 const userNavSections = computed(() => {
