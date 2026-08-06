@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	appmetrics "github.com/Wei-Shaw/sub2api/internal/metrics"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -718,6 +719,13 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			return
 		}
 
+		if shouldSkipOpsErrorLogForCyber(c) {
+			return
+		}
+
+		status := c.Writer.Status()
+		observeTerminalRequestError(appmetrics.Default(), c, status)
+
 		if ops == nil {
 			return
 		}
@@ -725,11 +733,6 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 			return
 		}
 
-		if shouldSkipOpsErrorLogForCyber(c) {
-			return
-		}
-
-		status := c.Writer.Status()
 		if status < 400 {
 			// Even when the client request succeeds, we still want to persist upstream error attempts
 			// (retries/failover) so ops can observe upstream instability that gets "covered" by retries.
@@ -1119,6 +1122,52 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 
 		enqueueOpsErrorLog(ops, entry)
 	}
+}
+
+func observeTerminalRequestError(source *appmetrics.Source, c *gin.Context, status int) {
+	if source == nil || c == nil || isCountTokensRequest(c) {
+		return
+	}
+	if status < http.StatusBadRequest {
+		streamErr, ok := service.GetOpsStreamError(c)
+		if !ok || !streamErr.CountTowardsSLA {
+			return
+		}
+		status = streamErr.IntendedStatus
+		if status < http.StatusBadRequest {
+			status = http.StatusInternalServerError
+		}
+	}
+
+	upstreamStatus := terminalUpstreamStatus(c)
+	owner := ""
+	if upstreamStatus != nil {
+		owner = "provider"
+	}
+	source.ObserveClassifiedError(service.HasOpsClientBusinessLimited(c), owner, &status, upstreamStatus)
+}
+
+func terminalUpstreamStatus(c *gin.Context) *int {
+	if c == nil {
+		return nil
+	}
+	value, ok := c.Get(service.OpsUpstreamStatusCodeKey)
+	if !ok {
+		return nil
+	}
+	var status int
+	switch typed := value.(type) {
+	case int:
+		status = typed
+	case int64:
+		status = int(typed)
+	default:
+		return nil
+	}
+	if status <= 0 {
+		return nil
+	}
+	return &status
 }
 
 // logOpsStreamError 记录一次挂在已固化 HTTP 200 SSE 流上的就地错误。

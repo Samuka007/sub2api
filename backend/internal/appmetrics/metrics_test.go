@@ -88,11 +88,6 @@ func TestOldServeFailureCannotClearRestartedServerState(t *testing.T) {
 }
 
 func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
-	qps, tps := 2.5, 90.0
-	durationP95, durationP99 := 250, 800
-	ttftP95, ttftP99 := 120, 300
-	cpu, memoryPercent := 17.5, 42.0
-	memoryUsed, memoryTotal := int64(1024), int64(4096)
 	dbOK, redisOK := true, false
 	redisTotal, redisIdle := 20, 15
 	dbActive, dbIdle := 4, 6
@@ -103,11 +98,6 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 		fakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{
 			CreatedAt: time.Unix(1_700_000_000, 0).UTC(), WindowMinutes: 1,
 			SuccessCount: 100, ErrorCountTotal: 12, BusinessLimitedCount: 3, ErrorCountSLA: 9,
-			UpstreamErrorCountExcl429529: 4, Upstream429Count: 2, Upstream529Count: 1,
-			TokenConsumed: 5400, AccountSwitchCount: 7, QPS: &qps, TPS: &tps,
-			DurationP95Ms: &durationP95, DurationP99Ms: &durationP99,
-			TTFTP95Ms: &ttftP95, TTFTP99Ms: &ttftP99,
-			CPUUsagePercent: &cpu, MemoryUsedMB: &memoryUsed, MemoryTotalMB: &memoryTotal, MemoryUsagePercent: &memoryPercent,
 			DBOK: &dbOK, RedisOK: &redisOK,
 			RedisConnTotal: &redisTotal, RedisConnIdle: &redisIdle,
 			DBConnActive: &dbActive, DBConnIdle: &dbIdle,
@@ -133,26 +123,6 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 	body := recorder.Body.String()
 
 	for _, expected := range []string{
-		`sub2api_ops_snapshot_timestamp_seconds 1.7e+09`,
-		`sub2api_ops_window_success_requests 100`,
-		`sub2api_ops_window_error_requests 12`,
-		`sub2api_ops_window_business_limited_requests 3`,
-		`sub2api_ops_window_sla_error_requests 9`,
-		`sub2api_ops_window_upstream_errors_excluding_429_529 4`,
-		`sub2api_ops_window_upstream_429_errors 2`,
-		`sub2api_ops_window_upstream_529_errors 1`,
-		`sub2api_ops_window_tokens 5400`,
-		`sub2api_ops_window_account_switches 7`,
-		`sub2api_ops_qps 2.5`,
-		`sub2api_ops_tps 90`,
-		`sub2api_ops_request_duration_p95_milliseconds 250`,
-		`sub2api_ops_request_duration_p99_milliseconds 800`,
-		`sub2api_ops_ttft_p95_milliseconds 120`,
-		`sub2api_ops_ttft_p99_milliseconds 300`,
-		`sub2api_infra_cpu_usage_percent 17.5`,
-		`sub2api_infra_memory_used_bytes 1.073741824e+09`,
-		`sub2api_infra_memory_total_bytes 4.294967296e+09`,
-		`sub2api_infra_memory_usage_percent 42`,
 		`sub2api_infra_database_up 1`,
 		`sub2api_infra_redis_up 0`,
 		`sub2api_infra_database_connections{state="active"} 4`,
@@ -168,6 +138,9 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 		`sub2api_modeltrace_export_failed_spans 5`,
 		`sub2api_modeltrace_export_panics 1`,
 		`sub2api_modeltrace_export_failed_spans_by_reason{reason="collector_refused"} 2`,
+		`sub2api_requests_completed_total{outcome="success"} 0`,
+		`sub2api_tokens_total{kind="input"} 0`,
+		`# TYPE sub2api_request_duration_seconds histogram`,
 		`# TYPE sub2api_modeltrace_export_attempted_spans_total counter`,
 		`sub2api_modeltrace_ended_spans_total 150`,
 		`sub2api_modeltrace_export_attempted_spans_total 145`,
@@ -177,6 +150,9 @@ func TestRegistryProjectsExistingOpsSnapshotInfraAndExportStatus(t *testing.T) {
 		`sub2api_modeltrace_export_failed_spans_total{reason="timeout"} 2`,
 	} {
 		require.Contains(t, body, expected)
+	}
+	for _, removed := range []string{"sub2api_ops_", "sub2api_infra_cpu_", "sub2api_infra_memory_"} {
+		require.NotContains(t, body, removed)
 	}
 
 	for _, forbidden := range []string{
@@ -205,6 +181,7 @@ func TestRegistryOmitsOpsSeriesUntilOriginalCollectorHasSnapshot(t *testing.T) {
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	require.NotContains(t, body, "sub2api_ops_window_success_requests")
+	require.Contains(t, body, "sub2api_requests_completed_total{outcome=\"success\"} 0")
 	require.Contains(t, body, "sub2api_modeltrace_enabled 0")
 }
 
@@ -278,19 +255,18 @@ func TestDisabledMetricsDoesNotOpenListener(t *testing.T) {
 	require.NoError(t, metrics.Shutdown(context.Background()))
 }
 
-func TestOpsHelpNamesExistingOneMinuteSnapshot(t *testing.T) {
-	cpu := 1.0
+func TestOneMinuteSnapshotFamiliesAreNotExposed(t *testing.T) {
 	metrics, err := New(
 		config.MetricsConfig{Enabled: true},
-		fakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{WindowMinutes: 1, SuccessCount: 1, CPUUsagePercent: &cpu}},
+		fakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{WindowMinutes: 1, SuccessCount: 1}},
 		fakeExportSource{},
 	)
 	require.NoError(t, err)
 	recorder := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
-	require.Contains(t, body, "# HELP sub2api_ops_window_success_requests Existing Ops collector-leader one-minute snapshot gauge; not per-instance or additive")
-	require.Contains(t, body, "# HELP sub2api_infra_cpu_usage_percent Existing Ops collector-leader one-minute snapshot gauge; not per-instance or additive")
+	require.NotContains(t, body, "sub2api_ops_window_success_requests")
+	require.NotContains(t, body, "sub2api_infra_cpu_usage_percent")
 }
 
 type mutableFakeOpsSource struct {
@@ -302,14 +278,13 @@ func (f *mutableFakeOpsSource) LatestSnapshot() *service.OpsInsertSystemMetricsI
 }
 
 func TestNilOpsFieldsAreOmittedOnEachScrape(t *testing.T) {
-	qps := 2.5
-	source := &mutableFakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{QPS: &qps}}
+	source := &mutableFakeOpsSource{snapshot: &service.OpsInsertSystemMetricsInput{}}
 	metrics, err := New(config.MetricsConfig{Enabled: true}, source, fakeExportSource{})
 	require.NoError(t, err)
 
 	first := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	require.Contains(t, first.Body.String(), "sub2api_ops_qps 2.5")
+	require.NotContains(t, first.Body.String(), "sub2api_ops_qps")
 
 	source.snapshot = &service.OpsInsertSystemMetricsInput{}
 	second := httptest.NewRecorder()
@@ -330,7 +305,7 @@ func TestAllExportedSnapshotSamplesUseTheirDeclaredLifecycleType(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
-	require.Contains(t, body, "# TYPE sub2api_ops_window_success_requests gauge")
+	require.Contains(t, body, "# TYPE sub2api_requests_completed_total counter")
 	require.Contains(t, body, "# TYPE sub2api_modeltrace_exported_spans gauge")
 	require.Contains(t, body, "# TYPE sub2api_modeltrace_export_terminal_spans_total counter")
 }

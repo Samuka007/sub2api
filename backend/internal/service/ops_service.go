@@ -431,11 +431,15 @@ func (s *OpsService) RecordErrorBatch(ctx context.Context, entries []*OpsInsertE
 		return nil
 	}
 	if len(prepared) == 1 {
-		_, err := s.opsRepo.InsertErrorLog(ctx, prepared[0])
+		err := func() error {
+			_, insertErr := s.opsRepo.InsertErrorLog(ctx, prepared[0])
+			return insertErr
+		}()
 		if err != nil {
-			log.Printf("[Ops] RecordErrorBatch single insert failed: %v", err)
+			log.Printf("[Ops] RecordError failed: %v", err)
+			return err
 		}
-		return err
+		return nil
 	}
 
 	if _, err := s.opsRepo.BatchInsertErrorLogs(ctx, prepared); err != nil {
@@ -447,6 +451,7 @@ func (s *OpsService) RecordErrorBatch(ctx context.Context, entries []*OpsInsertE
 				if firstErr == nil {
 					firstErr = insertErr
 				}
+				continue
 			}
 		}
 		return firstErr

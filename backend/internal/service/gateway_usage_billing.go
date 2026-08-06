@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	appmetrics "github.com/Wei-Shaw/sub2api/internal/metrics"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
@@ -583,7 +584,18 @@ func (s *GatewayService) billingDeps() *billingDeps {
 }
 
 func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, logKey string) {
-	if repo == nil || usageLog == nil {
+	if usageLog == nil {
+		return
+	}
+	appmetrics.ObserveUsage(
+		usageLog.InputTokens,
+		usageLog.OutputTokens,
+		usageLog.CacheCreationTokens,
+		usageLog.CacheReadTokens,
+		optionalMillisToSeconds(usageLog.DurationMs),
+		optionalMillisToSeconds(usageLog.FirstTokenMs),
+	)
+	if repo == nil {
 		return
 	}
 	usageCtx, cancel := detachedBillingContext(ctx)
@@ -612,6 +624,14 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 	if _, err := repo.Create(usageCtx, usageLog); err != nil {
 		logger.LegacyPrintf(logKey, "Create usage log failed: %v", err)
 	}
+}
+
+func optionalMillisToSeconds(value *int) *float64 {
+	if value == nil || *value < 0 {
+		return nil
+	}
+	seconds := float64(*value) / 1000
+	return &seconds
 }
 
 // recordUsageOpts 内部选项，参数化普通计费与长上下文计费的差异点。

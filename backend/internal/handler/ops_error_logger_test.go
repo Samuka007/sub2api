@@ -9,9 +9,12 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	appmetrics "github.com/Wei-Shaw/sub2api/internal/metrics"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +50,54 @@ func (r *ingressRejectOpsRepo) InsertErrorLog(context.Context, *service.OpsInser
 func (r *ingressRejectOpsRepo) BatchInsertErrorLogs(context.Context, []*service.OpsInsertErrorLogInput) (int64, error) {
 	r.insertCalls++
 	return 0, nil
+}
+
+func TestOpsErrorLoggerSourceDoesNotDependOnOpsService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	source := appmetrics.NewSource()
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registry.Register(source))
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ctx.Set(service.OpsUpstreamStatusCodeKey, http.StatusTooManyRequests)
+	observeTerminalRequestError(source, ctx, http.StatusTooManyRequests)
+
+	require.NoError(t, testutil.GatherAndCompare(registry, strings.NewReader(`# HELP sub2api_errors_total Sub2API terminal errors by bounded application classification.
+# TYPE sub2api_errors_total counter
+sub2api_errors_total{class="business_limited"} 0
+sub2api_errors_total{class="internal"} 0
+sub2api_errors_total{class="sla"} 0
+sub2api_errors_total{class="upstream_429"} 1
+sub2api_errors_total{class="upstream_529"} 0
+sub2api_errors_total{class="upstream_other"} 0
+# HELP sub2api_requests_completed_total Completed Sub2API requests by bounded terminal outcome.
+# TYPE sub2api_requests_completed_total counter
+sub2api_requests_completed_total{outcome="error"} 1
+sub2api_requests_completed_total{outcome="success"} 0
+`), "sub2api_errors_total", "sub2api_requests_completed_total"))
+}
+
+func TestOpsErrorLoggerSourceSkipsCountTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	source := appmetrics.NewSource()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
+
+	observeTerminalRequestError(source, ctx, http.StatusBadRequest)
+
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registry.Register(source))
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "sub2api_requests_completed_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			require.Zero(t, metric.GetCounter().GetValue())
+		}
+	}
 }
 
 func TestOpsErrorLogQueueByteBudget(t *testing.T) {
