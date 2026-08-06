@@ -207,7 +207,53 @@ Pull Request 标题建议遵循 Conventional Commits 形式 `type(scope): 中文
 - 数据库、配置、安全、兼容性、发布与回滚影响。
 - README/长期文档是否更新及原因。
 
-建议一个 PR 只解决一个问题域。功能 PR 默认 squash merge；同步 PR 使用 merge commit。合并前必须满足：
+#### PR 正文标准模板
+
+为统一正文结构，在上述要素基础上使用以下章节模板（中文填写，无内容的节注明"无"并说明原因）：
+
+````markdown
+## 关联 Issue
+Closes #<编号>
+
+## 背景 / 问题
+<!-- 为什么要改；当前问题或需求 -->
+
+## 改动
+<!-- 做了什么；跨模块改动说明真实调用方与上下游契约 -->
+-
+
+## 修复 / 解决
+<!-- 可观察变化；feat 与 fix 分点 -->
+
+## 范围与非目标
+- 包含：
+- 不包含：（无关改动另开 PR）
+
+## 测试证据
+- [ ] `make pr-check` 通过
+- [ ] 用户可见/错误路径真实 smoke（场景）
+- [ ] 模型追踪改动跑 `.agent/skills/sub2api-model-trace-e2e/` smoke
+<!-- 如实区分：自动测试通过 / 真实 smoke 通过 / skip 未验证 -->
+
+## 评审
+- [ ] 已运行 `reviewing-code-changes`
+- [ ] P0/P1 已修复并定向重测
+
+## 影响与风险
+<!-- 用户可见行为、接口契约、数据、权限、安全、性能 -->
+
+## 回滚
+<!-- revert PR / feature flag / 配置回退 / 数据回滚预案 -->
+
+---
+### 提交前自检
+- [ ] 分支已同步 `origin/main`，变更内聚可解释
+- [ ] commit 作者/提交者身份真实（关联 GitHub 账号）
+- [ ] 未提交凭证、客户数据、生产配置、本地路径、过程文档
+- [ ] README/长期文档已按 AGENTS 第5节更新或确认无需
+````
+
+建议一个 PR 只解决一个问题域。合并方式按提交数和类型选择：单 commit 的 PR 用 **squash** 或 **rebase** 合并（避免产生 `Merge pull request` 噪音 commit）；仅同步 PR（见第4节）用 **merge commit** 以保留官方祖先关系；其余多 commit PR 用 **squash**。合并前必须满足：
 
 - `Code Quality` 和全部 required checks 通过。
 - PR 作者可在其余合并条件满足后自行合并。
