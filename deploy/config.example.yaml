@@ -73,19 +73,6 @@ server:
     max_upload_buffer_per_stream: 524288
 
 # =============================================================================
-# Private Prometheus Metrics Listener (Optional)
-# Prometheus 私有指标监听器（可选）
-# =============================================================================
-# Keep this listener on loopback or an internal container network. Alloy should
-# scrape this exact path; it is intentionally separate from the public API.
-# 保持监听在回环地址或容器内部网络；由 Alloy 抓取精确路径，不接入公网 API。
-metrics:
-  enabled: false
-  host: "127.0.0.1"
-  port: 9091
-  path: "/metrics"
-
-# =============================================================================
 # WebAuthn / Passkey Configuration
 # WebAuthn / Passkey 配置
 # =============================================================================
@@ -194,7 +181,7 @@ security:
     # 默认 CSP 策略（如果静态资源托管在其他域名，请自行覆盖）
     # Note: __CSP_NONCE__ will be replaced with 'nonce-xxx' at request time for inline script security
     # 注意：__CSP_NONCE__ 会在请求时被替换为 'nonce-xxx'，用于内联脚本安全
-    policy: "default-src 'self'; script-src 'self' __CSP_NONCE__ https://challenges.cloudflare.com https://*.alicdn.com https://static.cloudflareinsights.com https://turing.captcha.qcloud.com https://*.stripe.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; style-src 'self' 'unsafe-inline' https://*.captcha.gtimg.com https://fonts.googleapis.com https://*.alicdn.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https:; frame-src https://challenges.cloudflare.com https://turing.captcha.qcloud.com https://*.stripe.com https://checkout.airwallex.com https://checkout-demo.airwallex.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    policy: "default-src 'self'; worker-src 'self' blob:; script-src 'self' __CSP_NONCE__ https://challenges.cloudflare.com https://*.alicdn.com https://static.cloudflareinsights.com https://turing.captcha.qcloud.com https://turing.captcha.gtimg.com https://ca.turing.captcha.qcloud.com https://global.turing.captcha.gtimg.com https://www.tycaptcha.com https://cloudcache.tencentcs.com https://*.stripe.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; style-src 'self' 'unsafe-inline' https://*.captcha.gtimg.com https://fonts.googleapis.com https://*.alicdn.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://turing.captcha.qcloud.com https://www.tycaptcha.com https://rce.tencentrio.com https:; frame-src https://challenges.cloudflare.com https://turing.captcha.qcloud.com https://ca.turing.captcha.qcloud.com https://www.tycaptcha.com https://*.stripe.com https://checkout.airwallex.com https://checkout-demo.airwallex.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
   proxy_fallback:
     # Allow auxiliary services (update check, pricing data) to fallback to direct
     # connection when proxy initialization fails. Does NOT affect AI gateway connections.
@@ -278,16 +265,15 @@ gateway:
   #
   # 注意：开启后会影响所有客户端的行为（不仅限于 VS Code / Codex CLI），请谨慎开启。
   force_codex_cli: false
-  # Disable canonical Codex User-Agent/version enforcement for OAuth upstream requests.
-  # 关闭 OAuth 上游请求的规范 Codex User-Agent/version 强制统一。
+  # Stop rewriting load-shed Codex originators to the official CLI identity.
+  # 关闭「把落在上游降载桶的 Codex originator 改写为官方 CLI 身份（codex_cli_rs）」。
   #
-  # 默认 false；仅当上游身份策略变化时回滚。关闭后仍会按最终 User-Agent 规范 originator，
-  # 除非同时设置 disable_codex_originator_normalization: true。
-  disable_codex_identity_enforcement: false
-  # Disable originator normalization independently from User-Agent/version enforcement.
-  # 单独关闭 originator 按最终 User-Agent 规范化，不改变 User-Agent/version 的强制统一开关。
+  # 上游 /backend-api/codex 按 originator 分桶调度容量：命中降载桶的请求即使 HTTP 200，
+  # 也会立刻推 server_is_overloaded 错误事件，网关据此判定瞬时上游故障并冷却账号，
+  # 对外表现为 Codex 账号频繁过载不可用。归一化只替换身份段，保留版本/OS/架构/终端指纹，
+  # 改写后 originator 与 User-Agent 首段仍然配套。
   #
-  # 默认 false；仅当上游调整 originator 校验或调度策略时才置 true。
+  # 默认 false（即归一化开启）；仅当上游调整分桶、使归一化反而落入降载桶时才置 true。
   disable_codex_originator_normalization: false
   # Enable Codex image-generation bridge injection for /openai/v1/responses.
   # 是否为 Codex /responses 请求自动注入 image_generation 工具与桥接指令。
@@ -913,31 +899,6 @@ idempotency:
   cleanup_batch_size: 500
 
 # =============================================================================
-# Hermes Account Quota Recovery (restart required)
-# 账号额度提前恢复（需重启）
-# =============================================================================
-quota_recovery:
-  # Supported with top-level run_mode: "standard" or "simple". Until
-  # runtime-block invalidation is distributed, Hermes is limited to a single
-  # application service process; do not enable it in multi-instance deployments.
-  # Also requires database.max_open_conns >= 2; one connection holds the
-  # database-wide PostgreSQL advisory lock for the lifetime of this runner.
-  # Connect directly to PostgreSQL or use PgBouncer session pooling. Transaction
-  # and statement pooling are incompatible with this session advisory lock.
-  # If the pinned lock connection is lost, Hermes stops fail-closed and logs
-  # restart_required=true; restart this service after PostgreSQL recovers.
-  enabled: false
-  # Each cycle scans every currently rate-limited active/schedulable account.
-  interval_seconds: 86400
-  # Database page size; this is not a per-cycle account limit.
-  batch_size: 50
-  concurrency: 3
-  # Allows query -> reset-credit consume -> post-reset query for one account.
-  timeout_seconds: 75
-  # Random per-account delay to avoid synchronized upstream requests.
-  jitter_seconds: 10
-
-# =============================================================================
 # Concurrency Wait Configuration
 # 并发等待配置
 # =============================================================================
@@ -1043,44 +1004,6 @@ jwt:
   # - >0: 按分钟生效（优先于 expire_hour）
   # - =0: 回退使用 expire_hour
   access_token_expire_minutes: 0
-
-# =============================================================================
-# Model Request Tracing (OTLP, Optional)
-# 模型请求追踪（OTLP，可选）
-# =============================================================================
-model_tracing:
-  # Disabled by default. Choose langfuse or otlp_collector.
-  # 默认关闭；导出目标可选 langfuse 或 otlp_collector。
-  enabled: false
-  destination: "langfuse"
-  # A host-only endpoint gets the destination standard path automatically.
-  # Explicit custom paths remain unchanged.
-  # 仅填写 origin 时自动使用目标的标准路径；显式自定义路径保持不变。
-  # Langfuse: https://langfuse.example.com/api/public/otel/v1/traces
-  # Collector: http://collector.example.com:4318/v1/traces
-  endpoint: ""
-  public_key: ""
-  secret_key: ""
-  prompt_max_bytes: 1048576
-  response_max_bytes: 1048576
-  media_max_bytes: 1048576
-  capture_media_content: false
-  # Export reliability (issue #51): explicit OTLP export timeout and retry so a
-  # transiently refused Collector is retried within a bounded window instead of
-  # discarded after one or two attempts. Defaults below are applied when unset.
-  # 单批 OTLP 导出（含内部重试）的最大耗时；必须覆盖完整重试窗口。<=0 默认 60。
-  export_timeout_seconds: 60
-  # OTLP exporter 指数退避；MaxElapsedTime 受 export_timeout_seconds 上界约束，
-  # 超限后整批明确计入最终失败，保留有界。留空时默认启用：5s/30s/55s。
-  export_retry:
-    enabled: true
-    initial_interval_seconds: 5
-    max_interval_seconds: 30
-    max_elapsed_time_seconds: 55
-  # BatchSpanProcessor 队列/批大小与 flush 间隔；<=0 采用默认。
-  export_queue_size: 256
-  export_batch_size: 16
-  export_batch_timeout_ms: 1000
 
 # =============================================================================
 # TOTP (2FA) Configuration

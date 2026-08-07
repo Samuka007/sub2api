@@ -92,6 +92,7 @@ func TestSettingHandler_GetPublicSettings_ExposesCaptchaSDKConfigurationWithoutS
 			service.SettingKeyTencentCaptchaAppSecretKey:   "tencent-app-secret",
 			service.SettingKeyTencentCaptchaCloudSecretID:  "tencent-cloud-id",
 			service.SettingKeyTencentCaptchaCloudSecretKey: "tencent-cloud-secret",
+			service.SettingKeyTencentCaptchaRegion:         service.TencentCaptchaRegionINTL,
 			service.SettingKeyAliyunCaptchaEnabled:         "true",
 			service.SettingKeyAliyunCaptchaAccessKeyID:     "aliyun-access-id",
 			service.SettingKeyAliyunCaptchaAccessKeySecret: "aliyun-access-secret",
@@ -116,6 +117,7 @@ func TestSettingHandler_GetPublicSettings_ExposesCaptchaSDKConfigurationWithoutS
 	require.Equal(t, 0, resp.Code)
 	require.Equal(t, true, resp.Data["tencent_captcha_enabled"])
 	require.Equal(t, "123456789", resp.Data["tencent_captcha_app_id"])
+	require.Equal(t, service.TencentCaptchaRegionINTL, resp.Data["tencent_captcha_region"])
 	require.Equal(t, true, resp.Data["aliyun_captcha_enabled"])
 	require.Equal(t, "scene-public", resp.Data["aliyun_captcha_scene_id"])
 	require.Equal(t, "prefix-public", resp.Data["aliyun_captcha_prefix"])
