@@ -200,7 +200,6 @@ export default {
     channelStatus: 'Channel Status',
     modelIq: 'GPT Model IQ Ranking',
     riskControl: 'Risk Control',
-    modelRadar: 'Model Radar',
     securityAudit: 'Security Audit',
     contentModeration: 'Content Moderation',
     promptAudit: 'Prompt Audit',

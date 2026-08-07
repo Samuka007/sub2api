@@ -127,4 +127,15 @@ describe('AppSidebar channel monitor navigation', () => {
 
     expect(wrapper.find('[data-to="/admin/channels/monitor"]').exists()).toBe(true)
   })
+
+  it('does not render the removed model radar entry for administrators', () => {
+    mocks.authStore.isAdmin = true
+
+    const wrapper = shallowMount(AppSidebar, {
+      props: { variant: 'admin' },
+      global: { stubs: { RouterLink: RouterLinkStub, VersionBadge: true } },
+    })
+
+    expect(wrapper.find('[data-to="/admin/model-radar"]').exists()).toBe(false)
+  })
 })
