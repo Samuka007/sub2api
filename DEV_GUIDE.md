@@ -59,6 +59,37 @@ go test -tags=unit ./internal/<package>/...
 go test -tags=integration ./internal/<package>/...
 ```
 
+### 标准化网关压测
+
+该工具只用于隔离测试环境。它启动本地 mock OpenAI upstream，并通过真实 Sub2API gateway 发压。mock 同时实现 `/v1/chat/completions` 和 `/v1/responses`（包括 gateway 强制使用的 Responses SSE 终态），不会访问真实 LLM。不要把生产分组或真实 LLM 账号用于压测。
+
+1. 构建压测制品：
+
+```bash
+make build-loadtest
+```
+
+产物为 `backend/bin/loadtest`。
+
+2. 在测试 Sub2API 中创建专用分组和 API key。该分组只能绑定一个专用 OpenAI API-key 账号。账号的 `base_url` 必须指向 load driver 的 mock 地址，并以 `/v1` 结尾。例如，同机运行时使用 `http://127.0.0.1:19090/v1`。gateway 在容器内时，使用容器可访问的 host 地址，并在测试环境中显式允许该私网 HTTP upstream。账号的 Responses 能力为“未探测”或强制 Chat Completions 时均可：mock 对两条上游路径提供等价 canned response，不会触发 404 fallback。
+
+3. 调整 load driver 的文件描述符限制。5000 并发时至少检查 `ulimit -n`、ephemeral port、CPU 和内存水位。不要用默认 OS 限制解释 gateway 容量。
+
+4. 启动压测：
+
+```bash
+backend/bin/loadtest \
+  -target 'http://127.0.0.1:8080/v1/chat/completions' \
+  -headers 'Authorization: Bearer <dedicated-test-api-key>' \
+  -mock-upstream-addr '0.0.0.0:19090' \
+  -concurrency 5000 \
+  -duration 2m
+```
+
+工具先发送一个 preflight 请求。每次运行都会生成新的随机响应标记；只有该请求恰好一次命中本进程 mock，且 gateway 返回该唯一标记时，工具才启动并发负载。错误 target、固定标记伪造、重复 upstream fallback 或直接把 `-target` 指向 mock listener 都会立即退出。专用分组仍是阻止真实账号参与 failover 的必要隔离边界。
+
+使用 `-rps` 设置全局平滑 QPS 上限。`-mock-latency` 注入固定 upstream 延迟。`-mock-fail-rate` 在 preflight 成功后原子切换 HTTP 500 比例。`-http-timeout` 必须为正，并限定 duration 到期后在途请求的最长排空时间。报告输出 requests、2xx、non-2xx、error histogram、RPS、bytes 和完整响应体延迟的 min/p50/p95/p99/max。结果是合成基线，只用于同一 fixture 下的相对比较。
+
 ### 前端
 
 ```bash

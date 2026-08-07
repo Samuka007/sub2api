@@ -43,12 +43,6 @@ type GrokQuotaProbeResult struct {
 	ProbeError        string              `json:"probe_error,omitempty"`
 }
 
-type GrokQuotaResetResult struct {
-	Supported bool   `json:"supported"`
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-}
-
 type GrokQuotaService struct {
 	accountRepo   AccountRepository
 	proxyRepo     ProxyRepository
@@ -460,11 +454,11 @@ func preferSuccessfulBillingStatus(weeklyStatus, monthlyStatus int, weeklyOK, mo
 	return monthlyStatus
 }
 
-func (s *GrokQuotaService) ResetQuota(ctx context.Context, accountID int64) (*GrokQuotaResetResult, error) {
+func (s *GrokQuotaService) ResetQuota(ctx context.Context, accountID int64) error {
 	if _, err := s.loadGrokOAuthAccount(ctx, accountID); err != nil {
-		return nil, err
+		return err
 	}
-	return nil, infraerrors.New(http.StatusNotImplemented, "GROK_QUOTA_RESET_UNSUPPORTED", "xAI does not expose a Grok subscription quota reset endpoint for OAuth accounts")
+	return infraerrors.New(http.StatusNotImplemented, "GROK_QUOTA_RESET_UNSUPPORTED", "xAI does not expose a Grok subscription quota reset endpoint for OAuth accounts")
 }
 
 func (s *GrokQuotaService) prepareProbe(ctx context.Context, accountID int64) (*Account, string, string, error) {

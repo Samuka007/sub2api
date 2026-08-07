@@ -1123,7 +1123,7 @@ func TestGrokQuotaServiceResetQuotaUnsupported(t *testing.T) {
 	}
 	svc := NewGrokQuotaService(repo, nil, nil, nil, nil)
 
-	_, err := svc.ResetQuota(context.Background(), 44)
+	err := svc.ResetQuota(context.Background(), 44)
 	require.Error(t, err)
 	require.Equal(t, http.StatusNotImplemented, infraerrors.Code(err))
 	require.Equal(t, "GROK_QUOTA_RESET_UNSUPPORTED", infraerrors.Reason(err))

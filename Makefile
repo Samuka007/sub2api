@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical pr-check
+.PHONY: build build-backend build-frontend build-loadtest test test-backend test-frontend test-frontend-critical pr-check
 
 FRONTEND_CRITICAL_VITEST := \
 	src/api/__tests__/client.spec.ts \
@@ -16,6 +16,9 @@ build: build-backend build-frontend
 # 编译后端（复用 backend/Makefile）
 build-backend:
 	@$(MAKE) -C backend build
+
+build-loadtest:
+	@$(MAKE) -C backend build-loadtest
 
 # 编译前端（需要已安装依赖）
 build-frontend:

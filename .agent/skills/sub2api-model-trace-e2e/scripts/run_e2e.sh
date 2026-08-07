@@ -5,8 +5,8 @@
 #   bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
 #
 # 前置：
-#   - Colima profile `swebench` 已启动
-#   - 当前位于 sub2api 仓库根目录
+#   - active Docker server 是 Linux；native 模式使用本地 Unix endpoint
+#   - 当前位于 sub2api 仓库根目录；Colima 需显式设置 E2E_RUNTIME=colima
 #
 # 成功：exit 0，stdout 最后三行为 trace_id、observation_count、VERIFY_OK
 # 失败：exit != 0，stderr 含 ERROR 行
@@ -15,9 +15,11 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
 
+E2E_RUNTIME="${E2E_RUNTIME:-native}"
 COLIMA_PROFILE="${COLIMA_PROFILE:-swebench}"
-DOCKER_HOST_SOCK="${DOCKER_HOST_SOCK:-$HOME/.config/colima/${COLIMA_PROFILE}/docker.sock}"
-export DOCKER_HOST="unix://$DOCKER_HOST_SOCK"
+
+source "$SKILL_DIR/scripts/runtime_adapter.sh"
+resolve_runtime
 
 LANGFUSE_DIR="${LANGFUSE_DIR:-$REPO_ROOT/.e2e-tmp/langfuse}"
 DEPS_DIR="${DEPS_DIR:-$REPO_ROOT/.e2e-tmp/deps}"
@@ -50,44 +52,52 @@ clickhouse_query() {
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 need_cmd docker
-need_cmd docker-compose
-need_cmd colima
 need_cmd nc
 need_cmd curl
 need_cmd jq
 need_cmd openssl
 need_cmd python3
 need_cmd go
+resolve_compose
+if [[ "$E2E_RUNTIME" == colima ]]; then
+  need_cmd colima
+  colima status "$COLIMA_PROFILE" >/dev/null 2>&1 || fail "colima profile $COLIMA_PROFILE not running; run: colima start $COLIMA_PROFILE"
+fi
+resolve_arch
+resolve_e2e_owner
 
 # 0. 前置检查
 [[ -f "$REPO_ROOT/backend/cmd/server/main.go" ]] || fail "must run from sub2api repo root, got $REPO_ROOT"
-colima status "$COLIMA_PROFILE" >/dev/null 2>&1 || fail "colima profile $COLIMA_PROFILE not running; run: colima start $COLIMA_PROFILE"
 
-# 0.1 先清理可能残留的 e2e 容器和卷（幂等，不报错）
-log "cleaning up stale e2e containers"
-docker rm -f \
-  sub2api-e2e \
-  sub2api-e2e-upstream \
-  sub2api-deps-postgres-1 sub2api-deps-redis-1 \
-  sub2api-langfuse-langfuse-web-1 sub2api-langfuse-langfuse-worker-1 \
-  sub2api-langfuse-postgres-1 sub2api-langfuse-redis-1 \
-  sub2api-langfuse-clickhouse-1 langfuse-clickhouse-read-proxy-1 sub2api-langfuse-minio-1 \
-  >/dev/null 2>&1 || true
-docker volume rm -f sub2api-e2e-data \
-  langfuse_langfuse_postgres_data langfuse_langfuse_clickhouse_data langfuse_langfuse_clickhouse_logs langfuse_langfuse_minio_data langfuse_langfuse_redis_data \
-  sub2api-langfuse_postgres_data sub2api-langfuse_clickhouse_data sub2api-langfuse_clickhouse_logs sub2api-langfuse_minio_data sub2api-langfuse_redis_data \
-  >/dev/null 2>&1 || true
+# 0.1 旧版无标签资源只在显式 opt-in 时迁移清理。
+remove_legacy_e2e_resources
 
-# 0.2 端口占用检查
+# 0.2 先检查端口，避免并发运行时清理另一个 checkout 或当前活跃 E2E。
 for p in 3000 15432 16379 18081 18123 8080 5432 6379; do
   if nc -z 127.0.0.1 "$p" 2>/dev/null; then
-    fail "port $p is occupied after e2e-owned cleanup; identify owner with: lsof -i :$p"
+    fail "port $p is occupied; identify owner with: lsof -i :$p; for pre-owner-label E2E resources, explicitly run E2E_CLEAN_LEGACY=1 scripts/teardown.sh"
   fi
 done
+
+# 0.3 只清理当前 checkout 先前留下的带 owner label 资源。
+log "cleaning up E2E resources owned by $E2E_OWNER_ID"
+remove_owned_e2e_resources
 mkdir -p "$LANGFUSE_DIR" "$DEPS_DIR" "$BIN_DIR"
 cp "$SKILL_DIR/assets/langfuse-compose.yml" "$LANGFUSE_DIR/docker-compose.yml"
 cp "$SKILL_DIR/assets/clickhouse-read-proxy.conf" "$LANGFUSE_DIR/clickhouse-read-proxy.conf"
-( cd "$LANGFUSE_DIR" && docker-compose up -d )
+( cd "$LANGFUSE_DIR" && compose -p "$E2E_LANGFUSE_PROJECT" up -d )
+for container_name in \
+  sub2api-langfuse-langfuse-web-1 sub2api-langfuse-langfuse-worker-1 \
+  sub2api-langfuse-postgres-1 sub2api-langfuse-redis-1 \
+  sub2api-langfuse-clickhouse-1 langfuse-clickhouse-read-proxy-1 sub2api-langfuse-minio-1; do
+  assert_e2e_resource_owned container "$container_name"
+done
+for volume_name in \
+  langfuse_postgres_data langfuse_clickhouse_data langfuse_clickhouse_logs \
+  langfuse_minio_data langfuse_redis_data; do
+  assert_e2e_resource_owned volume "${E2E_LANGFUSE_PROJECT}_${volume_name}"
+done
+assert_e2e_resource_owned network "${E2E_LANGFUSE_PROJECT}_default"
 CLICKHOUSE_PROXY_HEALTH=""
 for i in {1..60}; do
   CLICKHOUSE_PROXY_HEALTH=$(clickhouse_query "SELECT 1" 2>/dev/null || true)
@@ -125,7 +135,10 @@ log "langfuse version=$LANGFUSE_VERSION revision=$LANGFUSE_IMAGE_REVISION digest
 # 2. 起 sub2api deps
 log "starting sub2api deps (pg+redis)"
 cp "$SKILL_DIR/assets/sub2api-deps-compose.yml" "$DEPS_DIR/docker-compose.yml"
-( cd "$DEPS_DIR" && docker-compose up -d )
+( cd "$DEPS_DIR" && compose -p "$E2E_DEPS_PROJECT" up -d )
+assert_e2e_resource_owned container sub2api-deps-postgres-1
+assert_e2e_resource_owned container sub2api-deps-redis-1
+assert_e2e_resource_owned network "${E2E_DEPS_PROJECT}_default"
 for i in {1..30}; do
   pg_ok=$(docker exec sub2api-deps-postgres-1 pg_isready -U sub2api 2>/dev/null || true)
   rd_ok=$(docker exec sub2api-deps-redis-1 redis-cli ping 2>/dev/null || true)
@@ -156,7 +169,8 @@ openssl verify -CAfile "$GEMINI_TLS_DIR/ca.crt" "$GEMINI_TLS_DIR/server.crt" >/d
   || fail "local Gemini TLS certificate verification failed"
 # 2.1 启动确定性 Anthropic 上游：低 priority 账号固定 429，高 priority 账号固定成功 SSE。
 log "starting deterministic Anthropic failover fixture"
-colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e-upstream \
+runtime_exec docker run -d --name sub2api-e2e-upstream \
+  --label "$E2E_OWNER_LABEL_KEY=$E2E_OWNER_ID" \
   --network host \
   -e E2E_GEMINI_API_KEY_FILE=/tls/gemini-api-key \
   -e E2E_BATCH_MEDIA_CANARY="$BATCH_MEDIA_CANARY" \
@@ -167,7 +181,8 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e-upstr
   -w /app \
   golang:1.26.5 \
   go run ./upstream-fixture.go >/dev/null
-for i in {1..30}; do
+assert_e2e_resource_owned container sub2api-e2e-upstream
+for ((i = 0; i < 120; i++)); do
   fixture_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:18081/health || true)
   [[ "$fixture_code" == "200" ]] && break
   sleep 1
@@ -178,10 +193,10 @@ TLS_FIXTURE_CODE=$(curl --noproxy '*' -sS --cacert "$GEMINI_TLS_DIR/ca.crt" \
   -o /dev/null -w '%{http_code}' https://generativelanguage.googleapis.com/health || true)
 [[ "$TLS_FIXTURE_CODE" == "200" ]] || fail "Gemini TLS fixture verification failed (HTTP $TLS_FIXTURE_CODE)"
 
-# 3. 编译 sub2api linux/arm64（带 embed tag）
+# 3. 按 Docker server architecture 编译 Linux 二进制（带 embed tag）
 log "compiling sub2api and E2E client binaries"
 rm -rf "$BIN_DIR/sub2api"
-colima ssh --profile "$COLIMA_PROFILE" -- docker run --rm \
+runtime_exec docker run --rm \
   -e GOPROXY=https://goproxy.cn,direct \
   -v sub2api-go-mod-cache:/go/pkg/mod \
   -v sub2api-go-build-cache:/root/.cache/go-build \
@@ -189,24 +204,24 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run --rm \
   -v "$BIN_DIR:/out" \
   -w /src \
   golang:1.26.5 \
-  sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags embed -ldflags="-s -w -X main.Version=e2e-test" -o /out/sub2api ./cmd/server'
+  sh -c "CGO_ENABLED=0 GOOS=linux GOARCH=$E2E_GOARCH go build -tags embed -ldflags='-s -w -X main.Version=e2e-test' -o /out/sub2api ./cmd/server"
 [[ -x "$BIN_DIR/sub2api" ]] || fail "binary not produced at $BIN_DIR/sub2api"
 RAW_RST_CLIENT_BIN="$BIN_DIR/raw-http-rst-client"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$RAW_RST_CLIENT_BIN" "$SKILL_DIR/scripts/raw_http_rst_client.go"
+CGO_ENABLED=0 GOOS=linux GOARCH="$E2E_GOARCH" go build -o "$RAW_RST_CLIENT_BIN" "$SKILL_DIR/scripts/raw_http_rst_client.go"
 [[ -x "$RAW_RST_CLIENT_BIN" ]] || fail "raw TCP RST client was not produced at $RAW_RST_CLIENT_BIN"
 RESPONSES_WS_CLIENT_BIN="$BIN_DIR/responses-ws-client"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$RESPONSES_WS_CLIENT_BIN" "$SKILL_DIR/scripts/responses_ws_client.go"
+CGO_ENABLED=0 GOOS=linux GOARCH="$E2E_GOARCH" go build -o "$RESPONSES_WS_CLIENT_BIN" "$SKILL_DIR/scripts/responses_ws_client.go"
 [[ -x "$RESPONSES_WS_CLIENT_BIN" ]] || fail "Responses WebSocket client was not produced at $RESPONSES_WS_CLIENT_BIN"
 
 # 4. 启动 sub2api（AUTO_SETUP，--network host 共享 VM 127.0.0.1）
 log "starting sub2api server"
-docker rm -f sub2api-e2e >/dev/null 2>&1 || true
 # 清空 DB 让 AUTO_SETUP 重建（幂等）
 docker exec sub2api-deps-postgres-1 psql -U sub2api -d sub2api -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" >/dev/null 2>&1 || true
-docker volume rm sub2api-e2e-data >/dev/null 2>&1 || true
-docker volume create sub2api-e2e-data >/dev/null
+docker volume create --label "$E2E_OWNER_LABEL_KEY=$E2E_OWNER_ID" sub2api-e2e-data >/dev/null
+assert_e2e_resource_owned volume sub2api-e2e-data
 
-colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e \
+runtime_exec docker run -d --name sub2api-e2e \
+  --label "$E2E_OWNER_LABEL_KEY=$E2E_OWNER_ID" \
   --network host \
   -e DATA_DIR=/data \
   -e AUTO_SETUP=true \
@@ -251,6 +266,7 @@ colima ssh --profile "$COLIMA_PROFILE" -- docker run -d --name sub2api-e2e \
   -v "$REPO_ROOT/backend/resources:/app/resources:ro" \
   golang:1.26.5 \
   sh -c 'cd /app && ./sub2api' >/dev/null
+assert_e2e_resource_owned container sub2api-e2e
 
 for i in {1..60}; do
   code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health || true)
@@ -650,7 +666,7 @@ SLOW_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.slow')
 update_success_account_endpoint "http://127.0.0.1:18081/slow"
 CLIENT_DISCONNECT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.out"
 CLIENT_DISCONNECT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/client-disconnect-rst.err"
-if colima ssh --profile "$COLIMA_PROFILE" -- "$RAW_RST_CLIENT_BIN" \
+if runtime_exec "$RAW_RST_CLIENT_BIN" \
   -addr 127.0.0.1:8080 \
   -token "$FAILOVER_APIKEY" \
   -request-id "$CLIENT_DISCONNECT_REQUEST_ID" \
@@ -847,7 +863,7 @@ WS_ACCOUNT_ID=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-
 WS_CLIENT_URL="ws://127.0.0.1:8080/v1/responses"
 WS_CLIENT_ERROR_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-client.err"
 WS_FIXTURE_BEFORE=$(curl -fsS http://localhost:18081/stats | jq -r '.ws_turns')
-WS_MULTI_CLIENT_OUTPUT=$(colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_MULTI_CONNECTION_ID" --mode multi 2>"$WS_CLIENT_ERROR_FILE") \
+WS_MULTI_CLIENT_OUTPUT=$(runtime_exec "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_MULTI_CONNECTION_ID" --mode multi 2>"$WS_CLIENT_ERROR_FILE") \
   || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket multi-turn client failed"; }
 [[ "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=1 response_id=resp_e2e_ws_"* && "$WS_MULTI_CLIENT_OUTPUT" == *"turn_index=2 response_id=resp_e2e_ws_"* ]] \
   || fail "Responses WebSocket multi-turn client output mismatch"
@@ -856,7 +872,7 @@ WS_SWITCH_READY_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.ready"
 WS_SWITCH_CONTINUE_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.continue"
 WS_SWITCH_CLIENT_OUTPUT_FILE="$REPO_ROOT/.e2e-tmp/responses-ws-switch.out"
 rm -f "$WS_SWITCH_READY_FILE" "$WS_SWITCH_CONTINUE_FILE" "$WS_SWITCH_CLIENT_OUTPUT_FILE"
-colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_SWITCH_CONNECTION_ID" --mode pause \
+runtime_exec "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_SWITCH_CONNECTION_ID" --mode pause \
   --ready-file "$WS_SWITCH_READY_FILE" --continue-file "$WS_SWITCH_CONTINUE_FILE" >"$WS_SWITCH_CLIENT_OUTPUT_FILE" 2>"$WS_CLIENT_ERROR_FILE" &
 WS_SWITCH_CLIENT_PID=$!
 for _ in {1..100}; do
@@ -872,7 +888,7 @@ WS_SWITCH_CLIENT_OUTPUT=$(<"$WS_SWITCH_CLIENT_OUTPUT_FILE")
   || fail "Responses WebSocket config-switch client output mismatch"
 apply_runtime_tracing_config 10 true "$LANGFUSE_TRACE_ENDPOINT"
 
-WS_DISCONNECT_CLIENT_OUTPUT=$(colima ssh --profile "$COLIMA_PROFILE" -- "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
+WS_DISCONNECT_CLIENT_OUTPUT=$(runtime_exec "$RESPONSES_WS_CLIENT_BIN" --url "$WS_CLIENT_URL" --token "$WS_APIKEY" --request-id "$WS_DISCONNECT_CONNECTION_ID" --mode disconnect 2>"$WS_CLIENT_ERROR_FILE") \
   || { cat "$WS_CLIENT_ERROR_FILE" >&2; fail "Responses WebSocket disconnect client failed"; }
 [[ "$WS_DISCONNECT_CLIENT_OUTPUT" == *"WS_DISCONNECTED connection_request_id=$WS_DISCONNECT_CONNECTION_ID partial_response_id=resp_e2e_ws_disconnect"* ]] \
   || fail "Responses WebSocket disconnect client did not close after partial output"
