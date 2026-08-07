@@ -35,6 +35,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.9
+          dest: ${{ runner.temp }}/setup-pnpm
+
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
