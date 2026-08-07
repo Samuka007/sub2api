@@ -139,6 +139,33 @@ func TestNormalizeQuantizesEveryMonetaryField(t *testing.T) {
 	}
 }
 
+func TestPostUsageBillingEffectsUseNormalizedCommandAmounts(t *testing.T) {
+	cmd := &UsageBillingCommand{
+		BalanceCost:         0.000078125,
+		SubscriptionCost:    0.000078125,
+		APIKeyRateLimitCost: 0.000078125,
+		AccountQuotaCost:    0.000031255,
+	}
+	cmd.Normalize()
+
+	effects := resolvePostUsageBillingEffects(cmd, nil)
+	require.Equal(t, cmd.BalanceCost, effects.BalanceCharge)
+	require.Equal(t, cmd.SubscriptionCost, effects.SubscriptionCost)
+	require.Equal(t, cmd.APIKeyRateLimitCost, effects.APIKeyRateLimitCost)
+	require.Equal(t, cmd.AccountQuotaCost, effects.AccountQuotaCost)
+}
+
+func TestPostUsageBillingEffectsPreferActualBalanceCharge(t *testing.T) {
+	cmd := &UsageBillingCommand{BalanceCost: 1.25}
+	cmd.Normalize()
+	charged := 0.75
+
+	effects := resolvePostUsageBillingEffects(cmd, &UsageBillingApplyResult{BalanceCharged: &charged})
+	require.Equal(t, charged, effects.BalanceCharge)
+	require.Equal(t, cmd.BalanceCost, effects.UserPlatformQuotaCost,
+		"用户平台额度记录已发生的规范用量，不随余额不足时的实际可扣金额降低")
+}
+
 // 指纹是请求幂等键，必须仍由原始金额派生：
 // 若量化发生在指纹之前，升级前后同一 request_id 的重试会算出不同指纹，
 // 被误判为 fingerprint conflict。

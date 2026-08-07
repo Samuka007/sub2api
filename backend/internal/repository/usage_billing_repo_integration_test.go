@@ -80,6 +80,53 @@ func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	require.Equal(t, 1, dedupCount)
 }
 
+func TestUsageBillingRepositoryApply_QuantizesHalfBoundaryAcrossNumericColumns(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-quantize-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      100,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-billing-quantize-" + uuid.NewString(),
+		Name:   "billing-quantize",
+		Quota:  10,
+	})
+
+	const raw = 0.000078125
+	cmd := &service.UsageBillingCommand{
+		RequestID:           uuid.NewString(),
+		APIKeyID:            apiKey.ID,
+		UserID:              user.ID,
+		BalanceCost:         raw,
+		APIKeyQuotaCost:     raw,
+		APIKeyRateLimitCost: raw,
+	}
+	result, err := repo.Apply(ctx, cmd)
+	require.NoError(t, err)
+	require.True(t, result.Applied)
+
+	const want = "0.00007813"
+	var balanceDelta, quotaUsed, usage5h string
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT
+			(100::numeric - balance)::text,
+			quota_used::text,
+			usage_5h::text
+		FROM api_keys
+		JOIN users ON users.id = api_keys.user_id
+		WHERE api_keys.id = $1
+	`, apiKey.ID).Scan(&balanceDelta, &quotaUsed, &usage5h))
+	require.Equal(t, want, balanceDelta)
+	require.Equal(t, want, quotaUsed)
+	require.Equal(t, want, usage5h)
+	require.Equal(t, service.QuantizeUsageBillingAmount(raw), *result.BalanceCharged)
+}
+
 func TestUsageBillingRepositoryApplyRollsBackBalanceWhenLaterEffectFails(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)

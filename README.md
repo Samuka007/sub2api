@@ -39,7 +39,10 @@ Sub2API 公共功能、安装方式和配置项。两份上游说明中的公开
 `v0.1.172` 在上一基线上修复 OAuth 登录补全流程的账号接管漏洞，并增加上游响应模型审计、
 计费金额精度量化、Gemini 3.6 Flash 支持，以及 Codex、Grok、订阅额度、模型广场、验证码、
 上游连接超时和 WebSocket 转发等修复。新开关沿用上游安全默认值；
-数据库迁移 `192` 和 `193` 为 forward-only，生产部署前必须完成备份与恢复演练。
+数据库迁移 `192`、`193`、`194` 和 `195` 均为 forward-only，生产部署前必须完成备份与恢复演练。
+其中 `194` 先增加 usage log 的上游响应模型审计字段，`195` 再以非事务
+`CREATE INDEX CONCURRENTLY` 建立 mismatch partial index；若并发建索引中断，migration runner 会在重试前
+删除同名 invalid index 后重建，发布时需监控该恢复路径和 migration ledger。
 
 组合分组能力继续保留。管理员可以使用组合分组将请求模型解析到具体供应商，完整运维说明见
 [`docs/COMPOSITE_GROUPS.md`](docs/COMPOSITE_GROUPS.md)。

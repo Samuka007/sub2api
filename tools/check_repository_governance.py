@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     ".github/pull_request_template.md",
     ".github/workflows/code-quality.yml",
     "Makefile",
+    "deploy/config.example.yaml",
     ".agent/skills/reviewing-code-changes/SKILL.md",
     ".agent/skills/reviewing-code-changes/test-prompts.json",
     ".agent/skills/reviewing-code-changes/agents/openai.yaml",
@@ -62,6 +63,7 @@ IGNORED_WORK_SAMPLES = (
 )
 
 UPSTREAM_READMES = ("README.md", "README_CN.md", "README_JA.md")
+REQUIRED_INTERNAL_CONFIG_EXAMPLE_SECTIONS = ("metrics", "quota_recovery", "model_tracing")
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -141,6 +143,17 @@ def main() -> int:
             errors.append(
                 f"Skill discovery symlink has wrong target: {relative_path} -> {path.readlink()}"
             )
+
+    config_example = root / "deploy/config.example.yaml"
+    if config_example.is_file():
+        top_level_sections = {
+            line[:-1]
+            for line in config_example.read_text(encoding="utf-8").splitlines()
+            if line and not line[0].isspace() and line.endswith(":")
+        }
+        for section in REQUIRED_INTERNAL_CONFIG_EXAMPLE_SECTIONS:
+            if section not in top_level_sections:
+                errors.append(f"internal config example section is missing: {section}")
 
     for relative_path in sorted(tracked):
         if relative_path.endswith(".pyc") or "/__pycache__/" in relative_path:

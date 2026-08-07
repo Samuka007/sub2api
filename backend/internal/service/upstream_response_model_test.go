@@ -1,9 +1,13 @@
 package service
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -72,4 +76,35 @@ func TestUpstreamResponseModelObserverBoundsUntrustedModelName(t *testing.T) {
 	observer.Observe("  "+strings.Repeat("模", upstreamResponseModelMaxLength+1)+"  ", false)
 
 	require.Len(t, []rune(observer.Model()), upstreamResponseModelMaxLength)
+}
+
+func TestReadCCUpstreamJSONResponseObservesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	beginUpstreamResponseModelObservation(c)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(`{
+		"id":"chatcmpl-1","model":"upstream-json-model","choices":[],
+		"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+	}`))}
+
+	svc := &OpenAIGatewayService{}
+	_, _, err := svc.readCCUpstreamJSONResponse(c, resp, func(*gin.Context, int, string, string) {})
+	require.NoError(t, err)
+	require.Equal(t, "upstream-json-model", observedUpstreamResponseModel(c))
+}
+
+func TestScanCCStreamObservesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	beginUpstreamResponseModelObservation(c)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"upstream-stream-model\",\"choices\":[]}\n\n" +
+			"data: [DONE]\n\n",
+	))}
+
+	svc := &OpenAIGatewayService{}
+	state := svc.scanCCStream(c, resp, "test", "req-1", time.Now(), func(*apicompat.ChatCompletionsChunk) {})
+	require.NoError(t, state.Err)
+	require.True(t, state.SawDone)
+	require.Equal(t, "upstream-stream-model", observedUpstreamResponseModel(c))
 }
