@@ -80,6 +80,47 @@ func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	require.Equal(t, 1, dedupCount)
 }
 
+func TestUsageBillingRepositoryApplyRollsBackBalanceWhenLaterEffectFails(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-rollback-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      100,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-rollback-" + uuid.NewString(),
+		Name:   "billing-rollback",
+		Quota:  10,
+	})
+	require.NoError(t, client.APIKey.UpdateOneID(apiKey.ID).SetDeletedAt(time.Now()).Exec(ctx))
+
+	requestID := uuid.NewString()
+	_, err := repo.Apply(ctx, &service.UsageBillingCommand{
+		RequestID:       requestID,
+		APIKeyID:        apiKey.ID,
+		UserID:          user.ID,
+		BalanceCost:     1.25,
+		APIKeyQuotaCost: 1.25,
+	})
+	require.ErrorIs(t, err, service.ErrAPIKeyNotFound)
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.InDelta(t, 100, balance, 0.000001)
+
+	var quotaUsed float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT quota_used FROM api_keys WHERE id = $1", apiKey.ID).Scan(&quotaUsed))
+	require.Zero(t, quotaUsed)
+
+	var dedupCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_billing_dedup WHERE request_id = $1 AND api_key_id = $2", requestID, apiKey.ID).Scan(&dedupCount))
+	require.Zero(t, dedupCount)
+}
+
 func TestUsageBillingRepositoryApply_CorrelatedResponsesTurnsChargeIndependently(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
@@ -470,6 +511,39 @@ func TestDashboardAggregationRepositoryCleanupUsageBillingDedup_BatchDeletesOldR
 	var archivedCount int
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_billing_dedup_archive WHERE request_id = $1", oldRequestID).Scan(&archivedCount))
 	require.Equal(t, 1, archivedCount)
+}
+
+func TestDashboardAggregationRepositoryCleanupUsageBillingDedupKeepsLiveRowOnArchiveFingerprintConflict(t *testing.T) {
+	ctx := context.Background()
+	repo := newDashboardAggregationRepositoryWithSQL(integrationDB)
+	requestID := "dedup-conflict-" + uuid.NewString()
+	oldCreatedAt := time.Now().UTC().AddDate(0, 0, -400)
+	liveFingerprint := strings.Repeat("c", 64)
+	archivedFingerprint := strings.Repeat("d", 64)
+
+	_, err := integrationDB.ExecContext(ctx, `
+		INSERT INTO usage_billing_dedup_archive (request_id, api_key_id, request_fingerprint, created_at)
+		VALUES ($1, 1, $2, $3)
+	`, requestID, archivedFingerprint, oldCreatedAt)
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, `
+		INSERT INTO usage_billing_dedup (request_id, api_key_id, request_fingerprint, created_at)
+		VALUES ($1, 1, $2, $3)
+	`, requestID, liveFingerprint, oldCreatedAt)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.CleanupUsageBillingDedup(ctx, time.Now().UTC().AddDate(0, 0, -365)))
+
+	var storedLiveFingerprint string
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT request_fingerprint FROM usage_billing_dedup WHERE request_id = $1 AND api_key_id = 1
+	`, requestID).Scan(&storedLiveFingerprint))
+	require.Equal(t, liveFingerprint, storedLiveFingerprint)
+	var storedArchivedFingerprint string
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT request_fingerprint FROM usage_billing_dedup_archive WHERE request_id = $1 AND api_key_id = 1
+	`, requestID).Scan(&storedArchivedFingerprint))
+	require.Equal(t, archivedFingerprint, storedArchivedFingerprint)
 }
 
 func TestUsageBillingRepositoryApply_DeduplicatesAgainstArchivedKey(t *testing.T) {

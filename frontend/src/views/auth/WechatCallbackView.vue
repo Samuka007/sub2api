@@ -240,34 +240,14 @@
                 </button>
               </div>
             </div>
-            <div v-else class="space-y-3">
-              <input
-                v-model="bindLoginEmail"
-                data-testid="wechat-bind-login-email"
-                type="email"
-                class="input w-full"
-                :placeholder="t('auth.emailPlaceholder')"
-                :disabled="isSubmitting"
-                @keyup.enter="handleBindLogin"
-              />
-              <input
-                v-model="bindLoginPassword"
-                data-testid="wechat-bind-login-password"
-                type="password"
-                class="input w-full"
-                :placeholder="t('auth.passwordPlaceholder')"
-                :disabled="isSubmitting"
-                @keyup.enter="handleBindLogin"
-              />
-              <button
-                data-testid="wechat-bind-login-submit"
-                class="btn btn-primary w-full"
-                :disabled="isSubmitting || !bindLoginEmail.trim() || !bindLoginPassword"
-                @click="handleBindLogin"
-              >
-                {{ isSubmitting ? t('common.processing') : t('auth.oauthFlow.logInAndBind') }}
-              </button>
-            </div>
+			<PendingOAuthBindLoginForm
+			  test-id-prefix="wechat"
+			  :initial-email="bindLoginEmail"
+			  :is-submitting="isSubmitting"
+			  :can-return-to-create-account="false"
+			  :error-message="accountActionError"
+			  @submit="handleBindLogin"
+			/>
             <button
               v-if="showBackToChooser"
               class="btn btn-secondary w-full"
@@ -323,6 +303,9 @@ import { AuthLayout } from '@/components/layout'
 import PendingOAuthCreateAccountForm, {
   type PendingOAuthCreateAccountPayload
 } from '@/components/auth/PendingOAuthCreateAccountForm.vue'
+import PendingOAuthBindLoginForm, {
+  type PendingOAuthBindLoginPayload
+} from '@/components/auth/PendingOAuthBindLoginForm.vue'
 import { apiClient } from '@/api/client'
 import { useAuthStore, useAppStore } from '@/stores'
 import {
@@ -371,7 +354,6 @@ const needsAdoptionConfirmation = ref(false)
 const pendingAccountAction = ref<'none' | 'choice' | 'create_account' | 'bind_login'>('none')
 const pendingAccountEmail = ref('')
 const bindLoginEmail = ref('')
-const bindLoginPassword = ref('')
 const legacyPendingOAuthToken = ref('')
 const accountActionError = ref('')
 const needsTotpChallenge = ref(false)
@@ -562,7 +544,7 @@ function resolveWeChatStartURL(intent: 'bind_current_user' | 'adopt_existing_use
     intent,
   })
 
-  return `${normalized}/auth/oauth/wechat/start?${params.toString()}`
+  return `${normalized}/auth/oauth/wechat/bind/start?${params.toString()}`
 }
 
 function buildExistingAccountResumePath(): string | null {
@@ -730,13 +712,11 @@ function applyPendingAccountAction(completion: PendingWeChatCompletion) {
 
   if (action === 'bind_login') {
     bindLoginEmail.value = email
-    bindLoginPassword.value = ''
     return
   }
 
   if (action === 'choice') {
     needsChooser.value = true
-    bindLoginPassword.value = ''
     return
   }
 }
@@ -763,14 +743,13 @@ function switchToBindLoginMode(nextEmail?: string) {
   pendingAccountAction.value = 'bind_login'
   needsChooser.value = false
   bindLoginEmail.value = bindLoginEmail.value.trim() || nextEmail?.trim() || pendingAccountEmail.value.trim()
-  bindLoginPassword.value = ''
   accountActionError.value = ''
 }
 
-function switchToCreateAccountMode() {
+function switchToCreateAccountMode(nextEmail?: string) {
   pendingAccountAction.value = 'create_account'
   needsChooser.value = false
-  pendingAccountEmail.value = pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
+  pendingAccountEmail.value = nextEmail?.trim() || pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
   accountActionError.value = ''
 }
 
@@ -915,6 +894,13 @@ async function handleCreateAccount(payload: PendingOAuthCreateAccountPayload) {
       email: payload.email,
       password: payload.password,
       verify_code: payload.verifyCode || undefined,
+      ...(payload.turnstileToken ? { turnstile_token: payload.turnstileToken } : {}),
+      ...(payload.tencentCaptchaTicket
+        ? {
+            tencent_captcha_ticket: payload.tencentCaptchaTicket,
+            tencent_captcha_randstr: payload.tencentCaptchaRandstr
+        }
+        : {}),
       invitation_code: payload.invitationCode || undefined,
       ...oauthAffiliatePayload(loadOAuthAffiliateCode()),
       ...serializeAdoptionDecision(currentAdoptionDecision())
@@ -931,17 +917,20 @@ async function handleCreateAccount(payload: PendingOAuthCreateAccountPayload) {
   }
 }
 
-async function handleBindLogin() {
+async function handleBindLogin(payload: PendingOAuthBindLoginPayload) {
   accountActionError.value = ''
-  const email = bindLoginEmail.value.trim()
-  const password = bindLoginPassword.value
-  if (!email || !password) return
-
   isSubmitting.value = true
   try {
     const { data } = await apiClient.post<PendingWeChatCompletion>('/auth/oauth/pending/bind-login', {
-      email,
-      password,
+      email: payload.email,
+      password: payload.password,
+      ...(payload.turnstileToken ? { turnstile_token: payload.turnstileToken } : {}),
+      ...(payload.tencentCaptchaTicket
+        ? {
+            tencent_captcha_ticket: payload.tencentCaptchaTicket,
+            tencent_captcha_randstr: payload.tencentCaptchaRandstr
+          }
+        : {}),
       ...serializeAdoptionDecision(currentAdoptionDecision())
     })
     await finalizePendingAccountResponse(data)

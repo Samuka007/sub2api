@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -63,7 +64,9 @@ func startAuthRouteRedis(t *testing.T, ctx context.Context) *redis.Client {
 		Addr: fmt.Sprintf("%s:%d", redisHost, redisPort.Int()),
 		DB:   0,
 	})
-	require.NoError(t, rdb.Ping(ctx).Err())
+	require.Eventually(t, func() bool {
+		return rdb.Ping(ctx).Err() == nil
+	}, 5*time.Second, 50*time.Millisecond, "Redis container did not become reachable")
 	t.Cleanup(func() {
 		_ = rdb.Close()
 	})

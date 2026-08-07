@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
@@ -19,6 +20,7 @@ import (
 // and ItemID are correlation identifiers, never inferred Langfuse Session IDs.
 type AsyncExecutionMetadata struct {
 	Identity    servermiddleware.ResolvedIdentity
+	AccountID   int64
 	TaskID      string
 	ItemID      string
 	Model       string
@@ -73,7 +75,7 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 		attribute.Bool("modeltrace.async.continuation_matched", matches),
 	}
 	traceCorrelation := map[string]string{}
-	observationCorrelation := map[string]string{}
+	observationCorrelation := map[string]any{}
 	if metadata.TaskID != "" {
 		taskID := scrubURLsInString(metadata.TaskID)
 		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", taskID))
@@ -82,6 +84,22 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 	}
 	if metadata.ItemID != "" {
 		observationCorrelation["item_id"] = scrubURLsInString(metadata.ItemID)
+	}
+	if metadata.AccountID > 0 {
+		attrs = append(attrs, attribute.Int64("modeltrace.account.id", metadata.AccountID))
+		observationCorrelation["account_id"] = metadata.AccountID
+	}
+	if metadata.Identity.UserID > 0 {
+		attrs = append(attrs, otlpString("langfuse.user.id", strconv.FormatInt(metadata.Identity.UserID, 10)))
+		observationCorrelation["user_id"] = metadata.Identity.UserID
+	}
+	if metadata.Identity.APIKeyID > 0 {
+		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.api_key_id", metadata.Identity.APIKeyID))
+		observationCorrelation["api_key_id"] = metadata.Identity.APIKeyID
+	}
+	if metadata.Identity.GroupID > 0 {
+		attrs = append(attrs, attribute.Int64("langfuse.trace.metadata.group_id", metadata.Identity.GroupID))
+		observationCorrelation["group_id"] = metadata.Identity.GroupID
 	}
 	if !matches && validParent {
 		submissionTraceID := spanContext.TraceID().String()

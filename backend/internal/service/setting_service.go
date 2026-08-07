@@ -23,6 +23,10 @@ var (
 		"DEFAULT_SUBSCRIPTION_GROUP_DUPLICATE",
 		"default subscription group cannot be duplicated",
 	)
+	ErrCaptchaProviderSettingsConflict = infraerrors.BadRequest(
+		"CAPTCHA_PROVIDER_SETTINGS_CONFLICT",
+		"multiple captcha providers cannot be enabled at the same time",
+	)
 )
 
 type SettingRepository interface {
@@ -33,6 +37,10 @@ type SettingRepository interface {
 	SetMultiple(ctx context.Context, settings map[string]string) error
 	GetAll(ctx context.Context) (map[string]string, error)
 	Delete(ctx context.Context, key string) error
+}
+
+type captchaProviderInvariantSettingRepository interface {
+	SetMultipleWithCaptchaProviderInvariant(ctx context.Context, settings map[string]string) error
 }
 
 // DefaultSubscriptionGroupReader validates group references used by default subscriptions.
@@ -46,19 +54,22 @@ type WebSearchManagerBuilder func(cfg *WebSearchEmulationConfig, proxyURLs map[i
 
 // SettingService 系统设置服务
 type SettingService struct {
-	settingRepo                 SettingRepository
-	defaultSubGroupReader       DefaultSubscriptionGroupReader
-	proxyRepo                   ProxyRepository // for resolving websearch provider proxy URLs
-	cfg                         *config.Config
-	onUpdate                    func() // Callback when settings are updated (for cache invalidation)
-	version                     string // Application version
-	webSearchManagerBuilder     WebSearchManagerBuilder
-	antigravityUAVersionCache   atomic.Value // *cachedAntigravityUserAgentVersion
-	antigravityUAVersionSF      singleflight.Group
-	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
-	openAICodexUASF             singleflight.Group
-	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
-	codexRestrictionPolicySF    singleflight.Group
+	settingRepo                  SettingRepository
+	defaultSubGroupReader        DefaultSubscriptionGroupReader
+	proxyRepo                    ProxyRepository // for resolving websearch provider proxy URLs
+	cfg                          *config.Config
+	onUpdate                     func() // Callback when settings are updated (for cache invalidation)
+	version                      string // Application version
+	webSearchManagerBuilder      WebSearchManagerBuilder
+	antigravityUAVersionCache    atomic.Value // *cachedAntigravityUserAgentVersion
+	antigravityUAVersionSF       singleflight.Group
+	openAICodexUACache           atomic.Value // *cachedOpenAICodexUserAgent
+	openAICodexUASF              singleflight.Group
+	openAICodexVersionCache      atomic.Value // *cachedOpenAICodexClientVersion
+	openAICodexVersionSF         singleflight.Group
+	openAICodexVersionGeneration atomic.Uint64
+	codexRestrictionPolicyCache  atomic.Value // *cachedCodexRestrictionPolicy
+	codexRestrictionPolicySF     singleflight.Group
 
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
 	cyberSessionBlockRuntimeSF    singleflight.Group

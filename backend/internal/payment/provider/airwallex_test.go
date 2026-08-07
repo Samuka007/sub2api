@@ -239,6 +239,41 @@ func TestAirwallexRefundRejectsUnsettledStatus(t *testing.T) {
 	}
 }
 
+func TestAirwallexQueryRefundFallsBackToDeterministicRequestID(t *testing.T) {
+	t.Parallel()
+
+	for _, refundID := range []string{"", "missing_refund"} {
+		t.Run(refundID, func(t *testing.T) {
+			t.Parallel()
+			requestID := airwallexDeterministicRequestID("refund", "int_123", "12.34")
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/authentication/login":
+					_, _ = w.Write([]byte(`{"token":"token-1","expires_at":"2099-01-01T00:00:00Z"}`))
+				case "/api/v1/pa/refunds/missing_refund":
+					http.NotFound(w, r)
+				case "/api/v1/pa/refunds":
+					require.Equal(t, "int_123", r.URL.Query().Get("payment_intent_id"))
+					_, _ = w.Write([]byte(`{"items":[{"id":"ref_recovered","request_id":"` + requestID + `","payment_intent_id":"int_123","amount":12.34,"currency":"CNY","status":"SETTLED"}]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			prov := mustTestAirwallexProvider(t, server)
+			resp, err := prov.QueryRefund(context.Background(), payment.RefundQueryRequest{
+				TradeNo:  "int_123",
+				RefundID: refundID,
+				Amount:   "12.34",
+			})
+			require.NoError(t, err)
+			require.Equal(t, "ref_recovered", resp.RefundID)
+			require.Equal(t, payment.ProviderStatusSuccess, resp.Status)
+		})
+	}
+}
+
 func TestAirwallexAuthErrorIncludesCredentialGuidance(t *testing.T) {
 	t.Parallel()
 

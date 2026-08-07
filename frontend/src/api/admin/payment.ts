@@ -55,6 +55,7 @@ export interface UpdatePaymentConfigRequest {
 
 export interface RefundResult {
   success: boolean
+  state?: 'pending'
   warning?: string
   require_force?: boolean
   balance_deducted?: number
@@ -121,8 +122,8 @@ export const adminPaymentAPI = {
   },
 
   /** Query and finalize a pending refund */
-  queryRefund(id: number) {
-    return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund/query`)
+  queryRefund(id: number, data?: { force?: boolean }) {
+    return apiClient.post<RefundResult>(`/admin/payment/orders/${id}/refund/query`, data)
   },
 
   // ==================== Channels ====================

@@ -13,14 +13,16 @@ type attemptSourceContextKey struct{}
 type deferredActivatorContextKey struct{}
 
 // TraceContinuation is the only tracing state persisted with an asynchronous
-// task. It contains W3C identifiers and a one-way generation fingerprint; no
-// exporter endpoint, credential, prompt, or response is included.
+// task. It contains W3C identifiers, a one-way generation fingerprint, and a
+// numeric group correlation ID; no exporter endpoint, credential, prompt, or
+// response is included.
 type TraceContinuation struct {
 	TraceID               string `json:"trace_id"`
 	SpanID                string `json:"span_id"`
 	TraceFlags            byte   `json:"trace_flags"`
 	TraceState            string `json:"trace_state,omitempty"`
 	GenerationFingerprint string `json:"generation_fingerprint"`
+	GroupID               int64  `json:"group_id,omitempty"`
 }
 
 func (c TraceContinuation) Valid() bool {

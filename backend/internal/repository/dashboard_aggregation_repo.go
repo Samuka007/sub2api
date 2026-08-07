@@ -254,9 +254,18 @@ func (r *dashboardAggregationRepository) CleanupUsageBillingDedup(ctx context.Co
 				SELECT request_id, api_key_id, request_fingerprint, created_at
 				FROM victims
 				ON CONFLICT (request_id, api_key_id) DO NOTHING
+				RETURNING request_id, api_key_id, request_fingerprint
+			), safe_victims AS (
+				SELECT v.ctid
+				FROM victims v
+				JOIN archived a USING (request_id, api_key_id, request_fingerprint)
+				UNION
+				SELECT v.ctid
+				FROM victims v
+				JOIN usage_billing_dedup_archive a USING (request_id, api_key_id, request_fingerprint)
 			)
 			DELETE FROM usage_billing_dedup
-			WHERE ctid IN (SELECT ctid FROM victims)
+			WHERE ctid IN (SELECT ctid FROM safe_victims)
 		`, cutoff.UTC(), usageBillingDedupCleanupBatchSize)
 		if err != nil {
 			return err

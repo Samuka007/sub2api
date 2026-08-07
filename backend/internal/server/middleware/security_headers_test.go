@@ -192,6 +192,7 @@ func TestSecurityHeaders(t *testing.T) {
 		assert.NotEmpty(t, csp)
 		// Default policy should contain these elements
 		assert.Contains(t, csp, "default-src 'self'")
+		assert.Contains(t, csp, TencentCaptchaDomain)
 	})
 
 	t.Run("uses_default_policy_when_whitespace_only", func(t *testing.T) {
@@ -311,6 +312,51 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 
 		count := strings.Count(enhanced, CloudflareInsightsDomain)
 		assert.Equal(t, 1, count)
+	})
+
+	t.Run("adds_tencent_captcha_domains_for_web_sdk", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		for _, required := range []struct {
+			directive string
+			domain    string
+		}{
+			{"script-src", TencentCaptchaDomain},
+			{"script-src", TencentCaptchaStaticDomain},
+			{"style-src", TencentCaptchaStaticDomain},
+			{"frame-src", TencentCaptchaDomain},
+			{"frame-src", TencentCaptchaStaticDomain},
+			{"connect-src", TencentCaptchaDomain},
+			{"connect-src", TencentCaptchaStaticDomain},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
+		}
+	})
+
+	t.Run("adds_aliyun_captcha_domains_for_web_sdk", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__; style-src 'self'"
+		enhanced := enhanceCSPPolicy(policy)
+
+		for _, required := range []struct {
+			directive string
+			domain    string
+		}{
+			{"script-src", AliyunCaptchaStaticDomain},
+			{"style-src", AliyunCaptchaStaticDomain},
+			{"script-src", AliyunCaptchaCNStaticDomain},
+			{"style-src", AliyunCaptchaCNStaticDomain},
+			{"frame-src", AliyunCaptchaCNStaticDomain},
+			{"script-src", AliyunCaptchaSGPStaticDomain},
+			{"style-src", AliyunCaptchaSGPStaticDomain},
+			{"frame-src", AliyunCaptchaSGPStaticDomain},
+			{"connect-src", AliyunCaptchaAPIDomain},
+			{"connect-src", AliyunCaptchaAPIBackup},
+			{"connect-src", AliyunCaptchaDualAPIDomain},
+			{"connect-src", AliyunCaptchaDualAPIBackup},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
+		}
 	})
 
 	t.Run("handles_policy_without_script_src", func(t *testing.T) {

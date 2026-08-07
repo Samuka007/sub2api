@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -477,6 +478,71 @@ func (s *UserRepoSuite) TestDeductBalance_AllowsOverdraft() {
 	got, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err)
 	s.Require().InDelta(-5.0, got.Balance, 1e-6, "Balance should be -5.0 after overdraft")
+}
+
+func (s *UserRepoSuite) TestRefundBalanceReservation_ReleaseAndCapture() {
+	for _, tc := range []struct {
+		name        string
+		balance     float64
+		requested   float64
+		capture     bool
+		wantReserve float64
+		wantBalance float64
+	}{
+		{name: "release restores balance", balance: 10, requested: 7, wantReserve: 7, wantBalance: 10},
+		{name: "capture consumes clamped balance", balance: 5, requested: 10, capture: true, wantReserve: 5, wantBalance: 0},
+	} {
+		s.Run(tc.name, func() {
+			user := s.mustCreateUser(&service.User{Email: "refund-reserve-" + strings.ReplaceAll(tc.name, " ", "-") + "@test.com", Balance: tc.balance})
+			reserved, err := s.repo.ReserveRefundBalance(s.ctx, user.ID, tc.requested)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.wantReserve, reserved, 1e-6)
+			reservedUser, err := s.repo.GetByID(s.ctx, user.ID)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.balance-tc.wantReserve, reservedUser.Balance, 1e-6)
+			s.Require().InDelta(tc.wantReserve, reservedUser.FrozenBalance, 1e-6)
+
+			if tc.capture {
+				err = s.repo.CaptureRefundBalance(s.ctx, user.ID, reserved)
+			} else {
+				err = s.repo.ReleaseRefundBalance(s.ctx, user.ID, reserved)
+			}
+			s.Require().NoError(err)
+			finalUser, err := s.repo.GetByID(s.ctx, user.ID)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.wantBalance, finalUser.Balance, 1e-6)
+			s.Require().Zero(finalUser.FrozenBalance)
+		})
+	}
+}
+
+func (s *UserRepoSuite) TestRefundBalanceReservation_RollsBackWithCallerTransaction() {
+	user := s.mustCreateUser(&service.User{Email: "refund-reserve-rollback@test.com", Balance: 10})
+	tx, err := s.client.Tx(s.ctx)
+	s.Require().NoError(err)
+	txCtx := dbent.NewTxContext(s.ctx, tx)
+	reserved, err := s.repo.ReserveRefundBalance(txCtx, user.ID, 7)
+	s.Require().NoError(err)
+	s.Require().InDelta(7, reserved, 1e-6)
+	s.Require().NoError(tx.Rollback())
+
+	got, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	s.Require().InDelta(10, got.Balance, 1e-6)
+	s.Require().Zero(got.FrozenBalance)
+}
+
+func (s *UserRepoSuite) TestRefundBalanceReservation_RejectsOverCapture() {
+	user := s.mustCreateUser(&service.User{Email: "refund-reserve-over-capture@test.com", Balance: 10})
+	reserved, err := s.repo.ReserveRefundBalance(s.ctx, user.ID, 4)
+	s.Require().NoError(err)
+	s.Require().InDelta(4, reserved, 1e-6)
+	s.Require().Error(s.repo.CaptureRefundBalance(s.ctx, user.ID, 5))
+
+	got, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	s.Require().InDelta(6, got.Balance, 1e-6)
+	s.Require().InDelta(4, got.FrozenBalance, 1e-6)
 }
 
 // --- Concurrency ---

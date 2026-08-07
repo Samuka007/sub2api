@@ -69,12 +69,22 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
     volumes: ["langfuse_clickhouse_data:/var/lib/clickhouse", "langfuse_clickhouse_logs:/var/log/clickhouse-server"]
-    ports: ["127.0.0.1:8123:8123", "127.0.0.1:9000:9000"]
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
       timeout: 5s
       retries: 10
+
+  clickhouse-read-proxy:
+    image: docker.io/nginx:1.27-alpine
+    container_name: langfuse-clickhouse-read-proxy-1
+    labels: *e2e-labels
+    restart: always
+    depends_on:
+      clickhouse: {condition: service_healthy}
+    ports: ["127.0.0.1:18123:8123"]
+    volumes:
+      - ./clickhouse-read-proxy.conf:/etc/nginx/nginx.conf:ro
 
   minio:
     image: docker.io/minio/minio

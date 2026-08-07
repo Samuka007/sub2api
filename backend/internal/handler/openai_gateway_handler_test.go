@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -1289,6 +1290,7 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	decision, err := moderationSvc.Check(context.Background(), service.ContentModerationCheckInput{
 		UserID:   1,
@@ -1432,6 +1434,28 @@ func TestOpenAIResponsesWebSocket_PassthroughTracksModelPerTurn(t *testing.T) {
 	require.Equal(t, "terra→terra-channel→gpt-5.6-terra", *got.logs[1].ModelMappingChain)
 	require.InDelta(t, got.logs[1].TotalCost*2.5, got.logs[0].TotalCost, 1e-12,
 		"each turn must be billed with its own channel-mapped model")
+}
+
+func TestOpenAIResponsesWebSocket_PassthroughUsesLatestAccountSnapshotPerTurn(t *testing.T) {
+	initialRate := 0.20
+	refreshedRate := 0.30
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload:                     `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		secondPayload:                    `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		initialAccountRateMultiplier:     &initialRate,
+		replacementAccountRateMultiplier: &refreshedRate,
+	})
+
+	require.Len(t, got.logs, 2)
+	require.Equal(t, got.logs[0].AccountID, got.logs[1].AccountID, "replacement snapshot 必须保持同一账号 ID")
+	require.NotNil(t, got.logs[0].AccountRateMultiplier)
+	require.NotNil(t, got.logs[1].AccountRateMultiplier)
+	require.InDelta(t, initialRate, *got.logs[0].AccountRateMultiplier, 1e-12,
+		"首轮异步 usage 必须捕获本 turn 的不可变账号快照")
+	require.InDelta(t, refreshedRate, *got.logs[1].AccountRateMultiplier, 1e-12,
+		"后续 turn 必须使用同 ID、更新 UpdatedAt 的 latest 账号倍率")
+	require.InDelta(t, got.logs[0].ActualCost, got.logs[1].ActualCost, 1e-12,
+		"账号倍率刷新不得改变用户 ActualCost 语义")
 }
 
 func TestOpenAIResponsesWebSocket_UnchangedChannelTargetOutsideAccountMappingKeysRemainsValid(t *testing.T) {
@@ -1763,15 +1787,17 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 }
 
 type openAIResponsesWSUsageLogCase struct {
-	firstPayload              string
-	secondPayload             string
-	userAgent                 *string
-	ingressMode               string
-	channelMapping            map[string]string
-	billingModelSource        string
-	accountModelMapping       map[string]any
-	afterFirstUpstreamRequest func(channelSvc *service.ChannelService) error
-	traceManager              *modeltrace.Manager
+	firstPayload                     string
+	secondPayload                    string
+	userAgent                        *string
+	ingressMode                      string
+	channelMapping                   map[string]string
+	billingModelSource               string
+	accountModelMapping              map[string]any
+	initialAccountRateMultiplier     *float64
+	replacementAccountRateMultiplier *float64
+	afterFirstUpstreamRequest        func(channelSvc *service.ChannelService) error
+	traceManager                     *modeltrace.Manager
 }
 
 type openAIResponsesWSUsageLogResult struct {
@@ -1786,9 +1812,12 @@ type openAIResponsesWSUsageLogResult struct {
 type openAIWSUsageHandlerAccountRepoStub struct {
 	service.AccountRepository
 	account service.Account
+	mu      sync.RWMutex
 }
 
 func (s *openAIWSUsageHandlerAccountRepoStub) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.account.Platform != platform {
 		return nil, nil
 	}
@@ -1800,11 +1829,20 @@ func (s *openAIWSUsageHandlerAccountRepoStub) ListSchedulableByGroupIDAndPlatfor
 }
 
 func (s *openAIWSUsageHandlerAccountRepoStub) GetByID(ctx context.Context, id int64) (*service.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.account.ID != id {
 		return nil, nil
 	}
 	account := s.account
 	return &account, nil
+}
+
+func (s *openAIWSUsageHandlerAccountRepoStub) replaceRateMultiplier(rate float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.account.RateMultiplier = &rate
+	s.account.UpdatedAt = s.account.UpdatedAt.Add(time.Second)
 }
 
 type openAIWSFailoverHandlerAccountRepoStub struct {
@@ -1831,6 +1869,40 @@ func (u *openAIHTTPPassthroughFailoverUpstream) Do(_ *http.Request, _ string, ac
 }
 
 func (u *openAIHTTPPassthroughFailoverUpstream) calls() []int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]int64(nil), u.accountIDs...)
+}
+
+type openAIHTTPPassthroughSSERateLimitUpstream struct {
+	service.HTTPUpstream
+	mu         sync.Mutex
+	accountIDs []int64
+}
+
+func (u *openAIHTTPPassthroughSSERateLimitUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	u.mu.Lock()
+	u.accountIDs = append(u.accountIDs, accountID)
+	u.mu.Unlock()
+	body := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_rate_limited"}}`,
+		"",
+		"event: response.failed",
+		`data: {"type":"response.failed","response":{"id":"resp_rate_limited","status":"failed","error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for account, please retry later"}}}`,
+		"",
+	}, "\n")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"Retry-After":  []string{"1"},
+		},
+		Body: io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func (u *openAIHTTPPassthroughSSERateLimitUpstream) calls() []int64 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return append([]int64(nil), u.accountIDs...)
@@ -2039,6 +2111,88 @@ func TestOpenAIResponses_APIKeyPassthroughPool5xxRetriesThenExhaustsMaxSwitches(
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
 	require.Equal(t, "Upstream service temporarily unavailable", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+}
+
+func TestOpenAIResponses_APIKeyPassthroughSSERateLimitUsesConfiguredPoolRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(4204)
+	accounts := []service.Account{
+		{
+			ID: 9912, Name: "pool-sse-rate-limit", Platform: service.PlatformOpenAI,
+			Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Priority: 1,
+			Credentials: map[string]any{
+				"api_key":                      "sk-pool",
+				"base_url":                     "https://api.example.test",
+				"pool_mode":                    true,
+				"pool_mode_retry_count":        float64(1),
+				"pool_mode_retry_status_codes": []any{float64(http.StatusTooManyRequests)},
+			},
+			Extra: map[string]any{"openai_passthrough": true},
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.MaxAccountSwitches = 1
+
+	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
+	upstream := &openAIHTTPPassthroughSSERateLimitUpstream{}
+	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingCacheSvc.Stop)
+	gatewaySvc := service.NewOpenAIGatewayService(
+		accountRepo,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+		nil,
+		nil,
+		service.NewBillingService(cfg, nil),
+		nil,
+		billingCacheSvc,
+		upstream,
+		&service.DeferredService{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewOpenAIGatewayHandler(
+		gatewaySvc,
+		service.NewConcurrencyService(nil),
+		billingCacheSvc,
+		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+	)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"hello","stream":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		ID: 1804, GroupID: &groupID,
+		User:  &service.User{ID: 1704, Status: service.StatusActive},
+		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive},
+	})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1704, Concurrency: 0})
+
+	h.Responses(c)
+
+	require.Equal(t, []int64{9912, 9912}, upstream.calls())
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.Equal(t, "1", rec.Header().Get("Retry-After"))
+	require.Equal(t, "rate_limit_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+	require.Equal(t, "Upstream rate limit exceeded, please retry later", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
 }
 
 func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T) {
@@ -2454,6 +2608,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	upstreamPayloadCh := make(chan []byte, turnCount)
 	upstreamErrCh := make(chan error, 1)
 	var channelSvc *service.ChannelService
+	var accountRepo *openAIWSUsageHandlerAccountRepoStub
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{
 			CompressionMode: coderws.CompressionContextTakeover,
@@ -2484,6 +2639,13 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 					upstreamErrCh <- callbackErr
 					return
 				}
+			}
+			if turn == 1 && tc.replacementAccountRateMultiplier != nil {
+				if accountRepo == nil {
+					upstreamErrCh <- errors.New("account repository is nil")
+					return
+				}
+				accountRepo.replaceRateMultiplier(*tc.replacementAccountRateMultiplier)
 			}
 
 			response := fmt.Sprintf(
@@ -2525,6 +2687,11 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	if strings.TrimSpace(tc.ingressMode) != "" {
 		account.Extra["openai_apikey_responses_websockets_v2_mode"] = tc.ingressMode
 	}
+	if tc.initialAccountRateMultiplier != nil {
+		rate := *tc.initialAccountRateMultiplier
+		account.RateMultiplier = &rate
+		account.UpdatedAt = time.Now()
+	}
 
 	cfg := &config.Config{}
 	cfg.RunMode = config.RunModeSimple
@@ -2539,7 +2706,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
 
-	accountRepo := &openAIWSUsageHandlerAccountRepoStub{account: account}
+	accountRepo = &openAIWSUsageHandlerAccountRepoStub{account: account}
 	usageRepo := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, turnCount)}
 	if tc.traceManager != nil {
 		usageRepo.traceContinuations = make(chan recording.TraceContinuation, turnCount)
@@ -2558,6 +2725,10 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		}, nil, nil, nil)
 	}
 
+	var schedulerSnapshot *service.SchedulerSnapshotService
+	if tc.replacementAccountRateMultiplier != nil {
+		schedulerSnapshot = service.NewSchedulerSnapshotService(nil, nil, accountRepo, nil, nil)
+	}
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo,
@@ -2568,7 +2739,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil,
 		nil,
 		cfg,
-		nil,
+		schedulerSnapshot,
 		nil,
 		service.NewBillingService(cfg, nil),
 		nil,
@@ -2607,10 +2778,25 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		GroupID: &groupID,
 		User:    &service.User{ID: 1701, Status: service.StatusActive},
 	}
+	if tc.replacementAccountRateMultiplier != nil {
+		apiKey.Group = &service.Group{
+			ID:                   groupID,
+			Platform:             service.PlatformOpenAI,
+			Status:               service.StatusActive,
+			Hydrated:             true,
+			RateMultiplier:       1,
+			ProfitControlEnabled: true,
+			ProfitMinMargin:      0.5,
+		}
+	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+		if apiKey.Group != nil {
+			requestCtx := context.WithValue(c.Request.Context(), ctxkey.Group, apiKey.Group)
+			c.Request = c.Request.WithContext(requestCtx)
+		}
 		c.Next()
 	})
 	router.GET("/openai/v1/responses", h.ResponsesWebSocket)

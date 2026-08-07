@@ -49,6 +49,47 @@ func (e GrokMediaEndpoint) IsGenerationRequest() bool {
 	}
 }
 
+// DefersSuccessResponse reports whether the upstream success response must wait
+// for the asynchronous video task's account binding before it reaches the client.
+func (e GrokMediaEndpoint) DefersSuccessResponse() bool {
+	switch e {
+	case GrokMediaEndpointVideosGenerations, GrokMediaEndpointVideosEdits, GrokMediaEndpointVideosExtensions:
+		return true
+	default:
+		return false
+	}
+}
+
+// GrokMediaForwardResult keeps the buffered upstream response private while
+// exposing the regular forwarding metadata needed for usage accounting.
+type GrokMediaForwardResult struct {
+	*OpenAIForwardResult
+	deferredResponse *grokMediaDeferredResponse
+}
+
+type grokMediaDeferredResponse struct {
+	statusCode int
+	header     http.Header
+	body       []byte
+	filter     *responseheaders.CompiledHeaderFilter
+}
+
+// CommitResponse forwards the private buffered Grok media response.
+func (r *GrokMediaForwardResult) CommitResponse(c *gin.Context) error {
+	if r == nil || r.deferredResponse == nil {
+		return fmt.Errorf("grok media response is not deferred")
+	}
+	if c == nil || c.Writer == nil {
+		return fmt.Errorf("grok media response writer is unavailable")
+	}
+	if c.Writer.Written() {
+		return fmt.Errorf("grok media response is already committed")
+	}
+	deferred := r.deferredResponse
+	writeGrokMediaResponse(c, &http.Response{StatusCode: deferred.statusCode, Header: deferred.header}, deferred.body, deferred.filter)
+	return nil
+}
+
 type GrokMediaRequestInfo struct {
 	Model           string
 	Prompt          string
@@ -296,7 +337,18 @@ func (s *OpenAIGatewayService) BindGrokMediaVideoRequestAccount(
 	if s.cfg != nil && s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds > 0 {
 		ttl = time.Duration(s.cfg.Gateway.OpenAIWS.StickySessionTTLSeconds) * time.Second
 	}
-	return s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, accountID, ttl)
+	group := derefGroupID(groupID)
+	if err := s.cache.SetSessionAccountID(ctx, group, cacheKey, accountID, ttl); err != nil {
+		confirmedAccountID, confirmErr := s.cache.GetSessionAccountID(ctx, group, cacheKey)
+		if confirmErr == nil && confirmedAccountID == accountID {
+			return nil
+		}
+		if confirmErr != nil {
+			return fmt.Errorf("bind grok video request account: set failed: %w; confirmation failed: %v", err, confirmErr)
+		}
+		return fmt.Errorf("bind grok video request account: set failed: %w; confirmed account %d", err, confirmedAccountID)
+	}
+	return nil
 }
 
 func (s *OpenAIGatewayService) ResolveGrokMediaVideoRequestAccount(
@@ -323,7 +375,7 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 	requestID string,
 	body []byte,
 	contentType string,
-) (*OpenAIForwardResult, error) {
+) (*GrokMediaForwardResult, error) {
 	startTime := time.Now()
 	if account == nil {
 		return nil, fmt.Errorf("grok account is required")
@@ -410,7 +462,11 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 	requestIDHeader := firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id"))
 	requestModel := requestInfo.Model
 	if resp.StatusCode >= 400 {
-		return s.handleGrokMediaErrorResponse(ctx, resp, c, account, requestIDHeader, requestModel)
+		result, responseErr := s.handleGrokMediaErrorResponse(ctx, resp, c, account, requestIDHeader, requestModel)
+		if result == nil {
+			return nil, responseErr
+		}
+		return &GrokMediaForwardResult{OpenAIForwardResult: result}, responseErr
 	}
 
 	s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
@@ -435,9 +491,8 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 			grokMediaContentProxyURL(c, requestID),
 		)
 	}
-	writeGrokMediaResponse(c, resp, respBody, s.responseHeaderFilter)
 	usage := grokMediaUsageFromResponse(endpoint, requestInfo, respBody)
-	return &OpenAIForwardResult{
+	result := &GrokMediaForwardResult{OpenAIForwardResult: &OpenAIForwardResult{
 		RequestID:            requestIDHeader,
 		ResponseID:           usage.ResponseID,
 		Usage:                usage.Usage,
@@ -453,7 +508,18 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 		VideoCount:           usage.VideoCount,
 		VideoResolution:      usage.VideoResolution,
 		VideoDurationSeconds: usage.VideoDurationSeconds,
-	}, nil
+	}}
+	if endpoint.DefersSuccessResponse() {
+		result.deferredResponse = &grokMediaDeferredResponse{
+			statusCode: resp.StatusCode,
+			header:     resp.Header.Clone(),
+			body:       respBody,
+			filter:     s.responseHeaderFilter,
+		}
+	} else {
+		writeGrokMediaResponse(c, resp, respBody, s.responseHeaderFilter)
+	}
+	return result, nil
 }
 
 func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
@@ -462,7 +528,7 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 	account *Account,
 	token, requestID string,
 	startTime time.Time,
-) (*OpenAIForwardResult, error) {
+) (*GrokMediaForwardResult, error) {
 	statusURL, err := buildGrokMediaURL(account, s.cfg, GrokMediaEndpointVideoStatus, requestID)
 	if err != nil {
 		return nil, err
@@ -503,7 +569,11 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		if statusResp.StatusCode < 400 {
 			return nil, fmt.Errorf("grok media status redirect is not allowed")
 		}
-		return s.handleGrokMediaErrorResponse(ctx, statusResp, c, account, statusRequestID, "")
+		result, responseErr := s.handleGrokMediaErrorResponse(ctx, statusResp, c, account, statusRequestID, "")
+		if result == nil {
+			return nil, responseErr
+		}
+		return &GrokMediaForwardResult{OpenAIForwardResult: result}, responseErr
 	}
 	statusBody, err := ReadUpstreamResponseBody(statusResp.Body, s.cfg, c, openAITooLargeError)
 	_ = statusResp.Body.Close()
@@ -561,18 +631,22 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		return nil, fmt.Errorf("grok media signed content redirect is not allowed")
 	}
 	if contentResp.StatusCode >= 400 && contentResp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
-		return s.handleGrokMediaErrorResponse(ctx, contentResp, c, account, contentRequestID, "")
+		result, responseErr := s.handleGrokMediaErrorResponse(ctx, contentResp, c, account, contentRequestID, "")
+		if result == nil {
+			return nil, responseErr
+		}
+		return &GrokMediaForwardResult{OpenAIForwardResult: result}, responseErr
 	}
 
 	s.updateGrokUsageFromResponse(ctx, account, contentResp.Header, contentResp.StatusCode)
 	if err := writeGrokMediaContentResponse(c, contentResp); err != nil {
 		return nil, err
 	}
-	return &OpenAIForwardResult{
+	return &GrokMediaForwardResult{OpenAIForwardResult: &OpenAIForwardResult{
 		RequestID:       contentRequestID,
 		ResponseHeaders: contentResp.Header.Clone(),
 		Duration:        time.Since(startTime),
-	}, nil
+	}}, nil
 }
 
 func grokMediaSignedVideoContentURL(body []byte, requestID string) (string, error) {

@@ -82,6 +82,57 @@ func TestSettingHandler_GetPublicSettings_ExposesForceEmailOnThirdPartySignup(t 
 	require.True(t, resp.Data.ForceEmailOnThirdPartySignup)
 }
 
+func TestSettingHandler_GetPublicSettings_ExposesCaptchaSDKConfigurationWithoutSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &settingHandlerPublicRepoStub{
+		values: map[string]string{
+			service.SettingKeyTencentCaptchaEnabled:        "true",
+			service.SettingKeyTencentCaptchaAppID:          "123456789",
+			service.SettingKeyTencentCaptchaAppSecretKey:   "tencent-app-secret",
+			service.SettingKeyTencentCaptchaCloudSecretID:  "tencent-cloud-id",
+			service.SettingKeyTencentCaptchaCloudSecretKey: "tencent-cloud-secret",
+			service.SettingKeyAliyunCaptchaEnabled:         "true",
+			service.SettingKeyAliyunCaptchaAccessKeyID:     "aliyun-access-id",
+			service.SettingKeyAliyunCaptchaAccessKeySecret: "aliyun-access-secret",
+			service.SettingKeyAliyunCaptchaSceneID:         "scene-public",
+			service.SettingKeyAliyunCaptchaPrefix:          "prefix-public",
+			service.SettingKeyAliyunCaptchaRegion:          "sgp",
+		},
+	}
+	h := NewSettingHandler(service.NewSettingService(repo, &config.Config{}), "test-version")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+	h.GetPublicSettings(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var resp struct {
+		Code int            `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, true, resp.Data["tencent_captcha_enabled"])
+	require.Equal(t, "123456789", resp.Data["tencent_captcha_app_id"])
+	require.Equal(t, true, resp.Data["aliyun_captcha_enabled"])
+	require.Equal(t, "scene-public", resp.Data["aliyun_captcha_scene_id"])
+	require.Equal(t, "prefix-public", resp.Data["aliyun_captcha_prefix"])
+	require.Equal(t, "sgp", resp.Data["aliyun_captcha_region"])
+	for _, secretField := range []string{
+		"tencent_captcha_app_secret_key",
+		"tencent_captcha_cloud_secret_id",
+		"tencent_captcha_cloud_secret_key",
+		"aliyun_captcha_access_key_id",
+		"aliyun_captcha_access_key_secret",
+	} {
+		_, exposed := resp.Data[secretField]
+		require.False(t, exposed, "public settings exposed secret field %s", secretField)
+		require.NotContains(t, recorder.Body.String(), repo.values[secretField])
+	}
+}
+
 func TestSettingHandler_GetPublicSettings_ExposesWeChatOAuthModeCapabilities(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewSettingHandler(service.NewSettingService(&settingHandlerPublicRepoStub{

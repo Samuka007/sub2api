@@ -225,6 +225,10 @@ type AdminProcessRefundRequest struct {
 	DeductBalance bool    `json:"deduct_balance"`
 }
 
+type AdminQueryRefundRequest struct {
+	Force bool `json:"force"`
+}
+
 // ProcessRefund processes a refund for an order (admin).
 // POST /api/v1/admin/payment/orders/:id/refund
 func (h *PaymentHandler) ProcessRefund(c *gin.Context) {
@@ -264,8 +268,15 @@ func (h *PaymentHandler) QueryAndFinalizeRefund(c *gin.Context) {
 	if !ok {
 		return
 	}
+	var req AdminQueryRefundRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.BadRequest(c, "Invalid request: "+err.Error())
+			return
+		}
+	}
 
-	result, err := h.paymentService.QueryAndFinalizeRefund(c.Request.Context(), orderID)
+	result, err := h.paymentService.QueryAndFinalizeRefund(c.Request.Context(), orderID, req.Force)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

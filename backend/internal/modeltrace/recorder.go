@@ -115,6 +115,7 @@ func (r *traceRecorder) TraceContinuation() recording.TraceContinuation {
 		TraceFlags:            byte(spanContext.TraceFlags()),
 		TraceState:            spanContext.TraceState().String(),
 		GenerationFingerprint: r.generation.Fingerprint(),
+		GroupID:               r.identity.GroupID,
 	}
 }
 

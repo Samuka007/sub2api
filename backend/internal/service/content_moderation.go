@@ -22,6 +22,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 )
@@ -103,6 +104,8 @@ const (
 	contentModerationRuntimeRefreshTimeout = 5 * time.Second
 )
 
+var errContentModerationProxyUnavailable = errors.New("content moderation proxy unavailable")
+
 var contentModerationCategoryOrder = []string{
 	"harassment",
 	"harassment/threatening",
@@ -144,10 +147,12 @@ func ContentModerationCategories() []string {
 }
 
 type ContentModerationConfig struct {
-	Enabled              bool                             `json:"enabled"`
-	Mode                 string                           `json:"mode"`
-	BaseURL              string                           `json:"base_url"`
-	Model                string                           `json:"model"`
+	Enabled bool   `json:"enabled"`
+	Mode    string `json:"mode"`
+	BaseURL string `json:"base_url"`
+	Model   string `json:"model"`
+	// ProxyID 指定审计请求使用的代理服务器（IP管理-代理服务器），nil 表示直连。
+	ProxyID              *int64                           `json:"proxy_id,omitempty"`
 	APIKey               string                           `json:"api_key,omitempty"`
 	APIKeys              []string                         `json:"api_keys,omitempty"`
 	TimeoutMS            int                              `json:"timeout_ms"`
@@ -183,6 +188,7 @@ type ContentModerationConfigView struct {
 	Mode                           string                           `json:"mode"`
 	BaseURL                        string                           `json:"base_url"`
 	Model                          string                           `json:"model"`
+	ProxyID                        *int64                           `json:"proxy_id"`
 	APIKeyConfigured               bool                             `json:"api_key_configured"`
 	APIKeyMasked                   string                           `json:"api_key_masked"`
 	APIKeyCount                    int                              `json:"api_key_count"`
@@ -248,8 +254,10 @@ type TestContentModerationAPIKeysInput struct {
 	BaseURL   string   `json:"base_url"`
 	Model     string   `json:"model"`
 	TimeoutMS int      `json:"timeout_ms"`
-	Prompt    string   `json:"prompt"`
-	Images    []string `json:"images"`
+	// ProxyID nil 表示沿用已保存配置的代理；<=0 表示强制直连测试；>0 表示指定代理测试。
+	ProxyID *int64   `json:"proxy_id"`
+	Prompt  string   `json:"prompt"`
+	Images  []string `json:"images"`
 }
 
 type TestContentModerationAPIKeysResult struct {
@@ -268,10 +276,12 @@ type ContentModerationTestAuditResult struct {
 }
 
 type UpdateContentModerationConfigInput struct {
-	Enabled                        *bool                             `json:"enabled"`
-	Mode                           *string                           `json:"mode"`
-	BaseURL                        *string                           `json:"base_url"`
-	Model                          *string                           `json:"model"`
+	Enabled *bool   `json:"enabled"`
+	Mode    *string `json:"mode"`
+	BaseURL *string `json:"base_url"`
+	Model   *string `json:"model"`
+	// ProxyID nil 表示不修改；<=0 表示清除代理（恢复直连）；>0 表示指定代理。
+	ProxyID                        *int64                            `json:"proxy_id"`
 	APIKey                         *string                           `json:"api_key"`
 	APIKeys                        *[]string                         `json:"api_keys"`
 	APIKeysMode                    string                            `json:"api_keys_mode"`
@@ -514,6 +524,7 @@ type ContentModerationService struct {
 	hashCache                ContentModerationHashCache
 	groupRepo                GroupRepository
 	userRepo                 UserRepository
+	proxyRepo                ProxyRepository
 	authCacheInvalidator     APIKeyAuthCacheInvalidator
 	emailService             *EmailService
 	httpClient               *http.Client
@@ -585,6 +596,7 @@ func NewContentModerationService(
 	hashCache ContentModerationHashCache,
 	groupRepo GroupRepository,
 	userRepo UserRepository,
+	proxyRepo ProxyRepository,
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 ) *ContentModerationService {
@@ -594,6 +606,7 @@ func NewContentModerationService(
 		hashCache:            hashCache,
 		groupRepo:            groupRepo,
 		userRepo:             userRepo,
+		proxyRepo:            proxyRepo,
 		authCacheInvalidator: authCacheInvalidator,
 		emailService:         emailService,
 		httpClient:           servertiming.InstrumentClient(nil),
@@ -634,6 +647,14 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	}
 	if input.Model != nil {
 		cfg.Model = strings.TrimSpace(*input.Model)
+	}
+	if input.ProxyID != nil {
+		if *input.ProxyID > 0 {
+			id := *input.ProxyID
+			cfg.ProxyID = &id
+		} else {
+			cfg.ProxyID = nil
+		}
 	}
 	if input.TimeoutMS != nil {
 		cfg.TimeoutMS = *input.TimeoutMS
@@ -763,6 +784,14 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 	}
 	if input.TimeoutMS > 0 {
 		cfg.TimeoutMS = input.TimeoutMS
+	}
+	if input.ProxyID != nil {
+		if *input.ProxyID > 0 {
+			id := *input.ProxyID
+			cfg.ProxyID = &id
+		} else {
+			cfg.ProxyID = nil
+		}
 	}
 	cfg.normalize()
 	testInput, imageCount, err := buildModerationTestInput(input.Prompt, input.Images)
@@ -1088,6 +1117,15 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		if input.TrustedObserve || cfg.RecordNonHits {
 			log := s.buildLog(input, cfg, ContentModerationActionError, false, "", 0, nil, content.ExcerptText(), &latency, queueDelay, err.Error())
 			_ = s.repo.CreateLog(ctx, log)
+		}
+		if allowBlock && cfg.Mode == ContentModerationModePreBlock && errors.Is(err, errContentModerationProxyUnavailable) {
+			return &ContentModerationDecision{
+				Allowed:    false,
+				Blocked:    true,
+				Message:    "content moderation proxy is unavailable",
+				StatusCode: http.StatusServiceUnavailable,
+				Action:     ContentModerationActionError,
+			}
 		}
 		return allow
 	}
@@ -1746,6 +1784,11 @@ func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *Cont
 	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_BASE_URL", "OpenAI Base URL 无效")
 	}
+	if cfg.ProxyID != nil && s.proxyRepo != nil {
+		if _, err := s.proxyRepo.GetByID(ctx, *cfg.ProxyID); err != nil {
+			return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_PROXY", fmt.Sprintf("代理服务器不存在: %d", *cfg.ProxyID))
+		}
+	}
 	if cfg.BlockStatus < 400 || cfg.BlockStatus > 599 {
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_BLOCK_STATUS", "拦截 HTTP 状态码必须在 400-599 之间")
 	}
@@ -1862,9 +1905,9 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := s.httpClient
-	if client == nil {
-		client = http.DefaultClient
+	client, err := s.moderationHTTPClient(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	traceAttempt := recording.BeginAttempt(req.Context(), recording.AttemptMetadata{
 		Provider: "openai", Operation: "moderations", UpstreamModel: cfg.Model, Endpoint: endpoint,
@@ -1892,6 +1935,42 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 		return nil, errors.New("moderation api returned empty results")
 	}
 	return &out.Results[0], nil
+}
+
+// moderationHTTPClient 返回本次审计调用应使用的 HTTP 客户端。
+// 未配置代理时沿用默认客户端；配置了代理时通过共享客户端池构建，
+// 代理解析/构建失败直接返回错误，绝不回退直连（避免 IP 关联风险）。
+func (s *ContentModerationService) moderationHTTPClient(ctx context.Context, cfg *ContentModerationConfig) (*http.Client, error) {
+	if cfg == nil || cfg.ProxyID == nil {
+		if s.httpClient == nil {
+			return http.DefaultClient, nil
+		}
+		return s.httpClient, nil
+	}
+	proxyURL, err := s.resolveModerationProxyURL(ctx, *cfg.ProxyID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errContentModerationProxyUnavailable, err)
+	}
+	client, err := httpclient.GetClient(httpclient.Options{ProxyURL: proxyURL})
+	if err != nil {
+		return nil, fmt.Errorf("%w: build client: %v", errContentModerationProxyUnavailable, err)
+	}
+	return client, nil
+}
+
+func (s *ContentModerationService) resolveModerationProxyURL(ctx context.Context, proxyID int64) (string, error) {
+	if s.proxyRepo == nil {
+		return "", errors.New("moderation proxy repository unavailable")
+	}
+	px, err := s.proxyRepo.GetByID(ctx, proxyID)
+	if err != nil {
+		return "", fmt.Errorf("resolve moderation proxy %d: %w", proxyID, err)
+	}
+	now := time.Now()
+	if !px.IsActive() || px.IsExpired(now) {
+		return "", fmt.Errorf("moderation proxy %d is inactive or expired", proxyID)
+	}
+	return px.URL(), nil
 }
 
 func (s *ContentModerationService) buildLog(input ContentModerationCheckInput, cfg *ContentModerationConfig, action string, flagged bool, highestCategory string, highestScore float64, scores map[string]float64, text string, latency *int, queueDelay *int, errText string) *ContentModerationLog {
@@ -2158,6 +2237,7 @@ func cloneContentModerationConfig(cfg *ContentModerationConfig) *ContentModerati
 		return nil
 	}
 	clone := *cfg
+	clone.ProxyID = cloneInt64Ptr(cfg.ProxyID)
 	clone.APIKeys = append([]string(nil), cfg.APIKeys...)
 	clone.GroupIDs = append([]int64(nil), cfg.GroupIDs...)
 	clone.BlockedKeywords = append([]string(nil), cfg.BlockedKeywords...)
@@ -2188,6 +2268,9 @@ func (cfg *ContentModerationConfig) normalize() {
 		cfg.Model = defaultContentModerationModel
 	}
 	cfg.Model = strings.TrimSpace(cfg.Model)
+	if cfg.ProxyID != nil && *cfg.ProxyID <= 0 {
+		cfg.ProxyID = nil
+	}
 	if cfg.TimeoutMS <= 0 {
 		cfg.TimeoutMS = defaultContentModerationTimeoutMS
 	}
@@ -2489,6 +2572,7 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		Mode:                           cfg.Mode,
 		BaseURL:                        cfg.BaseURL,
 		Model:                          cfg.Model,
+		ProxyID:                        cloneInt64Ptr(cfg.ProxyID),
 		APIKeyConfigured:               len(keys) > 0,
 		APIKeyMasked:                   apiKeyMasked,
 		APIKeyCount:                    len(keys),

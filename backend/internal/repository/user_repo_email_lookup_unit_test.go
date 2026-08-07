@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/enttest"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -224,4 +226,93 @@ func TestUserRepositoryCreateSerializesNormalizedEmailConflictsUnderConcurrency(
 	count, err := client.User.Query().Where(userEmailLookupPredicate("race@example.com")).Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
+}
+
+func TestUserRepositoryRefundBalanceReservationLifecycle(t *testing.T) {
+	repo, _ := newUserEntRepo(t)
+	ctx := context.Background()
+	user := &service.User{
+		Email: "refund-reservation@example.com", Username: "refund-reservation", PasswordHash: "hash",
+		Role: service.RoleUser, Status: service.StatusActive, Balance: 10,
+	}
+	require.NoError(t, repo.Create(ctx, user))
+
+	reserved, err := repo.ReserveRefundBalance(ctx, user.ID, 7)
+	require.NoError(t, err)
+	require.InDelta(t, 7, reserved, 1e-9)
+	got, err := repo.GetByID(ctx, user.ID)
+	require.NoError(t, err)
+	require.InDelta(t, 3, got.Balance, 1e-9)
+	require.InDelta(t, 7, got.FrozenBalance, 1e-9)
+
+	require.NoError(t, repo.ReleaseRefundBalance(ctx, user.ID, reserved))
+	got, err = repo.GetByID(ctx, user.ID)
+	require.NoError(t, err)
+	require.InDelta(t, 10, got.Balance, 1e-9)
+	require.Zero(t, got.FrozenBalance)
+
+	reserved, err = repo.ReserveRefundBalance(ctx, user.ID, 20)
+	require.NoError(t, err)
+	require.InDelta(t, 10, reserved, 1e-9)
+	require.NoError(t, repo.CaptureRefundBalance(ctx, user.ID, reserved))
+	got, err = repo.GetByID(ctx, user.ID)
+	require.NoError(t, err)
+	require.Zero(t, got.Balance)
+	require.Zero(t, got.FrozenBalance)
+}
+
+func TestUserRepositoryRefundBalanceReservationUsesCallerTransaction(t *testing.T) {
+	repo, client := newUserEntRepo(t)
+	ctx := context.Background()
+	user := &service.User{
+		Email: "refund-reservation-rollback@example.com", Username: "refund-reservation-rollback", PasswordHash: "hash",
+		Role: service.RoleUser, Status: service.StatusActive, Balance: 10,
+	}
+	require.NoError(t, repo.Create(ctx, user))
+
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	reserved, err := repo.ReserveRefundBalance(dbent.NewTxContext(ctx, tx), user.ID, 7)
+	require.NoError(t, err)
+	require.InDelta(t, 7, reserved, 1e-9)
+	require.NoError(t, tx.Rollback())
+
+	got, err := repo.GetByID(ctx, user.ID)
+	require.NoError(t, err)
+	require.InDelta(t, 10, got.Balance, 1e-9)
+	require.Zero(t, got.FrozenBalance)
+}
+
+func TestUserRepositoryRefundBalanceReservationUsesAtomicPostgresUpdate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	drv := entsql.OpenDB(dialect.Postgres, db)
+	client := dbent.NewClient(dbent.Driver(drv))
+	t.Cleanup(func() { _ = client.Close() })
+	repo := newUserRepositoryWithSQL(client, db)
+	ctx := context.Background()
+
+	reserveSQL := regexp.QuoteMeta(`
+		WITH target AS (
+			SELECT id,
+				CASE WHEN balance <= 0 THEN 0 WHEN balance < $1 THEN balance ELSE $1 END AS reserved
+			FROM users
+			WHERE id = $2 AND deleted_at IS NULL
+			FOR UPDATE
+		)
+		UPDATE users AS u
+		SET balance = u.balance - target.reserved,
+			frozen_balance = COALESCE(u.frozen_balance, 0) + target.reserved,
+			updated_at = CURRENT_TIMESTAMP
+		FROM target
+		WHERE u.id = target.id
+		RETURNING target.reserved
+	`)
+	mock.ExpectQuery(reserveSQL).WithArgs(10.0, int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"reserved"}).AddRow(3.0))
+
+	reserved, err := repo.ReserveRefundBalance(ctx, 42, 10)
+	require.NoError(t, err)
+	require.InDelta(t, 3, reserved, 1e-9)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

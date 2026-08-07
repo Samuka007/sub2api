@@ -11,19 +11,19 @@
 | 一个 Trace 必须保留完整尝试层级 | 本地 fixture 固定 429 后切换账号 200 | 一个根 Trace；`upstream.attempt.1/2` 两个真实 GENERATION 均为根的直接子项，账号和 ERROR/成功状态可区分 |
 | Trace 必须区分客户端与上游内容视角 | OpenAI Chat Completions → Anthropic Messages | 根保存客户端 input/output，attempt 保存转换后 input 与 Anthropic SSE output；上游响应 credential 字段只出现 `[REDACTED]` |
 | 有界内容、多模态和秘密隔离 | 2 KiB Prompt 上限 + Base64 图片 + 分离 canary | 有确定性截断标记和媒体 fingerprint/approx_bytes；请求字段 secret、媒体正文、用户/上游 API Key、上游响应 secret 在真实 Langfuse 中命中数为 0 |
-| 默认内容上限可部署并真实接收 | 启动不覆盖默认值；运行时恢复 1 MiB 后发送 1,040,000 字节正文 | admin GET 的 prompt/response/media 均为 1048576；Langfuse root input 保留 head/tail canary、长度接近上限且无截断标记 |
+| 默认内容上限可部署并真实接收 | 启动不覆盖默认值；运行时恢复 16/8/16 MiB 后发送 16,760,000 字节正文 | admin GET 的 prompt/response/media 分别为 16777216/8388608/16777216；Langfuse root input 保留 head/tail canary、长度接近 Prompt 上限且无截断标记 |
 | 流式请求正常完成 | 单成功账号返回完整 Anthropic SSE | 客户端 HTTP 200、`text/event-stream`、content/finish/[DONE] 帧；Langfuse 只有一个根 Trace，真实 attempt GENERATION 是根的直接子项，根状态为 `completed` |
 | 异步/批量模型执行必须续接提交 Trace | Gemini Batch API 200 item（一个成功、199 个 provider 失败） | API 200、worker `completed`；同一逻辑 Trace 下 1 个提交根 SPAN、200 个直系 `model.async.execution` GENERATION，API 与 Langfuse 的 `item_id` 均为精确且唯一的 `item-0..199` 集合，fingerprint 均匹配，终态 1 个 `completed` / 199 个 `failed`；媒体 canary 零泄露 |
 | 认证凭据永远不得进入 Trace | 配置 API、客户端 Header、上游请求/响应 | 配置响应不回显 secret；ClickHouse 对本次所有 observation/trace 执行完整 canary 零命中查询 |
 | Trace 必须发送到唯一的自部署 Langfuse 项目 | 本地目标可用 | 只配置 `http://127.0.0.1:3000`；公开 health 版本必须 `>=3.22.0`，并记录 OCI version/revision/digest |
-| 部署与运行时配置必须遵守确定优先级 | 部署默认、运行时小上限、恢复默认、secret 保留与 CAS | 先验证 deployment version 0，再运行时 version 1/2/3；远端明文 HTTP 被拒且不改旧配置，空 secret 保留，过期 version 返回 409 |
+| 部署与运行时配置必须遵守确定优先级 | 部署默认、运行时小上限、恢复 16/8/16 MiB、secret 保留与 CAS | 先验证 deployment version 0，再运行时 version 1/2/3；远端明文 HTTP 被拒且不改旧配置，空 secret 保留，过期 version 返回 409 |
 | 观测故障必须 fail-open 且 MVP 不保证补送 | OTLP 端点固定 500 与 1.5 秒延迟 | 两次业务请求均在约 50ms 内返回 200；fixture 分别观测到 `otlp_500>=1`、`slow_exports>=1`，证明 exporter 错误与阻塞不拖住业务路径 |
 
 ## 503、failover、SSE 与异步 batch 的本地执行链
 
 1. Candidate middleware 在模型执行路由安装延迟身份 Hook；匿名/未知 Key 阶段不创建 Span。
 2. API Key 仓储解析出真实身份后创建唯一根 Trace。
-3. 原始 `e2e-key` group 在身份、截断和 1 MiB 场景尚无账号，因此 Handler 确定性返回 503；这些 Trace 只有根 SPAN，不得虚构 attempt。
+3. 原始 `e2e-key` group 在身份、截断和 16 MiB Prompt 边界场景尚无账号，因此 Handler 确定性返回 503；这些 Trace 只有根 SPAN，不得虚构 attempt。
 4. 独立 failover group 挂两个本地 Anthropic 账号：priority 1 指向 `/fail` 固定 429，priority 2 指向 `/ok` 固定 200 完整 SSE；一次非流式客户端请求产生两个真实 attempt GENERATION。
 5. 完成 503 场景后，原始 group 只挂一个 `/ok` 账号；`stream=true` 请求经协议转换把本地 Anthropic SSE 作为 OpenAI SSE 返回，客户端必须收到内容帧、成功终态和 `[DONE]`。
 6. 独立 Gemini batch group 通过本地一次性 CA 把 `generativelanguage.googleapis.com:443` 定向到 TLS fixture；提交 API 保存最小 trace continuation，真实 queue worker 完成 upload/create/poll/download 后，为配置上限 200 个 item 在原提交根下分别结束 1 个成功与 199 个失败 Generation。

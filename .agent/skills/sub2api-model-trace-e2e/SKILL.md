@@ -39,9 +39,10 @@ description: |
 | CLI | `colima` | 跨 VM SSH 与端口转发 | 必须 |
 | CLI | `curl`、`jq`、`openssl`、`nc` | API 调用、JSON 解析、生成随机 key、端口占用检查 | 必须 |
 | 镜像 | `golang:1.26.5` | 编译 sub2api linux/arm64 二进制（非 alpine，带 git） | 必须 |
-| 镜像 | `langfuse/langfuse:3`、`langfuse-worker:3`、`clickhouse-server`、`postgres:17`、`redis:7`、`minio/minio` | Langfuse 全栈与 sub2api 依赖 | 必须 |
+| 镜像 | `langfuse/langfuse:3`、`langfuse-worker:3`、`clickhouse-server`、`nginx:1.27-alpine`、`postgres:17`、`redis:7`、`minio/minio` | Langfuse 全栈、ClickHouse 只读查询代理与 sub2api 依赖 | 必须 |
 | 代码 | 仓库 `backend/` 目录 + `-tags embed` 前端 dist | 编译带嵌入前端的二进制 | 必须 |
 | 文件 | `assets/langfuse-compose.yml` | Langfuse 全栈编排 | 必须 |
+| 文件 | `assets/clickhouse-read-proxy.conf` | 强制 ClickHouse 验收查询使用 `readonly=2` | 必须 |
 | 文件 | `assets/sub2api-deps-compose.yml` | sub2api 专用 pg+redis | 必须 |
 | 脚本 | `scripts/run_e2e.sh` | 一键跑通 e2e smoke | 必须 |
 | 脚本 | `scripts/run_full_e2e.sh` | 串行运行完整后端/前端测试、race、生产构建、200-item 真实 Langfuse 黑盒、性能基线与生成物门禁 | 全规模验收必须 |
@@ -65,7 +66,7 @@ description: |
    ```bash
    bash .agent/skills/sub2api-model-trace-e2e/scripts/run_e2e.sh
    ```
-4. 脚本内部顺序为：启动 Langfuse 与 sub2api 依赖 → 编译并启动服务 → 验证完整 endpoint、部署/运行时配置闭环 → 建立身份和本地 provider fixtures → 覆盖匿名/未知/控制面、503 单根、截断与媒体、disabled、1 MiB 边界、session/cache-key、429→200、所有尝试失败、SSE、进行中配置快照、500/慢 exporter fail-open、Gemini batch → 查询真实 Langfuse ClickHouse 并执行 cardinality、父子、状态和秘密零泄漏断言。
+4. 脚本内部顺序为：启动 Langfuse 与 sub2api 依赖 → 编译并启动服务 → 验证完整 endpoint、部署/运行时配置闭环 → 建立身份和本地 provider fixtures → 覆盖匿名/未知/控制面、503 单根、截断与媒体、disabled、16 MiB Prompt 边界、session/cache-key、429→200、所有尝试失败、SSE、进行中配置快照、500/慢 exporter fail-open、Gemini batch → 查询真实 Langfuse ClickHouse 并执行 cardinality、父子、状态和秘密零泄漏断言。
 5. 成功的合并命令输出必须包含 `trace_id`、整数 `1`、`VERIFY_OK` 和末尾的 `full-scale e2e passed`；失败时 stderr 含 `[e2e][ERROR]` 行，按行内容定位失败阶段，不自动缩窄覆盖重试。
 6. 验证通过后向用户报告：
    - 配置来源、版本、完整 endpoint 原样生效、secret 不回显/保留与 CAS 冲突结果
@@ -80,7 +81,7 @@ description: |
 - Langfuse health 不通：检查 `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web`。本地偶发镜像拉取超时可重试；远端 Linux 出现 DNS、代理、Buildx 或 Corepack 错误时，按 `references/environment.md` 的“远端 Linux 构建与持久部署”逐层验证，不要直接换不可信镜像。
 - sub2api 启动失败：`docker logs sub2api-e2e` 看 `Failed to initialize application`，常见是 DB 连接（检查 15432 占用）或 endpoint 不是完整的可达 OTLP Trace URL。
 - trace 不落库：检查 sub2api 日志中的 `modeltrace` error 和 ClickHouse `system.errors`；脚本自身负责 bounded wait，不用手工 sleep 冒充稳定性。
-- ClickHouse 查询语法错：用 `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "DESCRIBE traces"` 核对列名；Langfuse v3 的 `metadata` 是 `Map`，`session_id` 是 `Nullable(String)`。
+- ClickHouse 查询语法错：通过 `langfuse-clickhouse-read-proxy-1` 的宿主端口运行 `curl -fsS --user clickhouse:clickhouse --data-binary "DESCRIBE traces" http://127.0.0.1:18123/` 核对列名；Langfuse v3 的 `metadata` 是 `Map`，`session_id` 是 `Nullable(String)`。
 
 ### 场景二：跑全规模验收
 
@@ -123,8 +124,9 @@ description: |
      -H "Authorization: Bearer $APIKEY" \
      -d "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"re-run $SESSION_ID\"}],\"session_id\":\"$SESSION_ID\"}"
    sleep 6
-   docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse \
-     -q "SELECT id, name, user_id FROM traces WHERE session_id='$SESSION_ID' FORMAT TabSeparated"
+   curl -fsS --user clickhouse:clickhouse \
+     --data-binary "SELECT id, name, user_id FROM traces WHERE session_id='$SESSION_ID' FORMAT TabSeparated" \
+     http://127.0.0.1:18123/
    ```
 4. 只要 `traces` 表返回 1 行且 `observations` 恰有 1 个根 SPAN、没有 GENERATION 即通过；此快速路径不替代完整脚本的匿名/未知 Key/控制面/disabled Key 边界断言。
 
@@ -173,8 +175,8 @@ description: |
 | 清理环境 | `bash $SKILL_DIR/scripts/teardown.sh` |
 | 查 Langfuse 健康 | `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/public/health` |
 | 查 sub2api 健康 | `curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health` |
-| 查 Langfuse traces | `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "SELECT id, name, user_id, session_id FROM traces ORDER BY timestamp DESC LIMIT 5 FORMAT TabSeparated"` |
-| 查 observations | `docker exec sub2api-langfuse-clickhouse-1 clickhouse-client -u clickhouse --password clickhouse -q "SELECT name, type, provided_model_name, parent_observation_id FROM observations ORDER BY start_time DESC LIMIT 10 FORMAT TabSeparated"` |
+| 查 Langfuse traces | `curl -fsS --user clickhouse:clickhouse --data-binary "SELECT id, name, user_id, session_id FROM traces ORDER BY timestamp DESC LIMIT 5 FORMAT TabSeparated" http://127.0.0.1:18123/` |
+| 查 observations | `curl -fsS --user clickhouse:clickhouse --data-binary "SELECT name, type, provided_model_name, parent_observation_id FROM observations ORDER BY start_time DESC LIMIT 10 FORMAT TabSeparated" http://127.0.0.1:18123/` |
 | 看 sub2api 日志 | `docker logs sub2api-e2e 2>&1 \| tail -50` |
 | 看 Langfuse 日志 | `docker-compose -f .e2e-tmp/langfuse/docker-compose.yml logs langfuse-web 2>&1 \| tail -50` |
 | 跑 Go 单测（不启动 Langfuse） | 见场景五 |

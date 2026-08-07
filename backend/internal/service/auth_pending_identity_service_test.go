@@ -260,6 +260,55 @@ func TestAuthPendingIdentityService_UpsertAdoptionDecision_ReassignsExistingIden
 	require.Nil(t, reloadedFirst.IdentityID)
 }
 
+func TestAuthPendingIdentityServiceUpsertAdoptionDecisionRollsBackDetachedIdentityOnCreateFailure(t *testing.T) {
+	svc, client := newAuthPendingIdentityServiceTestClient(t)
+	ctx := context.Background()
+
+	user, err := client.User.Create().
+		SetEmail("adoption-rollback@example.com").
+		SetPasswordHash("hash").
+		SetRole(RoleUser).
+		SetStatus(StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	identity, err := client.AuthIdentity.Create().
+		SetUserID(user.ID).
+		SetProviderType("wechat").
+		SetProviderKey("wechat-open").
+		SetProviderSubject("union-rollback").
+		SetMetadata(map[string]any{}).
+		Save(ctx)
+	require.NoError(t, err)
+	session, err := svc.CreatePendingSession(ctx, CreatePendingAuthSessionInput{
+		Intent: "bind_current_user",
+		Identity: PendingAuthIdentityKey{
+			ProviderType: "wechat", ProviderKey: "wechat-open", ProviderSubject: "union-rollback",
+		},
+	})
+	require.NoError(t, err)
+	existing, err := svc.UpsertAdoptionDecision(ctx, PendingIdentityAdoptionDecisionInput{
+		PendingAuthSessionID: session.ID,
+		IdentityID:           &identity.ID,
+		AdoptDisplayName:     true,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.UpsertAdoptionDecision(ctx, PendingIdentityAdoptionDecisionInput{
+		PendingAuthSessionID: session.ID + 1_000_000,
+		IdentityID:           &identity.ID,
+		AdoptAvatar:          true,
+	})
+	require.Error(t, err)
+
+	reloaded, err := client.IdentityAdoptionDecision.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded.IdentityID)
+	require.Equal(t, identity.ID, *reloaded.IdentityID)
+	count, err := client.IdentityAdoptionDecision.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
 func TestAuthPendingIdentityService_UpsertAdoptionDecision_IsIdempotentUnderConcurrency(t *testing.T) {
 	svc, client := newAuthPendingIdentityServiceTestClient(t)
 	ctx := context.Background()

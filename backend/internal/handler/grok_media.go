@@ -177,7 +177,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			return
 		}
 	}
-	requestCtx := c.Request.Context()
+	// Grok 媒体（图片/视频生成与视频查询）按媒体倍率计费，不在 token 利润门
+	// 范围内：显式豁免，防止 service 层防御性装门按文本 D 误过滤媒体请求，
+	// 也防止已计费的在途视频任务因绑定账号被门排除而查询返回伪 404。
+	requestCtx := service.WithOpenAIProfitControlSuppressed(c.Request.Context())
+	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -293,15 +297,25 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		accountReleaseFunc, accountAcquired := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
-		if !accountAcquired {
+		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
+		if slotResult == openAISlotAcquireProfitVetoed {
+			// 媒体路径已显式豁免利润门（suppress 标记），此分支仅防御性兜底，
+			// 同样受否决上限约束。
+			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
+				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult != openAISlotAcquireOK {
 			return
 		}
+		account = selection.Account
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
 		writerSizeBeforeForward := c.Writer.Size()
-		result, err := func() (*service.OpenAIForwardResult, error) {
+		result, err := func() (*service.GrokMediaForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
@@ -392,21 +406,42 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			return
 		}
 
-		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result), true, nil)
-		if endpoint.IsGenerationRequest() && strings.TrimSpace(result.ResponseID) != "" {
+		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result.OpenAIForwardResult), true, nil)
+		recordUsage := func() {
+			if shouldRecordGrokMediaUsage(endpoint, requestModel) {
+				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result.OpenAIForwardResult, requestModel, body, requestID)
+			}
+		}
+		if endpoint.DefersSuccessResponse() {
+			responseID := strings.TrimSpace(result.ResponseID)
+			if responseID == "" {
+				reqLog.Warn("grok_media.video_response_id_missing", zap.Int64("account_id", account.ID))
+				recordUsage()
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Failed to persist video task")
+				return
+			}
 			if err := h.gatewayService.BindGrokMediaVideoRequestAccount(
-				requestCtx, apiKey.GroupID, result.ResponseID, subject.UserID, apiKey.ID, account.ID,
+				requestCtx, apiKey.GroupID, responseID, subject.UserID, apiKey.ID, account.ID,
 			); err != nil {
 				reqLog.Warn("grok_media.bind_video_request_account_failed",
 					zap.Int64("account_id", account.ID),
-					zap.String("request_id", result.ResponseID),
+					zap.String("request_id", responseID),
 					zap.Error(err),
 				)
+				recordUsage()
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Failed to persist video task")
+				return
+			}
+			if err := result.CommitResponse(c); err != nil {
+				reqLog.Error("grok_media.commit_deferred_response_failed", zap.Error(err))
+				recordUsage()
+				if !c.Writer.Written() {
+					h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
+				}
+				return
 			}
 		}
-		if shouldRecordGrokMediaUsage(endpoint, requestModel) {
-			recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result, requestModel, body, requestID)
-		}
+		recordUsage()
 		reqLog.Debug("grok_media.request_completed",
 			zap.Int64("account_id", account.ID),
 			zap.Int("switch_count", switchCount),

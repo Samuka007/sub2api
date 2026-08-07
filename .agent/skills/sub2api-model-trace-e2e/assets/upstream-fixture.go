@@ -31,9 +31,9 @@ const successSSE = "event: message_start\n" +
 
 type counters struct {
 	fail, ok, hold, image, partial, slow, failOpen, otlpOK, otlpError, otlpSlow atomic.Int64
-	wsConnections, wsTurns, wsDisconnectTurns                                    atomic.Int64
-	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet                atomic.Int64
-	batchMetadata, batchDownload                                                    atomic.Int64
+	wsConnections, wsTurns, wsDisconnectTurns                                   atomic.Int64
+	batchAuthOK, batchAuthFail, batchUpload, batchCreate, batchGet              atomic.Int64
+	batchMetadata, batchDownload                                                atomic.Int64
 }
 
 var stats counters
@@ -427,12 +427,17 @@ func gjsonString(payload []byte, key string) string {
 }
 
 func main() {
-	geminiAPIKey := os.Getenv("E2E_GEMINI_API_KEY")
+	geminiAPIKeyFile := strings.TrimSpace(os.Getenv("E2E_GEMINI_API_KEY_FILE"))
+	geminiAPIKeyBytes, err := os.ReadFile(geminiAPIKeyFile)
+	if err != nil {
+		log.Fatalf("fixture cannot read Gemini credential file: %v", err)
+	}
+	geminiAPIKey := strings.TrimSpace(string(geminiAPIKeyBytes))
 	mediaCanary := os.Getenv("E2E_BATCH_MEDIA_CANARY")
 	tlsCert := os.Getenv("E2E_TLS_CERT_FILE")
 	tlsKey := os.Getenv("E2E_TLS_KEY_FILE")
 	if geminiAPIKey == "" || mediaCanary == "" || tlsCert == "" || tlsKey == "" {
-		log.Fatal("fixture requires Gemini credential, media canary, and TLS certificate paths")
+		log.Fatal("fixture requires Gemini credential file, media canary, and TLS certificate paths")
 	}
 	authorized := func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Header.Get("x-goog-api-key") == geminiAPIKey {
@@ -457,7 +462,7 @@ func main() {
 			"otlp_error": stats.otlpError.Load(), "otlp_slow": stats.otlpSlow.Load(),
 			"ws_connections": stats.wsConnections.Load(), "ws_turns": stats.wsTurns.Load(),
 			"ws_disconnect_turns": stats.wsDisconnectTurns.Load(),
-			"batch_auth_ok": stats.batchAuthOK.Load(), "batch_auth_fail": stats.batchAuthFail.Load(),
+			"batch_auth_ok":       stats.batchAuthOK.Load(), "batch_auth_fail": stats.batchAuthFail.Load(),
 			"batch_upload": stats.batchUpload.Load(), "batch_create": stats.batchCreate.Load(),
 			"batch_get": stats.batchGet.Load(), "batch_metadata": stats.batchMetadata.Load(),
 			"batch_download": stats.batchDownload.Load(), "batch_input_items": int64(batch.keyCount()),
@@ -561,6 +566,10 @@ func main() {
 			writeJSON(w, "req_e2e_openai_chat", `{"id":"chatcmpl_e2e_matrix","object":"chat.completion","model":"gpt-e2e-upstream","choices":[{"index":0,"message":{"role":"assistant","content":"matrix chat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}`)
 		case "/matrix/openai/v1/responses":
 			protocols.record("openai.responses")
+			if strings.Contains(string(body), `"tool_choice":"required"`) {
+				writeJSON(w, "req_e2e_openai_responses_probe", `{"id":"resp_e2e_probe","object":"response","status":"completed","model":"gpt-e2e-upstream","output":[{"type":"function_call","id":"call_e2e_probe","call_id":"call_e2e_probe","name":"probe_ping","arguments":"{\"ok\":true}"}],"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11}}`)
+				return
+			}
 			if strings.Contains(string(body), `"stream":true`) {
 				writeOpenAIResponsesSSE(w, "req_e2e_openai_responses_stream")
 				return
@@ -611,6 +620,16 @@ func main() {
 		default:
 			http.NotFound(w, r)
 		}
+	})
+	mux.HandleFunc("/matrix/gemini/antigravity/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAnthropicKey(w, r) {
+			return
+		}
+		if _, ok := readJSONBody(w, r); !ok {
+			return
+		}
+		protocols.record("antigravity.messages")
+		writeJSON(w, "req_e2e_antigravity_messages", `{"id":"msg_e2e_antigravity_matrix","type":"message","role":"assistant","model":"gemini-e2e-upstream","content":[{"type":"text","text":"matrix antigravity"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":3}}`)
 	})
 	geminiHandler := func(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(r.Header.Get("x-goog-api-key")) == "" {

@@ -605,6 +605,17 @@ func TestLoadOpenAICompactModelFromEnv(t *testing.T) {
 	require.Equal(t, "gpt-5.3-codex", cfg.Gateway.OpenAICompactModel)
 }
 
+func TestLoadCodexIdentityRollbackSwitchesIndependently(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	viper.Set("gateway.disable_codex_originator_normalization", true)
+	viper.Set("gateway.disable_codex_identity_enforcement", false)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.Gateway.DisableCodexOriginatorNormalization)
+	require.False(t, cfg.Gateway.DisableCodexIdentityEnforcement)
+}
+
 func TestLoadDefaultOpenAIHTTP2Enabled(t *testing.T) {
 	resetViperWithJWTSecret(t)
 

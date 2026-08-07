@@ -147,20 +147,22 @@ func TestBatchImageTraceItems(t *testing.T) {
 	manager := newAsyncTestManager(t, fake.server.URL)
 	snapshot := manager.Acquire()
 	ctx, submission := snapshot.Tracer().Start(context.Background(), "batch.image.submission")
-	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
+	recorder := modeltrace.TestingNewTraceRecorder(ctx, snapshot.Tracer(), servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42, GroupID: 43}, 4096, 4096, modeltrace.TestingCapturePolicy{}, snapshot)
 	ctx = recording.WithRecorder(ctx, recorder)
 	recording.RecordAsyncSubmission(ctx, "batch-1", []string{"item-a", "item-b"})
 	continuation, ok := recording.ContinuationFromContext(ctx)
 	require.True(t, ok)
+	require.Equal(t, int64(43), continuation.GroupID)
 	submission.End()
 	snapshot.Release()
 
 	for _, itemID := range []string{"item-a", "item-b"} {
 		execution := manager.StartAsyncExecution(context.Background(), continuation, modeltrace.AsyncExecutionMetadata{
-			Identity: servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42},
-			TaskID:   "batch-1",
-			ItemID:   itemID,
-			Model:    "imagen-test",
+			Identity:  servermiddleware.ResolvedIdentity{UserID: 41, APIKeyID: 42, GroupID: 43},
+			AccountID: 44,
+			TaskID:    "batch-1",
+			ItemID:    itemID,
+			Model:     "imagen-test",
 		}, []byte(`{"prompt":"bounded"}`))
 		require.NotNil(t, execution)
 		execution.End("completed", []byte(`{"image_count":1}`), nil)
@@ -179,10 +181,21 @@ func TestBatchImageTraceItems(t *testing.T) {
 		attrs := attributesByKey(span.Attributes)
 		require.Equal(t, "batch-1", stringAttribute(t, attrs, "langfuse.trace.metadata.task_id"))
 		require.NotContains(t, attrs, "langfuse.trace.metadata.item_id")
-		var observationMetadata map[string]string
+		var observationMetadata struct {
+			TaskID    string `json:"task_id"`
+			ItemID    string `json:"item_id"`
+			AccountID int64  `json:"account_id"`
+			APIKeyID  int64  `json:"api_key_id"`
+			UserID    int64  `json:"user_id"`
+			GroupID   int64  `json:"group_id"`
+		}
 		require.NoError(t, json.Unmarshal([]byte(stringAttribute(t, attrs, "langfuse.observation.metadata")), &observationMetadata))
-		require.Equal(t, "batch-1", observationMetadata["task_id"])
-		seen[observationMetadata["item_id"]] = true
+		require.Equal(t, "batch-1", observationMetadata.TaskID)
+		require.Equal(t, int64(44), observationMetadata.AccountID)
+		require.Equal(t, int64(42), observationMetadata.APIKeyID)
+		require.Equal(t, int64(41), observationMetadata.UserID)
+		require.Equal(t, int64(43), observationMetadata.GroupID)
+		seen[observationMetadata.ItemID] = true
 	}
 	require.Equal(t, map[string]bool{"item-a": true, "item-b": true}, seen)
 }

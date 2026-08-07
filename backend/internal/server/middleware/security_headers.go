@@ -18,6 +18,21 @@ const (
 	NonceTemplate = "__CSP_NONCE__"
 	// CloudflareInsightsDomain is the domain for Cloudflare Web Analytics
 	CloudflareInsightsDomain = "https://static.cloudflareinsights.com"
+	// TencentCaptchaDomain is the Tencent Captcha 2.0 Web SDK and API domain.
+	TencentCaptchaDomain = "https://turing.captcha.qcloud.com"
+	// TencentCaptchaStaticDomain hosts Tencent Captcha scripts and static assets.
+	TencentCaptchaStaticDomain = "https://*.captcha.gtimg.com"
+	// AliyunCaptchaStaticDomain hosts the Aliyun Captcha 2.0 Web SDK and assets.
+	AliyunCaptchaStaticDomain = "https://*.alicdn.com"
+	// AliyunCaptchaCNStaticDomain hosts China-region Aliyun Captcha assets.
+	AliyunCaptchaCNStaticDomain = "https://static-captcha.aliyuncs.com"
+	// AliyunCaptchaSGPStaticDomain hosts Singapore-region Aliyun Captcha assets.
+	AliyunCaptchaSGPStaticDomain = "https://static-captcha-sgp.aliyuncs.com"
+	// Aliyun Captcha uses prefix-scoped API hosts from these four domain families.
+	AliyunCaptchaAPIDomain     = "https://*.captcha-open.aliyuncs.com"
+	AliyunCaptchaAPIBackup     = "https://*.captcha-open-b.aliyuncs.com"
+	AliyunCaptchaDualAPIDomain = "https://*.captcha-open-dual.aliyuncs.com"
+	AliyunCaptchaDualAPIBackup = "https://*.captcha-open-dual-b.aliyuncs.com"
 	// StripeDomain is the domain for Stripe.js SDK
 	StripeDomain = "https://*.stripe.com"
 	// AirwallexStaticDomain 是 Airwallex 生产环境 SDK 脚本域名。
@@ -35,6 +50,25 @@ var requiredCSPDirectiveValues = []struct {
 	value     string
 }{
 	{"script-src", CloudflareInsightsDomain},
+	{"script-src", TencentCaptchaDomain},
+	{"script-src", TencentCaptchaStaticDomain},
+	{"style-src", TencentCaptchaStaticDomain},
+	{"frame-src", TencentCaptchaDomain},
+	{"frame-src", TencentCaptchaStaticDomain},
+	{"connect-src", TencentCaptchaDomain},
+	{"connect-src", TencentCaptchaStaticDomain},
+	{"script-src", AliyunCaptchaStaticDomain},
+	{"style-src", AliyunCaptchaStaticDomain},
+	{"script-src", AliyunCaptchaCNStaticDomain},
+	{"style-src", AliyunCaptchaCNStaticDomain},
+	{"frame-src", AliyunCaptchaCNStaticDomain},
+	{"script-src", AliyunCaptchaSGPStaticDomain},
+	{"style-src", AliyunCaptchaSGPStaticDomain},
+	{"frame-src", AliyunCaptchaSGPStaticDomain},
+	{"connect-src", AliyunCaptchaAPIDomain},
+	{"connect-src", AliyunCaptchaAPIBackup},
+	{"connect-src", AliyunCaptchaDualAPIDomain},
+	{"connect-src", AliyunCaptchaDualAPIBackup},
 	{"script-src", StripeDomain},
 	{"frame-src", StripeDomain},
 	{"script-src", AirwallexStaticDomain},
@@ -127,8 +161,8 @@ func isAPIRoutePath(c *gin.Context) bool {
 		strings.HasPrefix(path, "/images")
 }
 
-// enhanceCSPPolicy 确保 CSP 策略包含 nonce 支持和支付 SDK 必需域名。
-// 这样旧配置文件没有及时补域名时，前端支付组件仍能正常加载。
+// enhanceCSPPolicy 确保 CSP 策略包含 nonce 支持和运行时组件必需域名。
+// 这样旧配置文件没有及时补域名时，验证码和支付组件仍能正常加载。
 func enhanceCSPPolicy(policy string) string {
 	// Add nonce placeholder to script-src if not present
 	if !strings.Contains(policy, NonceTemplate) && !strings.Contains(policy, "'nonce-") {

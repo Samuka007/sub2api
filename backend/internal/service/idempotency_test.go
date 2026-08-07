@@ -228,6 +228,38 @@ func TestIdempotencyCoordinator_ReplaySucceededResult(t *testing.T) {
 	require.Equal(t, uint64(1), metrics.ReplayTotal)
 }
 
+func TestIdempotencyCoordinatorSameKeyIsIsolatedByActor(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	coordinator := NewIdempotencyCoordinator(repo, DefaultIdempotencyConfig())
+	execCount := 0
+	exec := func(context.Context) (any, error) {
+		execCount++
+		return map[string]any{"count": execCount}, nil
+	}
+	base := IdempotencyExecuteOptions{
+		Scope: "test.scope", Method: "POST", Route: "/test",
+		RequireKey: true, IdempotencyKey: "shared-key", Payload: map[string]any{"a": 1},
+	}
+
+	firstActor := base
+	firstActor.ActorScope = "user:1"
+	secondActor := base
+	secondActor.ActorScope = "user:2"
+
+	first, err := coordinator.Execute(context.Background(), firstActor, exec)
+	require.NoError(t, err)
+	require.False(t, first.Replayed)
+	second, err := coordinator.Execute(context.Background(), secondActor, exec)
+	require.NoError(t, err)
+	require.False(t, second.Replayed)
+	require.Equal(t, 2, execCount)
+
+	replayed, err := coordinator.Execute(context.Background(), firstActor, exec)
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	require.Equal(t, 2, execCount)
+}
+
 func TestIdempotencyCoordinator_ReclaimExpiredSucceededRecord(t *testing.T) {
 	resetIdempotencyMetricsForTest()
 	repo := newInMemoryIdempotencyRepo()
@@ -255,7 +287,7 @@ func TestIdempotencyCoordinator_ReclaimExpiredSucceededRecord(t *testing.T) {
 	require.False(t, first.Replayed)
 	require.Equal(t, 1, execCount)
 
-	keyHash := HashIdempotencyKey(opts.IdempotencyKey)
+	keyHash := HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey)
 	repo.mu.Lock()
 	existing := repo.data[repo.key(opts.Scope, keyHash)]
 	require.NotNil(t, existing)
@@ -480,7 +512,7 @@ func TestIdempotencyCoordinator_TruncatedStoredResponseRemainsUTF8(t *testing.T)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	stored, err := repo.GetByScopeAndKeyHash(context.Background(), opts.Scope, HashIdempotencyKey(opts.IdempotencyKey))
+	stored, err := repo.GetByScopeAndKeyHash(context.Background(), opts.Scope, HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey))
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.NotNil(t, stored.ResponseBody)

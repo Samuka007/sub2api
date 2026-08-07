@@ -160,6 +160,14 @@ func HashIdempotencyKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func HashActorScopedIdempotencyKey(actorScope, key string) string {
+	if actorScope == "" {
+		actorScope = "anonymous"
+	}
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(actorScope)) + ":" + actorScope + key))
+	return hex.EncodeToString(sum[:])
+}
+
 func BuildIdempotencyFingerprint(method, route, actorScope string, payload any) (string, error) {
 	if method == "" {
 		method = "POST"
@@ -241,7 +249,7 @@ func (c *IdempotencyCoordinator) Execute(
 	now := time.Now()
 	expiresAt := now.Add(ttl)
 	lockedUntil := now.Add(c.cfg.ProcessingTimeout)
-	keyHash := HashIdempotencyKey(key)
+	keyHash := HashActorScopedIdempotencyKey(opts.ActorScope, key)
 
 	record := &IdempotencyRecord{
 		Scope:              opts.Scope,

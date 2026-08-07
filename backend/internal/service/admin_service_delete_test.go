@@ -696,6 +696,38 @@ func TestAdminService_DeleteProxy_InUse(t *testing.T) {
 	require.Empty(t, repo.deletedIDs)
 }
 
+func TestAdminService_DeleteProxy_ContentModerationReference(t *testing.T) {
+	repo := &proxyRepoStub{}
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: `{"proxy_id":77}`,
+	}}
+	svc := &adminServiceImpl{
+		proxyRepo:      repo,
+		settingService: NewSettingService(settingRepo, nil),
+	}
+
+	err := svc.DeleteProxy(context.Background(), 77)
+	require.ErrorIs(t, err, ErrProxyInUseByContentModeration)
+	require.Empty(t, repo.deletedIDs)
+}
+
+func TestAdminService_BatchDeleteProxies_SkipsContentModerationReference(t *testing.T) {
+	repo := &proxyRepoStub{}
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: `{"proxy_id":77}`,
+	}}
+	svc := &adminServiceImpl{
+		proxyRepo:      repo,
+		settingService: NewSettingService(settingRepo, nil),
+	}
+
+	result, err := svc.BatchDeleteProxies(context.Background(), []int64{77, 78})
+	require.NoError(t, err)
+	require.Equal(t, []int64{78}, result.DeletedIDs)
+	require.Equal(t, []ProxyBatchDeleteSkipped{{ID: 77, Reason: ErrProxyInUseByContentModeration.Error()}}, result.Skipped)
+	require.Equal(t, []int64{78}, repo.deletedIDs)
+}
+
 func TestAdminService_DeleteProxy_Error(t *testing.T) {
 	deleteErr := errors.New("delete failed")
 	repo := &proxyRepoStub{deleteErr: deleteErr}
