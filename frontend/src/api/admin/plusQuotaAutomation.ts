@@ -66,6 +66,10 @@ export interface PlusQuotaAnomaliesResponse {
   page_size: number
 }
 
+export interface PlusQuotaAnomalyDeletionCandidates {
+  account_ids: number[]
+}
+
 export interface PlusQuotaAnomalyNotesExport {
   blob: Blob | null
   count: number
@@ -94,6 +98,21 @@ export async function listAnomalies(
     params,
     signal: options?.signal
   })
+  return data
+}
+
+export async function getAnomalyDeletionCandidates(
+  search?: string,
+  options?: { signal?: AbortSignal }
+): Promise<PlusQuotaAnomalyDeletionCandidates> {
+  const normalizedSearch = search?.trim()
+  const { data } = await apiClient.get<PlusQuotaAnomalyDeletionCandidates>(
+    `${ANOMALIES_PATH}/deletion-candidates`,
+    {
+      params: normalizedSearch ? { search: normalizedSearch } : undefined,
+      signal: options?.signal
+    }
+  )
   return data
 }
 
@@ -133,6 +152,7 @@ export const plusQuotaAutomationAPI = {
   updateAutomation,
   runAutomation,
   listAnomalies,
+  getAnomalyDeletionCandidates,
   exportAnomalyNotes,
   resolveAnomaly,
   deleteAnomalyAccount

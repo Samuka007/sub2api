@@ -322,6 +322,7 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		groups.GET("", h.Admin.Group.List)
 		groups.GET("/all", h.Admin.Group.GetAll)
+		groups.GET("/account-health-candidates", h.Admin.Group.ListAccountHealthCandidates)
 		groups.GET("/usage-summary", h.Admin.Group.GetUsageSummary)
 		groups.GET("/capacity-summary", h.Admin.Group.GetCapacitySummary)
 		groups.GET("/live-capability", h.Admin.Group.GetLiveCapability)
@@ -351,6 +352,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 	accounts := admin.Group("/accounts")
 	{
 		accounts.GET("", h.Admin.Account.List)
+		accounts.GET("/account-health-candidates", h.Admin.Account.ListAccountHealthCandidates)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
 		accounts.PUT("/upstream-billing-probe/settings", h.Admin.Account.UpdateUpstreamBillingProbeSettings)
 		accounts.POST("/upstream-billing-probe/batch", h.Admin.Account.ProbeUpstreamBillingBatch)
@@ -359,6 +361,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.GET("/:id", h.Admin.Account.GetByID)
 		accounts.POST("", h.Admin.Account.Create)
 		accounts.POST("/:id/duplicate", h.Admin.Account.Duplicate)
+		accounts.POST("/:id/account-health-detection", h.Admin.Account.DetectAccountHealth)
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
@@ -447,6 +450,7 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.PUT("/plus-quota-automation", h.Admin.PlusQuotaAutomation.Update)
 		openai.POST("/plus-quota-automation/run", h.Admin.PlusQuotaAutomation.Run)
 		openai.GET("/plus-quota-anomalies", h.Admin.PlusQuotaAutomation.ListAnomalies)
+		openai.GET("/plus-quota-anomalies/deletion-candidates", h.Admin.PlusQuotaAutomation.GetAnomalyDeletionCandidates)
 		openai.GET("/plus-quota-anomalies/export-notes", h.Admin.PlusQuotaAutomation.ExportAnomalyNotes)
 		openai.POST("/plus-quota-anomalies/:accountId/resolve", h.Admin.PlusQuotaAutomation.ResolveAnomaly)
 		openai.DELETE("/plus-quota-anomalies/:accountId/account", h.Admin.PlusQuotaAutomation.DeleteAnomalyAccount)

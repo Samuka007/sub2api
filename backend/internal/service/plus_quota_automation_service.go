@@ -142,6 +142,10 @@ type PlusQuotaAnomalyList struct {
 	PageSize int                `json:"page_size"`
 }
 
+type PlusQuotaAnomalyDeletionCandidates struct {
+	AccountIDs []int64 `json:"account_ids"`
+}
+
 type PlusQuotaAutomationService struct {
 	accountRepo plusQuotaAutomationAccountRepository
 	quota       plusQuotaAutomationClient
@@ -937,6 +941,26 @@ func plusQuotaAccountEmail(account *Account) string {
 	return strings.TrimSpace(account.GetCredential("email"))
 }
 
+func populatePlusQuotaAnomalyAccountFields(account *Account, anomaly *PlusQuotaAnomaly) {
+	if account == nil || anomaly == nil {
+		return
+	}
+	anomaly.AccountID = account.ID
+	anomaly.AccountName = account.Name
+	if email := plusQuotaAccountEmail(account); email != "" {
+		anomaly.Email = email
+	}
+}
+
+func plusQuotaAnomalyMatchesSearch(anomaly *PlusQuotaAnomaly, search string) bool {
+	if anomaly == nil || search == "" {
+		return anomaly != nil
+	}
+	return strings.Contains(strings.ToLower(anomaly.AccountName), search) ||
+		strings.Contains(strings.ToLower(anomaly.Email), search) ||
+		strings.Contains(strconv.FormatInt(anomaly.AccountID, 10), search)
+}
+
 func plusQuotaLastResetAt(extra map[string]any) (time.Time, bool) {
 	if extra == nil {
 		return time.Time{}, false
@@ -996,15 +1020,8 @@ func (s *PlusQuotaAutomationService) ListAnomalies(
 		if anomaly == nil || (status != "all" && anomaly.Status != status) {
 			continue
 		}
-		anomaly.AccountID = account.ID
-		anomaly.AccountName = account.Name
-		if email := plusQuotaAccountEmail(account); email != "" {
-			anomaly.Email = email
-		}
-		if search != "" &&
-			!strings.Contains(strings.ToLower(anomaly.AccountName), search) &&
-			!strings.Contains(strings.ToLower(anomaly.Email), search) &&
-			!strings.Contains(strconv.FormatInt(account.ID, 10), search) {
+		populatePlusQuotaAnomalyAccountFields(account, anomaly)
+		if !plusQuotaAnomalyMatchesSearch(anomaly, search) {
 			continue
 		}
 		items = append(items, *anomaly)
@@ -1027,6 +1044,41 @@ func (s *PlusQuotaAutomationService) ListAnomalies(
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
+}
+
+// GetAnomalyDeletionCandidates returns one immutable ID snapshot for a
+// destructive confirmation. Each later deletion still revalidates the row.
+func (s *PlusQuotaAutomationService) GetAnomalyDeletionCandidates(
+	ctx context.Context,
+	search string,
+) (*PlusQuotaAnomalyDeletionCandidates, error) {
+	accounts, err := s.accountRepo.ListAllWithFilters(ctx, PlatformOpenAI, AccountTypeOAuth, "", "", 0, "")
+	if err != nil {
+		return nil, err
+	}
+
+	search = strings.ToLower(strings.TrimSpace(search))
+	accountIDs := make([]int64, 0)
+	for i := range accounts {
+		account := &accounts[i]
+		if !account.IsOpenAIOAuth() {
+			continue
+		}
+		anomaly, parseErr := plusQuotaAnomalyFromAccount(account)
+		if parseErr != nil {
+			slog.Warn("plus_quota_anomaly_parse_failed", "account_id", account.ID, "error", parseErr)
+			continue
+		}
+		populatePlusQuotaAnomalyAccountFields(account, anomaly)
+		if anomaly == nil || anomaly.Status != PlusQuotaAnomalyStatusOpen ||
+			anomaly.HTTPStatus != http.StatusUnauthorized ||
+			!plusQuotaAnomalyMatchesSearch(anomaly, search) {
+			continue
+		}
+		accountIDs = append(accountIDs, account.ID)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	return &PlusQuotaAnomalyDeletionCandidates{AccountIDs: accountIDs}, nil
 }
 
 // ExportOpenAnomalyNotes builds the complete export from one account snapshot.

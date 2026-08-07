@@ -541,6 +541,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/account-health-detector',
+    name: 'AdminAccountHealthDetector',
+    component: () => import('@/views/admin/AccountHealthDetectorView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Account Health Check',
+      titleKey: 'admin.accountHealthDetector.title',
+      descriptionKey: 'admin.accountHealthDetector.description'
+    }
+  },
+  {
     path: '/admin/plus-quota-automation',
     name: 'AdminPlusQuotaAutomation',
     component: () => import('@/views/admin/PlusQuotaAutomationView.vue'),

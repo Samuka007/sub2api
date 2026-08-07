@@ -4,13 +4,18 @@ import { flushPromises, mount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 
 import PlusQuotaAutomationView from '../PlusQuotaAutomationView.vue'
-import type { PlusQuotaAutomationOverview } from '@/api/admin/plusQuotaAutomation'
+import type {
+  ListPlusQuotaAnomaliesParams,
+  PlusQuotaAnomaly,
+  PlusQuotaAutomationOverview
+} from '@/api/admin/plusQuotaAutomation'
 
 const {
   getAutomation,
   updateAutomation,
   runAutomation,
   listAnomalies,
+  getDeletionCandidates,
   exportAnomalyNotes,
   resolveAnomaly,
   deleteAccount,
@@ -23,6 +28,7 @@ const {
   updateAutomation: vi.fn(),
   runAutomation: vi.fn(),
   listAnomalies: vi.fn(),
+  getDeletionCandidates: vi.fn(),
   exportAnomalyNotes: vi.fn(),
   resolveAnomaly: vi.fn(),
   deleteAccount: vi.fn(),
@@ -39,6 +45,7 @@ vi.mock('@/api/admin', () => ({
       updateAutomation,
       runAutomation,
       listAnomalies,
+      getAnomalyDeletionCandidates: getDeletionCandidates,
       exportAnomalyNotes,
       resolveAnomaly,
       deleteAnomalyAccount: deleteAccount
@@ -62,7 +69,12 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string, params?: Record<string, unknown>) => {
+        if (key === 'admin.plusQuotaAutomation.deleteAllConfirm.message') {
+          return `${key}:${String(params?.count ?? '')}`
+        }
+        return key
+      }
     })
   }
 })
@@ -175,6 +187,37 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function anomaly(accountId: number, overrides: Partial<PlusQuotaAnomaly> = {}): PlusQuotaAnomaly {
+  return {
+    account_id: accountId,
+    account_name: `plus-${accountId}`,
+    email: `plus-${accountId}@example.com`,
+    group_id: 1,
+    stage: 'query',
+    http_status: 401,
+    first_detected_at: '2026-07-23T08:00:00Z',
+    last_detected_at: '2026-07-23T08:00:00Z',
+    count: 1,
+    status: 'open',
+    last_error: 'unauthorized',
+    ...overrides
+  }
+}
+
+function findFilterStatusSelect(wrapper: VueWrapper) {
+  const select = wrapper.findAllComponents({ name: 'Select' }).find((item) =>
+    item.props('modelValue') === 'open' || item.attributes('modelvalue') === 'open'
+  )
+  if (!select) throw new Error('status filter not found')
+  return select
+}
+
+function findVisibleConfirmDialog(wrapper: VueWrapper) {
+  const dialog = wrapper.findAllComponents(ConfirmDialogStub).find((item) => item.props('show'))
+  if (!dialog) throw new Error('visible confirm dialog not found')
+  return dialog
+}
+
 function findButtonByText(wrapper: VueWrapper, text: string) {
   const button = wrapper.findAll('button').find((item) => item.text().includes(text))
   if (!button) throw new Error(`button not found: ${text}`)
@@ -187,6 +230,7 @@ describe('admin PlusQuotaAutomationView', () => {
     updateAutomation.mockReset()
     runAutomation.mockReset()
     listAnomalies.mockReset()
+    getDeletionCandidates.mockReset()
     exportAnomalyNotes.mockReset()
     resolveAnomaly.mockReset()
     deleteAccount.mockReset()
@@ -208,6 +252,7 @@ describe('admin PlusQuotaAutomationView', () => {
       page: 1,
       page_size: 20
     })
+    getDeletionCandidates.mockResolvedValue({ account_ids: [] })
     exportAnomalyNotes.mockResolvedValue({ blob: null, count: 0, filename: null })
   })
 
@@ -802,6 +847,209 @@ describe('admin PlusQuotaAutomationView', () => {
     )
     expect(listAnomalies).toHaveBeenCalledTimes(2)
 
+    wrapper.unmount()
+  })
+
+  it('only enables deleting all anomaly accounts for the open status filter', async () => {
+    listAnomalies.mockResolvedValue({
+      items: [anomaly(1)],
+      total: 1,
+      page: 1,
+      page_size: 20
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const deleteAllButton = wrapper.get('[data-test="delete-all-anomaly-accounts"]')
+    expect(deleteAllButton.attributes('disabled')).toBeUndefined()
+
+    const statusSelect = findFilterStatusSelect(wrapper)
+    statusSelect.vm.$emit('update:modelValue', 'resolved')
+    statusSelect.vm.$emit('change', 'resolved')
+    await flushPromises()
+
+    expect(deleteAllButton.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('prepares a destructive delete-all snapshot but allows the administrator to cancel it', async () => {
+    const candidate = anomaly(42)
+    listAnomalies.mockImplementation(async (params: ListPlusQuotaAnomaliesParams) => ({
+      items: [candidate],
+      total: 1,
+      page: params.page || 1,
+      page_size: params.page_size || 20
+    }))
+    getDeletionCandidates.mockResolvedValueOnce({ account_ids: [42] })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const searchInput = wrapper.findComponent({ name: 'SearchInput' })
+    searchInput.vm.$emit('update:modelValue', 'target-account')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('[data-test="delete-all-anomaly-accounts"]').trigger('click')
+    await flushPromises()
+    searchInput.vm.$emit('search', 'target-account')
+    await wrapper.vm.$nextTick()
+
+    const confirmButton = wrapper.get('[data-test="confirm-dialog"]')
+    expect(confirmButton.attributes('data-title')).toBe(
+      'admin.plusQuotaAutomation.deleteAllConfirm.title'
+    )
+    expect(confirmButton.attributes('data-message')).toBe(
+      'admin.plusQuotaAutomation.deleteAllConfirm.message:1'
+    )
+    expect(confirmButton.attributes('data-danger')).toBe('true')
+
+    findVisibleConfirmDialog(wrapper).vm.$emit('cancel')
+    await flushPromises()
+
+    expect(deleteAccount).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="confirm-dialog"]').exists()).toBe(false)
+    expect(listAnomalies).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1, search: 'target-account' }),
+      expect.any(Object)
+    )
+    wrapper.unmount()
+  })
+
+  it('deletes the server-provided candidate snapshot without paginating a mutable list', async () => {
+    const snapshot = deferred<{ account_ids: number[] }>()
+    listAnomalies.mockResolvedValue({
+      items: [anomaly(1)],
+      total: 1,
+      page: 1,
+      page_size: 20
+    })
+    getDeletionCandidates.mockReturnValueOnce(snapshot.promise)
+    deleteAccount.mockResolvedValue(undefined)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const searchInput = wrapper.findComponent({ name: 'SearchInput' })
+    searchInput.vm.$emit('update:modelValue', 'target-account')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('[data-test="delete-all-anomaly-accounts"]').trigger('click')
+    await flushPromises()
+
+    expect(getDeletionCandidates).toHaveBeenCalledWith(
+      'target-account',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(listAnomalies).toHaveBeenCalledTimes(1)
+    expect(deleteAccount).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="confirm-dialog"]').exists()).toBe(false)
+
+    snapshot.resolve({ account_ids: [101, 1, 101, 0, -2, 1.5] })
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="confirm-dialog"]').attributes('data-message')).toBe(
+      'admin.plusQuotaAutomation.deleteAllConfirm.message:2'
+    )
+
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    const deletedIds = deleteAccount.mock.calls.map(([accountId]) => accountId).sort((a, b) => a - b)
+    expect(deletedIds).toEqual([1, 101])
+    expect(showSuccess).toHaveBeenCalledWith(
+      'admin.plusQuotaAutomation.messages.accountsDeleted'
+    )
+    expect(getAutomation).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('limits delete-all work to four requests and locks list controls while it is running', async () => {
+    const candidates = Array.from({ length: 5 }, (_, index) => anomaly(index + 1))
+    const deletions = new Map(candidates.map((item) => [
+      item.account_id,
+      deferred<{ message: string }>()
+    ]))
+    listAnomalies.mockImplementation(async (params: ListPlusQuotaAnomaliesParams) => ({
+      items: candidates,
+      total: candidates.length,
+      page: params.page || 1,
+      page_size: params.page_size || 20
+    }))
+    getDeletionCandidates.mockResolvedValueOnce({
+      account_ids: candidates.map((item) => item.account_id)
+    })
+    deleteAccount.mockImplementation((accountId: number) => deletions.get(accountId)!.promise)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="delete-all-anomaly-accounts"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteAccount).toHaveBeenCalledTimes(4)
+    expect(wrapper.get('[data-test="delete-all-anomaly-accounts"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-test="delete-all-anomaly-accounts"]').attributes('aria-disabled')).toBe('true')
+    expect(wrapper.get('[data-test="export-account-notes"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('button[title="common.refresh"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('fieldset[disabled]').exists()).toBe(true)
+    expect(findFilterStatusSelect(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-test="anomaly-pagination-lock"]').attributes('disabled')).toBeDefined()
+    expect(
+      wrapper.findAll('[data-test="delete-anomaly-account"]')
+        .every((button) => button.attributes('disabled') !== undefined)
+    ).toBe(true)
+    expect(
+      wrapper.findAll('button[title="admin.plusQuotaAutomation.actions.resolve"]')
+        .every((button) => button.attributes('disabled') !== undefined)
+    ).toBe(true)
+
+    deletions.get(1)!.resolve({ message: 'ok' })
+    await flushPromises()
+    expect(deleteAccount).toHaveBeenCalledTimes(5)
+
+    for (const [accountId, deletion] of deletions) {
+      if (accountId !== 1) deletion.resolve({ message: 'ok' })
+    }
+    await flushPromises()
+
+    expect(showSuccess).toHaveBeenCalledWith(
+      'admin.plusQuotaAutomation.messages.accountsDeleted'
+    )
+    wrapper.unmount()
+  })
+
+  it('summarizes stale and failed accounts after a partial delete-all result', async () => {
+    const candidates = [anomaly(1), anomaly(2), anomaly(3)]
+    listAnomalies.mockImplementation(async (params: ListPlusQuotaAnomaliesParams) => ({
+      items: candidates,
+      total: candidates.length,
+      page: params.page || 1,
+      page_size: params.page_size || 20
+    }))
+    getDeletionCandidates.mockResolvedValueOnce({ account_ids: [1, 2, 3] })
+    deleteAccount.mockImplementation((accountId: number) => {
+      if (accountId === 2) return Promise.reject({ status: 409 })
+      if (accountId === 3) return Promise.reject(new Error('network unavailable'))
+      return Promise.resolve(undefined)
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="delete-all-anomaly-accounts"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="confirm-dialog"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteAccount.mock.calls.map(([accountId]) => accountId).sort()).toEqual([1, 2, 3])
+    expect(showError).toHaveBeenCalledWith(
+      'admin.plusQuotaAutomation.messages.deleteAllSummary'
+    )
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(getAutomation).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
 })

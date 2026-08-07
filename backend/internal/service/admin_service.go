@@ -70,6 +70,7 @@ type AdminService interface {
 
 	// Account management
 	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
+	ListAccountHealthCandidates(ctx context.Context, groupIDs []int64) ([]AccountHealthCandidate, error)
 	// ListAccountsForSchedulerScoreFilter 返回符合过滤条件的全部账号（不分页），
 	// 作为账号列表页计算 OpenAI 调度分数的过滤范围池。
 	ListAccountsForSchedulerScoreFilter(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
@@ -90,6 +91,7 @@ type AdminService interface {
 	// 用于刷新流程持久化 account_uuid / org_uuid 等少量键，避免被全量快照覆盖。
 	UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error
 	DeleteAccount(ctx context.Context, id int64) error
+	DetectAccountHealth(ctx context.Context, accountID, groupID int64) (*GroupAccountHealthDetection, error)
 	RefreshAccountCredentials(ctx context.Context, id int64) (*Account, error)
 	ClearAccountError(ctx context.Context, id int64) (*Account, error)
 	SetAccountError(ctx context.Context, id int64, errorMsg string) error
@@ -639,31 +641,32 @@ var (
 
 // adminServiceImpl implements AdminService
 type adminServiceImpl struct {
-	userRepo             UserRepository
-	groupRepo            GroupRepository
-	groupDuplicateRepo   GroupDuplicateRepository
-	accountRepo          AccountRepository
-	adminAccountRepo     AdminAccountRepository
-	accountDuplicateRepo AccountDuplicateRepository
-	accountBillingRepo   AccountBillingSettingsRepository
-	proxyRepo            ProxyRepository
-	apiKeyRepo           APIKeyRepository
-	redeemCodeRepo       RedeemCodeRepository
-	userGroupRateRepo    UserGroupRateRepository
-	userRPMCache         UserRPMCache
-	billingCacheService  *BillingCacheService
-	proxyProber          ProxyExitInfoProber
-	proxyLatencyCache    ProxyLatencyCache
-	authCacheInvalidator APIKeyAuthCacheInvalidator
-	entClient            *dbent.Client // 用于开启数据库事务
-	settingService       *SettingService
-	defaultSubAssigner   DefaultSubscriptionAssigner
-	userSubRepo          UserSubscriptionRepository
-	privacyClientFactory PrivacyClientFactory
-	runtimeBlocker       AccountRuntimeBlocker
-	affiliateService     adminRechargeAffiliateAccruer
-	compositeRouteRepo   CompositeModelRouteRepository
-	compositeResolver    *CompositeRouteResolver
+	userRepo              UserRepository
+	groupRepo             GroupRepository
+	groupDuplicateRepo    GroupDuplicateRepository
+	accountRepo           AccountRepository
+	adminAccountRepo      AdminAccountRepository
+	accountDuplicateRepo  AccountDuplicateRepository
+	accountBillingRepo    AccountBillingSettingsRepository
+	proxyRepo             ProxyRepository
+	apiKeyRepo            APIKeyRepository
+	redeemCodeRepo        RedeemCodeRepository
+	userGroupRateRepo     UserGroupRateRepository
+	userRPMCache          UserRPMCache
+	billingCacheService   *BillingCacheService
+	proxyProber           ProxyExitInfoProber
+	proxyLatencyCache     ProxyLatencyCache
+	authCacheInvalidator  APIKeyAuthCacheInvalidator
+	entClient             *dbent.Client // 用于开启数据库事务
+	settingService        *SettingService
+	defaultSubAssigner    DefaultSubscriptionAssigner
+	userSubRepo           UserSubscriptionRepository
+	privacyClientFactory  PrivacyClientFactory
+	runtimeBlocker        AccountRuntimeBlocker
+	affiliateService      adminRechargeAffiliateAccruer
+	compositeRouteRepo    CompositeModelRouteRepository
+	compositeResolver     *CompositeRouteResolver
+	accountHealthDetector GroupAccountHealthDetector
 }
 
 type adminRechargeAffiliateAccruer interface {
@@ -699,30 +702,31 @@ func NewAdminService(
 	compositeResolver *CompositeRouteResolver,
 ) AdminService {
 	return &adminServiceImpl{
-		userRepo:             userRepo,
-		groupRepo:            groupRepo,
-		groupDuplicateRepo:   groupRepo,
-		accountRepo:          accountRepo,
-		adminAccountRepo:     accountRepo,
-		accountDuplicateRepo: accountRepo,
-		accountBillingRepo:   accountRepo,
-		proxyRepo:            proxyRepo,
-		apiKeyRepo:           apiKeyRepo,
-		redeemCodeRepo:       redeemCodeRepo,
-		userGroupRateRepo:    userGroupRateRepo,
-		userRPMCache:         userRPMCache,
-		billingCacheService:  billingCacheService,
-		proxyProber:          proxyProber,
-		proxyLatencyCache:    proxyLatencyCache,
-		authCacheInvalidator: authCacheInvalidator,
-		entClient:            entClient,
-		settingService:       settingService,
-		defaultSubAssigner:   defaultSubAssigner,
-		userSubRepo:          userSubRepo,
-		privacyClientFactory: privacyClientFactory,
-		runtimeBlocker:       runtimeBlocker,
-		affiliateService:     affiliateService,
-		compositeRouteRepo:   compositeRouteRepo,
-		compositeResolver:    compositeResolver,
+		userRepo:              userRepo,
+		groupRepo:             groupRepo,
+		groupDuplicateRepo:    groupRepo,
+		accountRepo:           accountRepo,
+		adminAccountRepo:      accountRepo,
+		accountDuplicateRepo:  accountRepo,
+		accountBillingRepo:    accountRepo,
+		proxyRepo:             proxyRepo,
+		apiKeyRepo:            apiKeyRepo,
+		redeemCodeRepo:        redeemCodeRepo,
+		userGroupRateRepo:     userGroupRateRepo,
+		userRPMCache:          userRPMCache,
+		billingCacheService:   billingCacheService,
+		proxyProber:           proxyProber,
+		proxyLatencyCache:     proxyLatencyCache,
+		authCacheInvalidator:  authCacheInvalidator,
+		entClient:             entClient,
+		settingService:        settingService,
+		defaultSubAssigner:    defaultSubAssigner,
+		userSubRepo:           userSubRepo,
+		privacyClientFactory:  privacyClientFactory,
+		runtimeBlocker:        runtimeBlocker,
+		affiliateService:      affiliateService,
+		compositeRouteRepo:    compositeRouteRepo,
+		compositeResolver:     compositeResolver,
+		accountHealthDetector: NewGroupAccountHealthDetector(groupRepo),
 	}
 }

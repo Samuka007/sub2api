@@ -14,6 +14,7 @@ vi.mock('@/api/client', () => ({
 import {
   deleteAnomalyAccount,
   exportAnomalyNotes,
+  getAnomalyDeletionCandidates,
   getAutomation,
   listAnomalies,
   resolveAnomaly,
@@ -126,6 +127,22 @@ describe('admin Plus quota automation API', () => {
     })
     expect(post).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/42/resolve')
     expect(remove).toHaveBeenCalledWith('/admin/openai/plus-quota-anomalies/42/account')
+  })
+
+  it('loads one fixed deletion-candidate snapshot for the current search', async () => {
+    const controller = new AbortController()
+    get.mockResolvedValueOnce({ data: { account_ids: [3, 9] } })
+
+    await expect(
+      getAnomalyDeletionCandidates(' target ', { signal: controller.signal })
+    ).resolves.toEqual({ account_ids: [3, 9] })
+    expect(get).toHaveBeenCalledWith(
+      '/admin/openai/plus-quota-anomalies/deletion-candidates',
+      {
+        params: { search: 'target' },
+        signal: controller.signal
+      }
+    )
   })
 
   it('downloads the open anomaly notes snapshot as a TXT blob', async () => {

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -82,9 +83,54 @@ func plusQuotaExportRouter(repo *plusQuotaExportAccountRepoStub) *gin.Engine {
 	)
 	handler := NewPlusQuotaAutomationHandler(automationService)
 	router := gin.New()
+	router.GET("/api/v1/admin/openai/plus-quota-anomalies/deletion-candidates", handler.GetAnomalyDeletionCandidates)
 	router.GET("/api/v1/admin/openai/plus-quota-anomalies/export-notes", handler.ExportAnomalyNotes)
 	router.DELETE("/api/v1/admin/openai/plus-quota-anomalies/:accountId/account", handler.DeleteAnomalyAccount)
 	return router
+}
+
+func TestPlusQuotaAutomationGetAnomalyDeletionCandidates(t *testing.T) {
+	repo := &plusQuotaExportAccountRepoStub{accounts: []service.Account{
+		{
+			ID:       9,
+			Name:     "target-nine",
+			Platform: service.PlatformOpenAI,
+			Type:     service.AccountTypeOAuth,
+			Extra: map[string]any{
+				service.PlusQuotaAnomalyExtraKey: service.PlusQuotaAnomaly{
+					Status:     service.PlusQuotaAnomalyStatusOpen,
+					HTTPStatus: http.StatusUnauthorized,
+				},
+			},
+		},
+		{
+			ID:       3,
+			Name:     "target-three",
+			Platform: service.PlatformOpenAI,
+			Type:     service.AccountTypeOAuth,
+			Extra: map[string]any{
+				service.PlusQuotaAnomalyExtraKey: service.PlusQuotaAnomaly{
+					Status:     service.PlusQuotaAnomalyStatusOpen,
+					HTTPStatus: http.StatusUnauthorized,
+				},
+			},
+		},
+	}}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/admin/openai/plus-quota-anomalies/deletion-candidates?search=target",
+		nil,
+	)
+	plusQuotaExportRouter(repo).ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload struct {
+		Data service.PlusQuotaAnomalyDeletionCandidates `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.Equal(t, []int64{3, 9}, payload.Data.AccountIDs)
 }
 
 func TestPlusQuotaAutomationDeleteAnomalyAccount(t *testing.T) {

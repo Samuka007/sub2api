@@ -268,6 +268,42 @@ func (h *GroupHandler) List(c *gin.Context) {
 	response.Paginated(c, outGroups, total, page, pageSize)
 }
 
+type accountHealthGroupCandidate struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Platform string `json:"platform"`
+	Status   string `json:"status"`
+}
+
+// ListAccountHealthCandidates returns the non-sensitive fields needed by the detector page.
+// GET /api/v1/admin/groups/account-health-candidates
+func (h *GroupHandler) ListAccountHealthCandidates(c *gin.Context) {
+	page, pageSize := response.ParsePagination(c)
+	groups, total, err := h.adminService.ListGroups(
+		c.Request.Context(), page, pageSize,
+		service.PlatformOpenAI, "", "", nil, "sort_order", "asc",
+	)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	candidates := make([]accountHealthGroupCandidate, 0, len(groups))
+	for i := range groups {
+		status := "inactive"
+		if groups[i].IsActive() {
+			status = "active"
+		}
+		candidates = append(candidates, accountHealthGroupCandidate{
+			ID:       groups[i].ID,
+			Name:     groups[i].Name,
+			Platform: groups[i].Platform,
+			Status:   status,
+		})
+	}
+	response.Paginated(c, candidates, total, page, pageSize)
+}
+
 // ListCompositeRoutes handles listing composite model routes for one group.
 // GET /api/v1/admin/groups/:id/composite-routes
 func (h *GroupHandler) ListCompositeRoutes(c *gin.Context) {

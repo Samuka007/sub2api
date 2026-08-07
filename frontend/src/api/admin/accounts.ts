@@ -26,6 +26,24 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState
 } from '@/types'
+import type { GroupAccountHealthDetectionResult } from './groups'
+
+export interface AccountHealthCandidate {
+  id: number
+  name: string
+  platform: string
+  type: string
+  status: string
+  group_id: number
+  group_name: string
+  group_ids: number[]
+  group_names: string[]
+}
+
+export interface AccountHealthDetectionResult extends GroupAccountHealthDetectionResult {
+  account_id: number
+  account_name: string
+}
 
 /**
  * List all accounts with pagination
@@ -214,6 +232,41 @@ export async function checkMixedChannelRisk(
  */
 export async function deleteAccount(id: number): Promise<{ message: string }> {
   const { data } = await apiClient.delete<{ message: string }>(`/admin/accounts/${id}`)
+  return data
+}
+
+/** List existing OpenAI accounts bound to one or more selected groups. */
+export async function listAccountHealthCandidates(
+  page: number,
+  pageSize: number,
+  groupIds: number[],
+  options?: { signal?: AbortSignal }
+): Promise<PaginatedResponse<AccountHealthCandidate>> {
+  const { data } = await apiClient.get<PaginatedResponse<AccountHealthCandidate>>(
+    '/admin/accounts/account-health-candidates',
+    {
+      params: {
+        page,
+        page_size: pageSize,
+        group_ids: groupIds.join(',')
+      },
+      signal: options?.signal
+    }
+  )
+  return data
+}
+
+/** Detect one existing account with its server-side notes and selected group scope. */
+export async function detectAccountHealth(
+  id: number,
+  groupId: number,
+  options?: { signal?: AbortSignal }
+): Promise<AccountHealthDetectionResult> {
+  const { data } = await apiClient.post<AccountHealthDetectionResult>(
+    `/admin/accounts/${id}/account-health-detection`,
+    { group_id: groupId },
+    { signal: options?.signal, timeout: 65_000 }
+  )
   return data
 }
 
@@ -979,6 +1032,8 @@ export const accountsAPI = {
   update,
   checkMixedChannelRisk,
   delete: deleteAccount,
+  listAccountHealthCandidates,
+  detectAccountHealth,
   toggleStatus,
   testAccount,
   refreshCredentials,

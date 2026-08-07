@@ -25,6 +25,8 @@ type sparkShadowRepoStub struct {
 	groupsOf          map[int64][]int64 // accountID → []groupIDs
 	createShadowErr   error
 	createShadowCalls int
+	deleteErrByID     map[int64]error
+	deleteCalls       []int64
 }
 
 func newSparkShadowRepoStub() *sparkShadowRepoStub {
@@ -143,6 +145,10 @@ func (s *sparkShadowRepoStub) Update(_ context.Context, account *Account) error 
 }
 
 func (s *sparkShadowRepoStub) Delete(_ context.Context, id int64) error {
+	s.deleteCalls = append(s.deleteCalls, id)
+	if err := s.deleteErrByID[id]; err != nil {
+		return err
+	}
 	delete(s.accounts, id)
 	delete(s.mockAccountRepoForGemini.accountsByID, id)
 	return nil

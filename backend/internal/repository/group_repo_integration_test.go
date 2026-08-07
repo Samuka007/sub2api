@@ -162,6 +162,7 @@ func (s *GroupRepoSuite) TestGetByID_NotFound() {
 func (s *GroupRepoSuite) TestGetByIDLite_DoesNotUseAccountCount() {
 	group := &service.Group{
 		Name:             "lite-group",
+		Description:      "health detector description",
 		Platform:         service.PlatformAnthropic,
 		RateMultiplier:   1.0,
 		IsExclusive:      false,
@@ -176,6 +177,7 @@ func (s *GroupRepoSuite) TestGetByIDLite_DoesNotUseAccountCount() {
 	got, err := repo.GetByIDLite(s.ctx, group.ID)
 	s.Require().NoError(err)
 	s.Require().Equal(group.ID, got.ID)
+	s.Require().Equal(group.Description, got.Description)
 	s.Require().False(spy.called, "expected no direct sql executor usage")
 }
 

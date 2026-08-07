@@ -14,6 +14,10 @@ export default {
       resolve: 'Mark resolved',
       deleteAccount: 'Delete account',
       deletingAccount: 'Deleting account',
+      deleteAllAccounts: 'Delete all accounts',
+      deleteAllOpenOnly: 'Only open accounts can be deleted',
+      preparingDeleteAllAccounts: 'Counting accounts',
+      deletingAllAccounts: 'Deleting {completed}/{total}',
       exportNotes: 'Export anomaly account notes',
       exportingNotes: 'Exporting'
     },
@@ -74,6 +78,10 @@ export default {
       title: 'Delete anomaly account',
       message: 'Permanently delete account "{name}" ({email}, ID: {id})? This action cannot be undone.'
     },
+    deleteAllConfirm: {
+      title: 'Delete all anomaly accounts',
+      message: 'Permanently delete {count} open HTTP 401 anomaly accounts in the current search scope? This action cannot be undone.'
+    },
     messages: {
       loadOverviewFailed: 'Failed to load automation status',
       loadGroupsFailed: 'Failed to load OpenAI groups',
@@ -89,6 +97,10 @@ export default {
       accountDeleted: 'Account "{name}" deleted',
       deleteAccountFailed: 'Failed to delete anomaly account',
       deleteAccountNoLongerEligible: 'The anomaly status changed. The account was not deleted; refresh and try again.',
+      noAccountsToDelete: 'No open HTTP 401 anomaly accounts can be deleted in the current search scope',
+      prepareDeleteAllFailed: 'Failed to count accounts for deletion',
+      accountsDeleted: 'Deleted {count} accounts',
+      deleteAllSummary: 'Bulk deletion finished: {deleted} deleted, {stale} changed status, {failed} failed',
       noAccountNotesToExport: 'No anomaly accounts have notes to export',
       accountNotesExported: 'Exported notes for {count} anomaly accounts',
       exportAccountNotesFailed: 'Failed to export anomaly account notes'

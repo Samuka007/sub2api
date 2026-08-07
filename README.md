@@ -128,7 +128,8 @@ Model IQ 为已登录用户提供 GPT 模型测试结果对比页面。页面会
 系统只处理目标分组内状态正常的 OpenAI OAuth、非影子 Plus 账号。当任一受支持的额度窗口
 达到阈值且账号存在可用重置次数时，任务会消耗 1 次重置次数刷新额度窗口。页面展示上次和
 下次执行时间、扫描统计和运行状态，并集中记录查询用量、查询重置次数或执行重置时出现的
-401 异常；管理员可以搜索、筛选和标记异常已解决，账号恢复授权后也会在后续扫描中自动关闭异常。
+401 异常；管理员可以搜索、筛选、标记异常已解决，或按当前搜索范围一键删除全部待处理
+401 异常账号，账号恢复授权后也会在后续扫描中自动关闭异常。
 
 重置流程使用 30 分钟冷却、持久化幂等 request ID 和 PostgreSQL advisory lock，避免失败重试
 或多实例并发造成重复消耗。单次扫描最多并发处理 3 个账号。
@@ -163,6 +164,34 @@ request ID；Spark 维度不会消费父账号的 reset credit。
 
 恢复记录中曾使用“自定义版本比较”这一表述。私有补丁中没有独立的应用升级版本比较器，
 这里实际指的是 `ModelIqView.vue` 中的模型对比排序和趋势计算逻辑。
+
+### 7. OpenAI 账号健康检测
+
+管理员可以在「管理后台 → 账号健康检测」选择一个或多个启用或停用的 OpenAI 分组，再加载这些分组中
+已有的 OpenAI 账号并按受控并发逐个检测。分组不会默认选中，变更分组范围后需要重新加载账号。
+每个用于检测的账号备注必须恰好包含一条可识别账号记录，例如
+`邮箱---密码---token---邮件访问链接`；邮件访问链接必须使用 HTTPS。仅有链接时，也可以从链接的
+`mail`、`email`、`address`、`user` 或 `login` 参数识别邮箱。空备注、缺少邮箱或链接、混合无效行以及多条记录都会作为
+“格式问题检测失败”保留在结果表中，不会阻断其他账号。
+
+检测请求只提交账号 ID 和所选分组 ID；服务端重新校验账号与分组的绑定关系、读取账号备注并访问邮件页面，
+识别 Plus、封禁、恢复、风险警告、账号不匹配、邮件日期和付款方式等证据。页面支持筛选、排序、分页、
+1–10 并发和随时停止，并展示 Plus 日期、封禁日期、存活时长、证据分、邮件数、耗时与检测时间。
+检测本身不会修改分组、账号、额度或调度状态。
+
+结果表的账号勾选只用于删除，不影响检测范围；管理员可以删除单个账号、删除选中账号，或在再次确认后
+一键删除当前加载的全部账号。批量删除按每批 500 个账号执行，部分失败时保留失败账号并显示汇总结果。
+
+邮件访问链接仅用于服务端检测，不会出现在候选分组、候选账号列表或检测 API 的响应中。服务端只允许同主机 HTTPS 重定向，
+并逐跳校验实际拨号 IP，拒绝私网、回环、链路本地、保留地址及 `198.18.0.0/15`，并限制解压后的响应体大小。检测结果只
+保存在当前页面；变更分组范围或重新加载账号会清空结果。
+
+核心文件：
+
+- [`frontend/src/features/account-health-detector/scanner.ts`](frontend/src/features/account-health-detector/scanner.ts)
+- [`frontend/src/views/admin/AccountHealthDetectorView.vue`](frontend/src/views/admin/AccountHealthDetectorView.vue)
+- [`frontend/src/views/admin/__tests__/AccountHealthDetectorView.spec.ts`](frontend/src/views/admin/__tests__/AccountHealthDetectorView.spec.ts)
+- [`backend/internal/service/account_health_detector.go`](backend/internal/service/account_health_detector.go)
 
 ## 系统总体架构
 
@@ -295,7 +324,9 @@ KeysView
 | `PUT` | `/admin/openai/plus-quota-automation` | 管理员 | 更新目标分组、周期和用量阈值 |
 | `POST` | `/admin/openai/plus-quota-automation/run` | 管理员 | 立即发起一次 Plus 配额扫描 |
 | `GET` | `/admin/openai/plus-quota-anomalies` | 管理员 | 分页查询 Plus 账号 401 异常 |
+| `GET` | `/admin/openai/plus-quota-anomalies/deletion-candidates` | 管理员 | 获取当前搜索范围内可删除账号的固定 ID 快照 |
 | `POST` | `/admin/openai/plus-quota-anomalies/:accountId/resolve` | 管理员 | 将指定账号异常标记为已解决 |
+| `DELETE` | `/admin/openai/plus-quota-anomalies/:accountId/account` | 管理员 | 原子校验并删除待处理 401 异常账号 |
 
 ## Model IQ 配置
 
@@ -397,8 +428,11 @@ backend/internal/service/quota_recovery_service.go
 ```text
 frontend/src/api/modelIq.ts
 frontend/src/api/admin/plusQuotaAutomation.ts
+frontend/src/features/account-health-detector/scanner.ts
 frontend/src/components/keys/GroupPricingPopover.vue
 frontend/src/router/__tests__/model-iq-route.spec.ts
+frontend/src/views/admin/ModelRadarView.vue
+frontend/src/views/admin/AccountHealthDetectorView.vue
 frontend/src/views/admin/PlusQuotaAutomationView.vue
 frontend/src/views/user/ModelIqView.vue
 frontend/src/views/user/__tests__/ModelIqView.spec.ts

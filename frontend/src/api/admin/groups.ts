@@ -21,6 +21,82 @@ export interface LiveCapability {
   reason?: string
 }
 
+export type GroupAccountHealthDetectionStatus =
+  | 'deactivated'
+  | 'warning'
+  | 'reactivated'
+  | 'no_evidence'
+  | 'mismatch'
+  | 'fetch_error'
+  | 'parse_error'
+  | 'format_error'
+
+export type GroupAccountHealthFormatIssue =
+  | 'empty'
+  | 'missing_email'
+  | 'missing_url'
+  | 'multiple_records'
+  | 'invalid_url'
+  | 'mixed_invalid_lines'
+
+export type GroupAccountHealthEvidence =
+  | 'account_mismatch'
+  | 'plus_after_deactivation'
+  | 'dynamic_mailbox'
+  | 'reactivated_notice'
+  | 'deactivation_semantics'
+  | 'openai_anchor'
+  | 'account_unavailable'
+  | 'policy_violation'
+  | 'appeal_available'
+  | 'deactivation_subject'
+  | 'warning_notice'
+  | 'plus_marker'
+  | 'subscription_confirmed'
+  | 'order_number'
+  | 'payment_method'
+  | 'order_date'
+  | 'subscription_management'
+
+export type GroupAccountHealthLifespanStatus =
+  | 'unavailable'
+  | 'active'
+  | 'ended'
+  | 'ban_date_unknown'
+  | 'invalid_date'
+
+export interface GroupAccountHealthCandidate {
+  id: number
+  name: string
+  platform: GroupPlatform
+  status: 'active' | 'inactive'
+}
+
+export interface GroupAccountHealthDetectionResult {
+  group_id: number
+  group_name: string
+  account_email: string
+  status: GroupAccountHealthDetectionStatus
+  format_issue?: GroupAccountHealthFormatIssue
+  score: number
+  language: string
+  evidence: GroupAccountHealthEvidence[]
+  message_date: string
+  associated_email: string
+  messages_scanned: number
+  pages_scanned: number
+  plus_detected: boolean
+  plus_score: number
+  plus_language: string
+  plus_date: string
+  payment_method: string
+  lifespan_status: GroupAccountHealthLifespanStatus
+  lifespan_seconds: number | null
+  ban_date: string
+  elapsed_ms: number
+  checked_at: string
+}
+
 /**
  * List all groups with pagination
  * @param page - Page number (default: 1)
@@ -102,6 +178,22 @@ export async function getLiveCapability(): Promise<LiveCapability> {
  */
 export async function getById(id: number): Promise<AdminGroup> {
   const { data } = await apiClient.get<AdminGroup>(`/admin/groups/${id}`)
+  return data
+}
+
+/** List OpenAI groups without exposing descriptions or mailbox credentials. */
+export async function listAccountHealthCandidates(
+  page: number = 1,
+  pageSize: number = 100,
+  options?: { signal?: AbortSignal }
+): Promise<PaginatedResponse<GroupAccountHealthCandidate>> {
+  const { data } = await apiClient.get<PaginatedResponse<GroupAccountHealthCandidate>>(
+    '/admin/groups/account-health-candidates',
+    {
+      params: { page, page_size: pageSize },
+      signal: options?.signal
+    }
+  )
   return data
 }
 
@@ -483,6 +575,7 @@ export const groupsAPI = {
   getAllIncludingInactive,
   getLiveCapability,
   getById,
+  listAccountHealthCandidates,
   getModelsListCandidates,
   create,
   duplicate,

@@ -20,6 +20,7 @@ type plusQuotaAutomationRepoStub struct {
 	updateExtraErrors []error
 	deleteAnomalyErr  error
 	deleteAnomalyIDs  []int64
+	listAllCalls      int
 }
 
 func (r *plusQuotaAutomationRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -56,6 +57,7 @@ func (r *plusQuotaAutomationRepoStub) ListAllWithFilters(
 ) ([]Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.listAllCalls++
 	result := make([]Account, 0, len(r.accounts))
 	for _, account := range r.accounts {
 		result = append(result, *account)
@@ -403,6 +405,50 @@ func TestNormalizePlusQuotaAnomalyNote(t *testing.T) {
 	require.Empty(t, normalizePlusQuotaAnomalyNote(&empty))
 	multiline := "one\r\ntwo\nthree\u0085four\u2028five\u2029six"
 	require.Equal(t, "one two three four five six", normalizePlusQuotaAnomalyNote(&multiline))
+}
+
+func TestPlusQuotaAutomationDeletionCandidatesAreOneFilteredIDSnapshot(t *testing.T) {
+	account, usage := plusQuotaEligibleTestAccount(10)
+	account.Name = "target-ten"
+	account.Extra[PlusQuotaAnomalyExtraKey] = PlusQuotaAnomaly{
+		Status:     PlusQuotaAnomalyStatusOpen,
+		HTTPStatus: http.StatusUnauthorized,
+	}
+	svc, repo, _ := newPlusQuotaAutomationTestService(t, account, usage)
+
+	second, _ := plusQuotaEligibleTestAccount(2)
+	second.Name = "other"
+	second.Credentials["email"] = "target@example.com"
+	second.Extra[PlusQuotaAnomalyExtraKey] = PlusQuotaAnomaly{
+		Status:     PlusQuotaAnomalyStatusOpen,
+		HTTPStatus: http.StatusUnauthorized,
+	}
+	resolved, _ := plusQuotaEligibleTestAccount(3)
+	resolved.Name = "target-resolved"
+	resolved.Extra[PlusQuotaAnomalyExtraKey] = PlusQuotaAnomaly{
+		Status:     PlusQuotaAnomalyStatusResolved,
+		HTTPStatus: http.StatusUnauthorized,
+	}
+	forbidden, _ := plusQuotaEligibleTestAccount(4)
+	forbidden.Name = "target-forbidden"
+	forbidden.Extra[PlusQuotaAnomalyExtraKey] = PlusQuotaAnomaly{
+		Status:     PlusQuotaAnomalyStatusOpen,
+		HTTPStatus: http.StatusForbidden,
+	}
+	repo.accounts[second.ID] = second
+	repo.accounts[resolved.ID] = resolved
+	repo.accounts[forbidden.ID] = forbidden
+
+	snapshot, err := svc.GetAnomalyDeletionCandidates(context.Background(), " TARGET ")
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 10}, snapshot.AccountIDs)
+	require.Equal(t, 1, repo.listAllCalls)
+
+	resolved.Extra[PlusQuotaAnomalyExtraKey] = PlusQuotaAnomaly{
+		Status:     PlusQuotaAnomalyStatusOpen,
+		HTTPStatus: http.StatusUnauthorized,
+	}
+	require.Equal(t, []int64{2, 10}, snapshot.AccountIDs)
 }
 
 func TestPlusQuotaAutomationRecordsResetCreditDetails401AtCreditsStage(t *testing.T) {

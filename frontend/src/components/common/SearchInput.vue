@@ -6,8 +6,10 @@
     <input
       :value="modelValue"
       type="text"
-      class="input pl-10"
+      class="input pl-10 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500 dark:disabled:bg-dark-700 dark:disabled:text-dark-400"
       :placeholder="placeholder"
+      :aria-label="ariaLabel || placeholder"
+      :disabled="disabled"
       @input="handleInput"
     />
   </div>
@@ -20,10 +22,13 @@ import Icon from '@/components/icons/Icon.vue'
 const props = withDefaults(defineProps<{
   modelValue: string
   placeholder?: string
+  ariaLabel?: string
   debounceMs?: number
+  disabled?: boolean
 }>(), {
   placeholder: 'Search...',
-  debounceMs: 300
+  debounceMs: 300,
+  disabled: false
 })
 
 const emit = defineEmits<{

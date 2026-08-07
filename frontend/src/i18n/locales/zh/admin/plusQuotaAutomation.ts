@@ -14,6 +14,10 @@ export default {
       resolve: '标记已解决',
       deleteAccount: '删除账号',
       deletingAccount: '正在删除账号',
+      deleteAllAccounts: '一键删除全部',
+      deleteAllOpenOnly: '仅支持删除待处理账号',
+      preparingDeleteAllAccounts: '正在统计账号',
+      deletingAllAccounts: '正在删除 {completed}/{total}',
       exportNotes: '导出异常账号备注',
       exportingNotes: '正在导出'
     },
@@ -74,6 +78,10 @@ export default {
       title: '确认删除异常账号',
       message: '将永久删除账号“{name}”（{email}，ID：{id}）。此操作无法撤销，确定继续吗？'
     },
+    deleteAllConfirm: {
+      title: '确认删除全部异常账号',
+      message: '将永久删除当前搜索范围内的 {count} 个待处理 401 异常账号。此操作无法撤销，确定继续吗？'
+    },
     messages: {
       loadOverviewFailed: '加载自动刷新状态失败',
       loadGroupsFailed: '加载 OpenAI 分组失败',
@@ -89,6 +97,10 @@ export default {
       accountDeleted: '账号“{name}”已删除',
       deleteAccountFailed: '删除异常账号失败',
       deleteAccountNoLongerEligible: '账号异常状态已变化，未执行删除，请刷新后重试',
+      noAccountsToDelete: '当前搜索范围内没有可删除的待处理 401 异常账号',
+      prepareDeleteAllFailed: '统计待删除账号失败',
+      accountsDeleted: '已删除 {count} 个账号',
+      deleteAllSummary: '批量删除完成：成功 {deleted} 个，状态已变化 {stale} 个，失败 {failed} 个',
       noAccountNotesToExport: '当前异常账号没有可导出的备注',
       accountNotesExported: '已导出 {count} 个异常账号的备注',
       exportAccountNotesFailed: '导出异常账号备注失败'

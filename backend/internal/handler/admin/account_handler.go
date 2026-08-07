@@ -180,6 +180,14 @@ type BulkUpdateAccountFilters struct {
 	PrivacyMode string `json:"privacy_mode"`
 }
 
+const (
+	maxAccountHealthCandidateGroups = 50
+)
+
+type accountHealthDetectionRequest struct {
+	GroupID int64 `json:"group_id" binding:"required,gt=0"`
+}
+
 // CheckMixedChannelRequest represents check mixed channel risk request
 type CheckMixedChannelRequest struct {
 	Platform  string  `json:"platform" binding:"required"`
@@ -696,6 +704,63 @@ func (h *AccountHandler) List(c *gin.Context) {
 	response.Paginated(c, result, total, page, pageSize)
 }
 
+// ListAccountHealthCandidates returns existing OpenAI accounts in the selected groups.
+// The response intentionally omits credentials, account extra fields, account notes, and group descriptions.
+// GET /api/v1/admin/accounts/account-health-candidates?group_ids=1,2
+func (h *AccountHandler) ListAccountHealthCandidates(c *gin.Context) {
+	groupIDs, err := parseAccountHealthGroupIDs(c.Query("group_ids"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	page, pageSize := response.ParsePagination(c)
+	candidates, err := h.adminService.ListAccountHealthCandidates(c.Request.Context(), groupIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	total := int64(len(candidates))
+	start := (page - 1) * pageSize
+	if start > len(candidates) {
+		start = len(candidates)
+	}
+	end := start + pageSize
+	if end > len(candidates) {
+		end = len(candidates)
+	}
+	response.Paginated(c, candidates[start:end], total, page, pageSize)
+}
+
+func parseAccountHealthGroupIDs(raw string) ([]int64, error) {
+	parts := strings.Split(raw, ",")
+	groupIDs := make([]int64, 0, len(parts))
+	seen := make(map[int64]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		groupID, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || groupID <= 0 {
+			return nil, infraerrors.BadRequest("INVALID_ACCOUNT_HEALTH_GROUPS", "group_ids must contain positive integers")
+		}
+		if _, exists := seen[groupID]; exists {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		groupIDs = append(groupIDs, groupID)
+	}
+	if len(groupIDs) == 0 {
+		return nil, infraerrors.BadRequest("ACCOUNT_HEALTH_GROUPS_REQUIRED", "group_ids is required")
+	}
+	if len(groupIDs) > maxAccountHealthCandidateGroups {
+		return nil, infraerrors.BadRequest("TOO_MANY_ACCOUNT_HEALTH_GROUPS", "too many groups selected")
+	}
+	return groupIDs, nil
+}
+
 func buildAccountsListETag(
 	items []AccountWithConcurrency,
 	total int64,
@@ -1046,7 +1111,7 @@ func (h *AccountHandler) scheduleOpenAIResponsesProbe(account *service.Account) 
 // DELETE /api/v1/admin/accounts/:id
 func (h *AccountHandler) Delete(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || accountID <= 0 {
 		response.BadRequest(c, "Invalid account ID")
 		return
 	}
@@ -1058,6 +1123,30 @@ func (h *AccountHandler) Delete(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{"message": "Account deleted successfully"})
+}
+
+// DetectAccountHealth checks one existing account using its server-side notes.
+// The selected group is used only to revalidate the account's detection scope.
+// POST /api/v1/admin/accounts/:id/account-health-detection
+func (h *AccountHandler) DetectAccountHealth(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+
+	var req accountHealthDetectionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	result, err := h.adminService.DetectAccountHealth(c.Request.Context(), accountID, req.GroupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
 }
 
 // TestAccountRequest represents the request body for testing an account

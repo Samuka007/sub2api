@@ -77,6 +77,18 @@ func (h *PlusQuotaAutomationHandler) ListAnomalies(c *gin.Context) {
 	response.Success(c, result)
 }
 
+func (h *PlusQuotaAutomationHandler) GetAnomalyDeletionCandidates(c *gin.Context) {
+	result, err := h.service.GetAnomalyDeletionCandidates(
+		c.Request.Context(),
+		c.Query("search"),
+	)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 func (h *PlusQuotaAutomationHandler) ExportAnomalyNotes(c *gin.Context) {
 	notes, err := h.service.ExportOpenAnomalyNotes(c.Request.Context())
 	if err != nil {

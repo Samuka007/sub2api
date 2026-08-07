@@ -36,9 +36,10 @@
         <label class="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-300">
           <input
             type="checkbox"
-            class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-600 dark:bg-dark-800"
+            class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:bg-dark-800"
             :checked="allVisibleSelected"
             :indeterminate="someVisibleSelected"
+            :disabled="selectionDisabled"
             data-test="select-all-mobile"
             @change="toggleAllVisible(($event.target as HTMLInputElement).checked)"
           />
@@ -59,8 +60,9 @@
           <div v-if="selectable" class="flex justify-end">
             <input
               type="checkbox"
-              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-600 dark:bg-dark-800"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:bg-dark-800"
               :checked="isRowSelected(row, index)"
+              :disabled="selectionDisabled"
               :aria-label="getRowSelectionLabel(row, index)"
               data-test="select-row"
               @click.stop
@@ -109,9 +111,10 @@
           >
             <input
               type="checkbox"
-              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-600 dark:bg-dark-800"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:bg-dark-800"
               :checked="allVisibleSelected"
               :indeterminate="someVisibleSelected"
+              :disabled="selectionDisabled"
               :aria-label="t('common.selectAll')"
               data-test="select-all"
               @change="toggleAllVisible(($event.target as HTMLInputElement).checked)"
@@ -122,21 +125,25 @@
             :key="column.key"
             scope="col"
             :aria-sort="column.sortable ? getColumnAriaSort(column.key) : undefined"
+            :tabindex="column.sortable ? 0 : undefined"
             :class="[
               'sticky-header-cell py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-dark-400',
               getAdaptivePaddingClass(),
-              { 'cursor-pointer hover:bg-gray-100 dark:hover:bg-dark-700': column.sortable },
+              {
+                'cursor-pointer hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 dark:hover:bg-dark-700': column.sortable
+              },
               getStickyColumnClass(column, index),
               column.class
             ]"
             @click="column.sortable && handleSort(column.key)"
+            @keydown="column.sortable && handleSortKeydown($event, column.key)"
           >
             <div :class="['flex items-center space-x-1', getHeaderContentAlignmentClass(column)]">
               <slot
                 :name="`header-${column.key}`"
                 :column="column"
-                :sort-key="sortKey"
-                :sort-order="sortOrder"
+                :sort-key="activeSortKey"
+                :sort-order="activeSortOrder"
               >
                 <span>{{ column.label }}</span>
               </slot>
@@ -185,18 +192,24 @@
             :colspan="tableColumnCount"
             :class="['py-12 text-center text-gray-500 dark:text-dark-400', getAdaptivePaddingClass()]"
           >
-            <slot name="empty">
-              <div class="flex flex-col items-center">
-                <Icon
-                  name="inbox"
-                  size="xl"
-                  class="mb-4 h-12 w-12 text-gray-400 dark:text-dark-500"
-                />
-                <p class="text-lg font-medium text-gray-900 dark:text-gray-100">
-                  {{ t('empty.noData') }}
-                </p>
-              </div>
-            </slot>
+            <div
+              class="table-empty-state"
+              :style="emptyStateViewportStyle"
+              data-test="table-empty-state"
+            >
+              <slot name="empty">
+                <div class="flex flex-col items-center">
+                  <Icon
+                    name="inbox"
+                    size="xl"
+                    class="mb-4 h-12 w-12 text-gray-400 dark:text-dark-500"
+                  />
+                  <p class="text-lg font-medium text-gray-900 dark:text-gray-100">
+                    {{ t('empty.noData') }}
+                  </p>
+                </div>
+              </slot>
+            </div>
           </td>
         </tr>
 
@@ -223,8 +236,9 @@
             <td v-if="selectable" class="w-11 min-w-11 px-3 py-4 text-center">
               <input
                 type="checkbox"
-                class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-600 dark:bg-dark-800"
+                class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:bg-dark-800"
                 :checked="isRowSelected(item.row, item.index)"
+                :disabled="selectionDisabled"
                 :aria-label="getRowSelectionLabel(item.row, item.index)"
                 data-test="select-row"
                 @click.stop
@@ -286,6 +300,7 @@ const emit = defineEmits<{
 // 表格容器引用
 const tableWrapperRef = ref<HTMLElement | null>(null)
 const isScrollable = ref(false)
+const tableViewportWidth = ref(0)
 const actionsColumnNeedsExpanding = ref(false)
 
 // --- 虚拟滚动「整表空白」根治 ---
@@ -312,6 +327,7 @@ const observeElementRectNonZero = (
 // 检查是否可滚动
 const checkScrollable = () => {
   if (tableWrapperRef.value) {
+    tableViewportWidth.value = tableWrapperRef.value.clientWidth
     isScrollable.value = tableWrapperRef.value.scrollWidth > tableWrapperRef.value.clientWidth
   }
 }
@@ -444,6 +460,12 @@ interface Props {
   defaultSortKey?: string
   defaultSortOrder?: 'asc' | 'desc'
   /**
+   * Controlled sort state. When provided, it takes precedence over the
+   * default/persisted state and is kept in sync without remounting the table.
+   */
+  sortKey?: string
+  sortOrder?: 'asc' | 'desc'
+  /**
    * Persist sort state (key + order) to localStorage using this key.
    * If provided, DataTable will load the stored sort state on mount.
    */
@@ -469,6 +491,8 @@ interface Props {
   selectable?: boolean
   /** Selected row keys. Keys outside the current data page are preserved. */
   selectedKeys?: Array<string | number>
+  /** Disable selection controls while preserving the selection column layout. */
+  selectionDisabled?: boolean
   /** Accessible label for a row selection checkbox. */
   selectionLabel?: string | ((row: any) => string)
 }
@@ -481,11 +505,12 @@ const props = withDefaults(defineProps<Props>(), {
   defaultSortOrder: 'asc',
   serverSideSort: false,
   selectable: false,
+  selectionDisabled: false,
   selectedKeys: () => []
 })
 
-const sortKey = ref<string>('')
-const sortOrder = ref<'asc' | 'desc'>('asc')
+const activeSortKey = ref<string>('')
+const activeSortOrder = ref<'asc' | 'desc'>('asc')
 const actionsExpanded = ref(false)
 
 type PersistedSortState = {
@@ -549,21 +574,28 @@ const resolveInitialSortState = (): PersistedSortState | null => {
   return { key, order: normalizeSortOrder(props.defaultSortOrder) }
 }
 
+const resolveControlledSortState = (): PersistedSortState | null => {
+  if (props.sortKey === undefined) return null
+  const key = normalizeSortKey(props.sortKey)
+  if (!key) return null
+  return { key, order: normalizeSortOrder(props.sortOrder) }
+}
+
 const applySortState = (state: PersistedSortState | null) => {
   if (!state) return
-  sortKey.value = state.key
-  sortOrder.value = state.order
+  activeSortKey.value = state.key
+  activeSortOrder.value = state.order
 }
 
 const getSortIndicatorClass = (key: string, order: 'asc' | 'desc') => {
-  return sortKey.value === key && sortOrder.value === order
+  return activeSortKey.value === key && activeSortOrder.value === order
     ? 'text-primary-600 dark:text-primary-400'
     : 'text-gray-300 transition-colors dark:text-dark-500'
 }
 
 const getColumnAriaSort = (key: string) => {
-  if (sortKey.value !== key) return 'none'
-  return sortOrder.value === 'asc' ? 'ascending' : 'descending'
+  if (activeSortKey.value !== key) return 'none'
+  return activeSortOrder.value === 'asc' ? 'ascending' : 'descending'
 }
 
 const getHeaderContentAlignmentClass = (column: Column) => {
@@ -670,28 +702,34 @@ watch(actionsExpanded, async () => {
 
 const handleSort = (key: string) => {
   let newOrder: 'asc' | 'desc' = 'asc'
-  if (sortKey.value === key) {
-    newOrder = sortOrder.value === 'asc' ? 'desc' : 'asc'
+  if (activeSortKey.value === key) {
+    newOrder = activeSortOrder.value === 'asc' ? 'desc' : 'asc'
   }
 
   if (props.serverSideSort) {
     // Server-side sort mode: emit event and update internal state for UI feedback
-    sortKey.value = key
-    sortOrder.value = newOrder
+    activeSortKey.value = key
+    activeSortOrder.value = newOrder
     emit('sort', key, newOrder)
   } else {
     // Client-side sort mode: just update internal state
-    sortKey.value = key
-    sortOrder.value = newOrder
+    activeSortKey.value = key
+    activeSortOrder.value = newOrder
   }
+}
+
+const handleSortKeydown = (event: KeyboardEvent, key: string) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  handleSort(key)
 }
 
 const sortedData = computed(() => {
   // Server-side sort mode: return data as-is (server handles sorting)
-  if (props.serverSideSort || !sortKey.value || !props.data) return props.data
+  if (props.serverSideSort || !activeSortKey.value || !props.data) return props.data
 
-  const key = sortKey.value
-  const order = sortOrder.value
+  const key = activeSortKey.value
+  const order = activeSortOrder.value
 
   // Stable sort (tie-break with original index) to avoid jitter when values are equal.
   return props.data
@@ -734,6 +772,7 @@ const getRowSelectionLabel = (row: any, index: number) => {
 }
 
 const toggleRowSelection = (row: any, index: number, checked: boolean) => {
+  if (props.selectionDisabled) return
   const next = new Set(props.selectedKeys)
   const key = resolveRowKey(row, index)
   if (checked) next.add(key)
@@ -742,6 +781,7 @@ const toggleRowSelection = (row: any, index: number, checked: boolean) => {
 }
 
 const toggleAllVisible = (checked: boolean) => {
+  if (props.selectionDisabled) return
   const next = new Set(props.selectedKeys)
   for (const key of visibleRowKeys.value) {
     if (checked) next.add(key)
@@ -896,33 +936,65 @@ const getAdaptivePaddingClass = () => {
   }
 }
 
+const getAdaptiveHorizontalPadding = () => {
+  const columnCount = props.columns.length
+  if (columnCount >= 10) return 8
+  if (columnCount >= 7) return 12
+  if (columnCount >= 5) return 16
+  return 24
+}
+
+const emptyStateViewportStyle = computed(() => {
+  if (tableViewportWidth.value <= 0) return undefined
+  const contentWidth = Math.max(
+    tableViewportWidth.value - (getAdaptiveHorizontalPadding() * 2),
+    0
+  )
+  return { width: `${contentWidth}px` }
+})
+
 // Init + keep persisted sort state consistent with current columns
 const didInitSort = ref(false)
 
 onMounted(() => {
-  const initial = resolveInitialSortState()
+  const initial = resolveControlledSortState() ?? resolveInitialSortState()
   applySortState(initial)
   didInitSort.value = true
 })
 
 watch(
+  [() => props.sortKey, () => props.sortOrder],
+  ([nextKey, nextOrder]) => {
+    if (nextKey === undefined) return
+    const key = normalizeSortKey(nextKey)
+    if (!key) {
+      activeSortKey.value = ''
+      activeSortOrder.value = 'asc'
+      return
+    }
+    applySortState({ key, order: normalizeSortOrder(nextOrder) })
+  },
+  { flush: 'sync' }
+)
+
+watch(
   columnsSignature,
   () => {
     // If current sort key is no longer sortable/visible, fall back to default/persisted.
-    const normalized = normalizeSortKey(sortKey.value)
-    if (!sortKey.value) {
-      const initial = resolveInitialSortState()
+    const normalized = normalizeSortKey(activeSortKey.value)
+    if (!activeSortKey.value) {
+      const initial = resolveControlledSortState() ?? resolveInitialSortState()
       applySortState(initial)
       return
     }
 
     if (!normalized) {
-      const fallback = resolveInitialSortState()
+      const fallback = resolveControlledSortState() ?? resolveInitialSortState()
       if (fallback) {
         applySortState(fallback)
       } else {
-        sortKey.value = ''
-        sortOrder.value = 'asc'
+        activeSortKey.value = ''
+        activeSortOrder.value = 'asc'
       }
     }
   },
@@ -930,7 +1002,7 @@ watch(
 )
 
 watch(
-  [sortKey, sortOrder],
+  [activeSortKey, activeSortOrder],
   ([nextKey, nextOrder]) => {
     if (!didInitSort.value) return
     if (!props.sortStorageKey) return
@@ -978,6 +1050,11 @@ defineExpose({
 .table-body {
   position: relative;
   z-index: 0;
+}
+
+.table-empty-state {
+  position: sticky;
+  left: 0;
 }
 
 /* 所有表头单元格固定在顶部 */

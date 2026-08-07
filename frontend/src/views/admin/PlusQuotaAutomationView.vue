@@ -72,7 +72,7 @@
               <button
                 type="button"
                 class="btn btn-primary"
-                :disabled="runSubmitting || automationRunning || overviewLoading || !canRunAutomation"
+                :disabled="runSubmitting || automationRunning || overviewLoading || !canRunAutomation || deleteScopeLocked"
                 @click="showRunConfirm = true"
               >
                 <Icon
@@ -132,25 +132,52 @@
       <template #filters>
         <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <div class="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-            <SearchInput
-              v-model="filters.search"
-              class="w-full sm:w-72"
-              :placeholder="t('admin.plusQuotaAutomation.filters.searchPlaceholder')"
-              @search="handleSearch"
-            />
+            <fieldset
+              class="contents"
+              :disabled="deleteScopeLocked"
+            >
+              <SearchInput
+                v-model="filters.search"
+                class="w-full sm:w-72"
+                :class="{ 'opacity-60': deleteScopeLocked }"
+                :placeholder="t('admin.plusQuotaAutomation.filters.searchPlaceholder')"
+                @search="handleSearch"
+              />
+            </fieldset>
             <Select
               v-model="filters.status"
               class="w-full sm:w-40"
               :options="statusOptions"
+              :disabled="deleteScopeLocked"
               @change="handleStatusChange"
             />
           </div>
-          <div class="flex items-center gap-2 self-end sm:self-auto">
+          <div class="flex flex-wrap items-center justify-end gap-2 self-end sm:self-auto">
+            <button
+              type="button"
+              class="btn btn-danger"
+              data-test="delete-all-anomaly-accounts"
+              :class="{ 'cursor-not-allowed opacity-60': !canDeleteAllAccounts }"
+              :disabled="deleteAllButtonDisabled"
+              :aria-disabled="!canDeleteAllAccounts"
+              :aria-busy="bulkDeleteBusy"
+              :title="filters.status === 'open'
+                ? t('admin.plusQuotaAutomation.actions.deleteAllAccounts')
+                : t('admin.plusQuotaAutomation.actions.deleteAllOpenOnly')"
+              @click="requestDeleteAllAccounts"
+            >
+              <Icon
+                :name="bulkDeleteBusy ? 'refresh' : 'trash'"
+                size="sm"
+                :class="{ 'animate-spin': bulkDeleteBusy }"
+              />
+              <span aria-live="polite">{{ deleteAllButtonLabel }}</span>
+            </button>
             <button
               type="button"
               class="btn btn-secondary"
               data-test="export-account-notes"
-              :disabled="exportingNotes"
+              :disabled="exportingNotes || deleteScopeLocked"
               @click="exportAccountNotes"
             >
               <Icon
@@ -169,7 +196,7 @@
             <button
               type="button"
               class="btn btn-secondary"
-              :disabled="overviewLoading || anomaliesLoading"
+              :disabled="overviewLoading || anomaliesLoading || deleteScopeLocked"
               :title="t('common.refresh')"
               @click="refreshAll"
             >
@@ -265,7 +292,7 @@
               <button
                 type="button"
                 class="btn btn-secondary px-2.5 py-1.5 text-xs"
-                :disabled="resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
+                :disabled="deleteScopeLocked || resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
                 :title="t('admin.plusQuotaAutomation.actions.resolve')"
                 @click="resolveRow(row)"
               >
@@ -281,7 +308,7 @@
                 type="button"
                 class="btn btn-danger px-2.5 py-1.5 text-xs"
                 data-test="delete-anomaly-account"
-                :disabled="resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
+                :disabled="deleteScopeLocked || resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)"
                 :aria-busy="deletingAccountIds.has(row.account_id)"
                 :aria-label="t(
                   deletingAccountIds.has(row.account_id)
@@ -316,14 +343,21 @@
       </template>
 
       <template #pagination>
-        <Pagination
+        <fieldset
           v-if="pagination.total > 0"
-          :page="pagination.page"
-          :total="pagination.total"
-          :page-size="pagination.page_size"
-          @update:page="handlePageChange"
-          @update:pageSize="handlePageSizeChange"
-        />
+          class="contents"
+          data-test="anomaly-pagination-lock"
+          :disabled="deleteScopeLocked"
+        >
+          <Pagination
+            :class="{ 'opacity-60': deleteScopeLocked }"
+            :page="pagination.page"
+            :total="pagination.total"
+            :page-size="pagination.page_size"
+            @update:page="handlePageChange"
+            @update:pageSize="handlePageSizeChange"
+          />
+        </fieldset>
       </template>
     </TablePageLayout>
 
@@ -346,6 +380,16 @@
       danger
       @confirm="confirmDeleteAccount"
       @cancel="cancelDeleteAccount"
+    />
+    <ConfirmDialog
+      :show="showDeleteAllConfirm"
+      :title="t('admin.plusQuotaAutomation.deleteAllConfirm.title')"
+      :message="deleteAllConfirmationMessage"
+      :confirm-text="t('admin.plusQuotaAutomation.actions.deleteAllAccounts')"
+      :cancel-text="t('common.cancel')"
+      danger
+      @confirm="confirmDeleteAllAccounts"
+      @cancel="cancelDeleteAllAccounts"
     />
   </AppLayout>
 </template>
@@ -378,6 +422,9 @@ import Icon from '@/components/icons/Icon.vue'
 const { t } = useI18n()
 const appStore = useAppStore()
 
+const BULK_DELETE_CONCURRENCY = 4
+type BulkDeleteOutcome = 'deleted' | 'stale' | 'failed'
+
 const overview = ref<PlusQuotaAutomationOverview | null>(null)
 const groups = ref<AdminGroup[]>([])
 const anomalies = ref<PlusQuotaAnomaly[]>([])
@@ -390,6 +437,11 @@ const runSubmitting = ref(false)
 const showRunConfirm = ref(false)
 const showDeleteConfirm = ref(false)
 const deleteCandidate = ref<PlusQuotaAnomaly | null>(null)
+const preparingDeleteAll = ref(false)
+const deletingAllAccounts = ref(false)
+const showDeleteAllConfirm = ref(false)
+const deleteAllCandidates = ref<number[]>([])
+const deleteAllProgress = reactive({ completed: 0, total: 0 })
 const resolvingAccountIds = reactive(new Set<number>())
 const deletingAccountIds = reactive(new Set<number>())
 
@@ -461,6 +513,40 @@ const deleteConfirmationMessage = computed(() => {
     id: row.account_id
   })
 })
+const automationRunning = computed(() => overview.value?.state.running === true)
+const bulkDeleteBusy = computed(() => preparingDeleteAll.value || deletingAllAccounts.value)
+const deleteScopeLocked = computed(() => bulkDeleteBusy.value || showDeleteAllConfirm.value)
+const canDeleteAllAccounts = computed(() =>
+  filters.status === 'open'
+  && pagination.total > 0
+  && !anomaliesLoading.value
+  && !exportingNotes.value
+  && !automationRunning.value
+  && !runSubmitting.value
+  && !deleteScopeLocked.value
+  && resolvingAccountIds.size === 0
+  && deletingAccountIds.size === 0
+)
+const deleteAllButtonDisabled = computed(() =>
+  filters.status !== 'open' || pagination.total <= 0
+)
+const deleteAllButtonLabel = computed(() => {
+  if (preparingDeleteAll.value) {
+    return t('admin.plusQuotaAutomation.actions.preparingDeleteAllAccounts')
+  }
+  if (deletingAllAccounts.value) {
+    return t('admin.plusQuotaAutomation.actions.deletingAllAccounts', {
+      completed: deleteAllProgress.completed,
+      total: deleteAllProgress.total
+    })
+  }
+  return t('admin.plusQuotaAutomation.actions.deleteAllAccounts')
+})
+const deleteAllConfirmationMessage = computed(() =>
+  t('admin.plusQuotaAutomation.deleteAllConfirm.message', {
+    count: deleteAllCandidates.value.length
+  })
+)
 
 const configValid = computed(() =>
   Number.isInteger(configForm.group_id)
@@ -474,7 +560,6 @@ const configValid = computed(() =>
   && configForm.utilization_threshold <= 100
 )
 
-const automationRunning = computed(() => overview.value?.state.running === true)
 const canRunAutomation = computed(() => {
   const configuredGroupId = overview.value?.config.group_id ?? 0
   return configuredGroupId > 0
@@ -525,11 +610,13 @@ const summaryItems = computed(() => {
 
 let anomaliesAbortController: AbortController | null = null
 let notesExportAbortController: AbortController | null = null
+let deleteAllAbortController: AbortController | null = null
 let overviewPollTimer: number | null = null
 let overviewRequestSequence = 0
 let foregroundOverviewRequests = 0
 let configFormInitialized = false
 let isUnmounted = false
+let anomalyReloadPending = false
 
 function apiErrorStatus(error: unknown): number | undefined {
   const candidate = error as { status?: number; response?: { status?: number } }
@@ -676,7 +763,7 @@ function accountNotesExportTimestamp(): string {
 }
 
 async function exportAccountNotes() {
-  if (exportingNotes.value) return
+  if (exportingNotes.value || deleteScopeLocked.value) return
 
   const controller = new AbortController()
   notesExportAbortController = controller
@@ -741,7 +828,12 @@ async function saveConfig() {
 
 async function confirmRun() {
   showRunConfirm.value = false
-  if (runSubmitting.value || automationRunning.value || !canRunAutomation.value) return
+  if (
+    runSubmitting.value
+    || automationRunning.value
+    || !canRunAutomation.value
+    || deleteScopeLocked.value
+  ) return
   runSubmitting.value = true
   try {
     overview.value = await adminAPI.plusQuotaAutomation.runAutomation()
@@ -766,7 +858,11 @@ async function confirmRun() {
 }
 
 async function resolveRow(row: PlusQuotaAnomaly) {
-  if (resolvingAccountIds.has(row.account_id) || deletingAccountIds.has(row.account_id)) return
+  if (
+    deleteScopeLocked.value
+    || resolvingAccountIds.has(row.account_id)
+    || deletingAccountIds.has(row.account_id)
+  ) return
   resolvingAccountIds.add(row.account_id)
   try {
     await adminAPI.plusQuotaAutomation.resolveAnomaly(row.account_id)
@@ -785,6 +881,7 @@ function requestDeleteAccount(row: PlusQuotaAnomaly) {
   if (
     row.status !== 'open'
     || row.http_status !== 401
+    || deleteScopeLocked.value
     || resolvingAccountIds.has(row.account_id)
     || deletingAccountIds.has(row.account_id)
   ) {
@@ -805,6 +902,7 @@ async function confirmDeleteAccount() {
   deleteCandidate.value = null
   if (
     !candidate
+    || deleteScopeLocked.value
     || resolvingAccountIds.has(candidate.account_id)
     || deletingAccountIds.has(candidate.account_id)
   ) {
@@ -839,28 +937,173 @@ async function confirmDeleteAccount() {
   }
 }
 
+async function requestDeleteAllAccounts() {
+  if (!canDeleteAllAccounts.value) return
+
+  const controller = new AbortController()
+  deleteAllAbortController = controller
+  preparingDeleteAll.value = true
+  try {
+    const snapshot = await adminAPI.plusQuotaAutomation.getAnomalyDeletionCandidates(
+      filters.search,
+      { signal: controller.signal }
+    )
+    if (controller.signal.aborted || isUnmounted) return
+    const candidates = [...new Set((snapshot.account_ids || []).filter((accountID) =>
+      Number.isSafeInteger(accountID) && accountID > 0
+    ))].sort((left, right) => left - right)
+    if (candidates.length === 0) {
+      appStore.showWarning(
+        t('admin.plusQuotaAutomation.messages.noAccountsToDelete')
+      )
+      await loadAnomalies()
+      return
+    }
+    deleteAllCandidates.value = candidates
+    showDeleteAllConfirm.value = true
+  } catch (error) {
+    if (controller.signal.aborted || isUnmounted) return
+    appStore.showError(
+      apiErrorMessage(error, t('admin.plusQuotaAutomation.messages.prepareDeleteAllFailed'))
+    )
+  } finally {
+    if (deleteAllAbortController === controller) {
+      deleteAllAbortController = null
+      preparingDeleteAll.value = false
+      applyPendingAnomalyReload()
+    }
+  }
+}
+
+function cancelDeleteAllAccounts() {
+  showDeleteAllConfirm.value = false
+  deleteAllCandidates.value = []
+  applyPendingAnomalyReload()
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex
+        nextIndex += 1
+        results[index] = await worker(items[index])
+      }
+    }
+  )
+  await Promise.all(workers)
+  return results
+}
+
+async function deleteAllCandidate(accountID: number): Promise<BulkDeleteOutcome> {
+  try {
+    await adminAPI.plusQuotaAutomation.deleteAnomalyAccount(accountID)
+    return 'deleted'
+  } catch (error) {
+    return apiErrorStatus(error) === 409 ? 'stale' : 'failed'
+  } finally {
+    deleteAllProgress.completed += 1
+  }
+}
+
+async function confirmDeleteAllAccounts() {
+  const candidates = [...deleteAllCandidates.value]
+  showDeleteAllConfirm.value = false
+  deleteAllCandidates.value = []
+  if (candidates.length === 0 || deletingAllAccounts.value) return
+
+  deletingAllAccounts.value = true
+  deleteAllProgress.completed = 0
+  deleteAllProgress.total = candidates.length
+  for (const accountID of candidates) {
+    deletingAccountIds.add(accountID)
+  }
+
+  try {
+    const outcomes = await mapWithConcurrency(
+      candidates,
+      BULK_DELETE_CONCURRENCY,
+      deleteAllCandidate
+    )
+    const deleted = outcomes.filter((outcome) => outcome === 'deleted').length
+    const stale = outcomes.filter((outcome) => outcome === 'stale').length
+    const failed = outcomes.length - deleted - stale
+
+    anomalyReloadPending = false
+    await Promise.all([
+      loadAnomalies(),
+      loadOverview(false)
+    ])
+    if (isUnmounted) return
+
+    if (failed > 0) {
+      appStore.showError(
+        t('admin.plusQuotaAutomation.messages.deleteAllSummary', { deleted, stale, failed })
+      )
+    } else if (stale > 0) {
+      appStore.showWarning(
+        t('admin.plusQuotaAutomation.messages.deleteAllSummary', { deleted, stale, failed })
+      )
+    } else {
+      appStore.showSuccess(
+        t('admin.plusQuotaAutomation.messages.accountsDeleted', { count: deleted })
+      )
+    }
+  } finally {
+    for (const accountID of candidates) {
+      deletingAccountIds.delete(accountID)
+    }
+    deletingAllAccounts.value = false
+    deleteAllProgress.completed = 0
+    deleteAllProgress.total = 0
+    applyPendingAnomalyReload()
+  }
+}
+
+function applyPendingAnomalyReload() {
+  if (!anomalyReloadPending || deleteScopeLocked.value) return
+  anomalyReloadPending = false
+  pagination.page = 1
+  void loadAnomalies()
+}
+
 function handleSearch() {
+  if (deleteScopeLocked.value) {
+    anomalyReloadPending = true
+    return
+  }
   pagination.page = 1
   void loadAnomalies()
 }
 
 function handleStatusChange() {
+  if (deleteScopeLocked.value) return
   pagination.page = 1
   void loadAnomalies()
 }
 
 function handlePageChange(page: number) {
+  if (deleteScopeLocked.value) return
   pagination.page = page
   void loadAnomalies()
 }
 
 function handlePageSizeChange(pageSize: number) {
+  if (deleteScopeLocked.value) return
   pagination.page_size = pageSize
   pagination.page = 1
   void loadAnomalies()
 }
 
 function refreshAll() {
+  if (deleteScopeLocked.value) return
   void loadAnomalies()
   void (async () => {
     await loadOverview(false)
@@ -914,5 +1157,6 @@ onUnmounted(() => {
   stopOverviewPolling()
   anomaliesAbortController?.abort()
   notesExportAbortController?.abort()
+  deleteAllAbortController?.abort()
 })
 </script>

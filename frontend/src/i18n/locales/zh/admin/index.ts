@@ -8,6 +8,7 @@ import audit from './audit'
 import promptAudit from './promptAudit'
 import modelTracing from './modelTracing'
 import plusQuotaAutomation from './plusQuotaAutomation'
+import accountHealthDetector from './accountHealthDetector'
 
 export default {
   ...overview,
@@ -20,4 +21,5 @@ export default {
   ...promptAudit,
   ...modelTracing,
   ...plusQuotaAutomation,
+  ...accountHealthDetector,
 }

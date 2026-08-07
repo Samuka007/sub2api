@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DataTable from '../DataTable.vue'
 
@@ -47,6 +47,10 @@ describe('DataTable', () => {
     localStorage.clear()
   })
 
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('renders paired sort arrows and highlights the active direction', async () => {
     const wrapper = mount(DataTable, {
       props: {
@@ -81,6 +85,97 @@ describe('DataTable', () => {
     expect(nameHeader.attributes('aria-sort')).toBe('descending')
     expect(nameHeader.findAll('svg')[0].classes()).toContain('text-gray-300')
     expect(nameHeader.findAll('svg')[1].classes()).toContain('text-primary-600')
+  })
+
+  it('supports sorting a focused desktop header with Enter and Space', async () => {
+    const wrapper = mount(DataTable, {
+      props: {
+        columns: [{ key: 'name', label: 'Name', sortable: true }],
+        data: [
+          { id: 1, name: 'Beta' },
+          { id: 2, name: 'Alpha' }
+        ],
+        serverSideSort: true
+      }
+    })
+
+    const header = wrapper.get('th')
+    expect(header.attributes('tabindex')).toBe('0')
+    await header.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('sort')?.at(-1)).toEqual(['name', 'asc'])
+    expect(header.attributes('aria-sort')).toBe('ascending')
+
+    await header.trigger('keydown', { key: ' ' })
+    expect(wrapper.emitted('sort')?.at(-1)).toEqual(['name', 'desc'])
+    expect(header.attributes('aria-sort')).toBe('descending')
+  })
+
+  it('synchronizes controlled sort state without replacing the focused scroll viewport', async () => {
+    const wrapper = mount(DataTable, {
+      attachTo: document.body,
+      props: {
+        columns: [
+          { key: 'name', label: 'Name', sortable: true },
+          { key: 'created_at', label: 'Created', sortable: true }
+        ],
+        data: [
+          { id: 1, name: 'Beta', created_at: '2026-01-02T00:00:00Z' },
+          { id: 2, name: 'Alpha', created_at: '2026-01-01T00:00:00Z' }
+        ],
+        serverSideSort: true,
+        sortKey: 'name',
+        sortOrder: 'asc'
+      }
+    })
+
+    await wrapper.vm.$nextTick()
+    const viewport = wrapper.get('.table-wrapper').element as HTMLElement
+    const nameHeader = wrapper.findAll('th')[0]
+    viewport.scrollLeft = 137
+    ;(nameHeader.element as HTMLElement).focus()
+
+    await wrapper.setProps({ sortKey: 'created_at', sortOrder: 'desc' })
+
+    expect(wrapper.get('.table-wrapper').element).toBe(viewport)
+    expect(viewport.scrollLeft).toBe(137)
+    expect(document.activeElement).toBe(nameHeader.element)
+    expect(wrapper.findAll('th')[0].attributes('aria-sort')).toBe('none')
+    expect(wrapper.findAll('th')[1].attributes('aria-sort')).toBe('descending')
+
+    wrapper.unmount()
+  })
+
+  it('keeps a wide desktop table empty state inside the visible scroll viewport', async () => {
+    const resizeCallbacks: ResizeObserverCallback[] = []
+    class ResizeObserverMock {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallbacks.push(callback)
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+
+    const wrapper = mount(DataTable, {
+      props: {
+        columns: Array.from({ length: 10 }, (_, index) => ({
+          key: `column_${index}`,
+          label: `Column ${index}`
+        })),
+        data: []
+      }
+    })
+    await wrapper.vm.$nextTick()
+
+    const tableWrapper = wrapper.get('.table-wrapper').element
+    Object.defineProperty(tableWrapper, 'clientWidth', { configurable: true, value: 640 })
+    Object.defineProperty(tableWrapper, 'scrollWidth', { configurable: true, value: 1200 })
+    resizeCallbacks.forEach(callback => callback([], {} as ResizeObserver))
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('[data-test="table-empty-state"]').attributes('style')).toContain('width: 624px')
   })
 
   it('renders every row with no virtual padding spacer for small datasets (virtualization off)', async () => {
@@ -307,6 +402,36 @@ describe('DataTable', () => {
 
     expect(wrapper.emitted('update:selectedKeys')?.at(-1)?.[0]).toEqual([99, 2])
     expect(wrapper.emitted('selectionChange')?.at(-1)?.[0]).toEqual([99, 2])
+  })
+
+  it('disables desktop and mobile selection without emitting updates', async () => {
+    stubMobileMatchMedia()
+    const wrapper = mount(DataTable, {
+      props: {
+        columns: [{ key: 'name', label: 'Name' }],
+        data: [
+          { id: 1, name: 'One' },
+          { id: 2, name: 'Two' }
+        ],
+        rowKey: 'id',
+        selectable: true,
+        selectionDisabled: true,
+        selectedKeys: [1]
+      }
+    })
+
+    const checkboxes = wrapper.findAll<HTMLInputElement>(
+      '[data-test="select-all"], [data-test="select-all-mobile"], [data-test="select-row"]'
+    )
+    expect(checkboxes.length).toBeGreaterThan(0)
+    expect(checkboxes.every((checkbox) => checkbox.attributes('disabled') !== undefined)).toBe(true)
+    for (const checkbox of checkboxes) {
+      checkbox.element.checked = !checkbox.element.checked
+      await checkbox.trigger('change')
+    }
+
+    expect(wrapper.emitted('update:selectedKeys')).toBeUndefined()
+    expect(wrapper.emitted('selectionChange')).toBeUndefined()
   })
 
   it('keeps the single usage field shrinkable in a 320px mobile card', () => {
