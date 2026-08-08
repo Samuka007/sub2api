@@ -420,120 +420,81 @@ func parseAccountHealthMailboxTarget(description string) (accountHealthMailboxTa
 	}
 
 	line := lines[0]
-	fields := strings.SplitN(line, "---", 5)
-	structured := len(fields) >= 4
-	if accountHealthHasAdditionalRecord(line) {
-		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionMultipleRecords}
-	}
-	prefix := line
-	mailboxField := line
-	if structured {
-		prefix = strings.Join(fields[:3], "---")
-		mailboxField = fields[3]
+	firstField, mailboxField, prefixValid := splitAccountHealthLeadingFields(line)
+	if !prefixValid {
+		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionInvalidURL}
 	}
 
-	urlScanField := strings.ReplaceAll(mailboxField, "---", "   ")
-	urlMatches := accountHealthURLPattern.FindAllStringIndex(urlScanField, -1)
-	if len(urlMatches) == 0 {
+	firstField = strings.TrimSpace(firstField)
+	email := findAccountHealthEmail(firstField)
+	if email == "" || !strings.EqualFold(email, firstField) {
+		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionMissingEmail}
+	}
+
+	mailboxField = strings.TrimSpace(mailboxField)
+	if mailboxField == "" || !accountHealthURLPattern.MatchString(mailboxField) {
 		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionMissingURL}
 	}
-
-	firstMatch := urlMatches[0]
-	mailboxURL, parsedURL, parseErr := parseAccountHealthDescriptionURL(mailboxField[firstMatch[0]:firstMatch[1]])
+	mailboxURL, parsedURL, parseErr := parseAccountHealthDescriptionURL(mailboxField)
 	if parseErr != nil {
 		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionInvalidURL}
 	}
 	if parsedURL.Scheme != "https" {
 		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionInvalidURL}
 	}
-	if !structured {
-		prefix = mailboxField[:firstMatch[0]]
-	}
-
-	var email string
-	if structured {
-		firstField, _, _ := strings.Cut(prefix, "---")
-		firstField = strings.TrimSpace(firstField)
-		if candidate := findAccountHealthEmail(firstField); strings.EqualFold(candidate, firstField) {
-			email = candidate
-		}
-	} else {
-		email = findAccountHealthEmail(strings.TrimRight(strings.TrimSpace(prefix), "-|"))
-		if email == "" {
-			email = accountHealthEmailFromURL(parsedURL)
-		}
-	}
-	if email == "" {
-		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionMissingEmail}
-	}
-	secrets := accountHealthDescriptionSecrets(prefix, structured)
-	if _, complete := accountHealthRedactionSecrets(mailboxURL, secrets...); !complete {
+	if _, complete := accountHealthRedactionSecrets(mailboxURL); !complete {
 		return accountHealthMailboxTarget{}, &accountHealthDescriptionFormatError{kind: accountHealthDescriptionInvalidURL}
 	}
 	return accountHealthMailboxTarget{
 		email:      email,
 		mailboxURL: mailboxURL,
-		secrets:    secrets,
+		secrets:    nil,
 	}, nil
 }
 
-func accountHealthHasAdditionalRecord(line string) bool {
-	fields := strings.Split(line, "---")
-	trimmedFields := make([]string, len(fields))
-	urlMatchesByField := make([][]string, len(fields))
-	hasURLAfter := make([]bool, len(fields))
-	seenURL := false
-	for index := len(fields) - 1; index >= 0; index-- {
-		hasURLAfter[index] = seenURL
-		trimmedFields[index] = strings.TrimSpace(fields[index])
-		urlMatchesByField[index] = accountHealthURLPattern.FindAllString(trimmedFields[index], -1)
-		seenURL = seenURL || len(urlMatchesByField[index]) > 0
+// Only the first two fields define the mailbox target; later fields are ignored.
+func splitAccountHealthLeadingFields(line string) (string, string, bool) {
+	separatorStart := strings.Index(line, "---")
+	if separatorStart < 0 {
+		return "", "", false
+	}
+	separatorEnd := separatorStart
+	for separatorEnd < len(line) && line[separatorEnd] == '-' {
+		separatorEnd++
+	}
+	separatorLength := separatorEnd - separatorStart
+	if separatorLength != 3 && separatorLength != 4 {
+		return "", "", false
 	}
 
-	mailboxURLSeen := false
-	firstRecordEmail := ""
-	for index, field := range trimmedFields {
-		urlMatches := urlMatchesByField[index]
-		if len(urlMatches) > 0 {
-			if !mailboxURLSeen {
-				firstRecordEmail = findAccountHealthEmail(strings.Join(fields[:index], "---"))
-			}
-			for _, rawURL := range urlMatches {
-				parsed, parseErr := url.Parse(strings.TrimRight(rawURL, ".,;，。；)]}>"))
-				candidateEmail := ""
-				if parseErr == nil {
-					candidateEmail = accountHealthEmailFromURL(parsed)
-				}
-				if !mailboxURLSeen {
-					mailboxURLSeen = true
-					if firstRecordEmail == "" {
-						firstRecordEmail = candidateEmail
-					}
-					continue
-				}
-				if candidateEmail != "" && firstRecordEmail != "" &&
-					!strings.EqualFold(candidateEmail, firstRecordEmail) {
-					return true
-				}
-			}
-			continue
-		}
-		if !mailboxURLSeen {
-			continue
-		}
-		email := findAccountHealthEmail(field)
-		if email == "" || !strings.EqualFold(email, field) {
-			continue
-		}
-		if hasURLAfter[index] {
-			return true
-		}
+	remainder := line[separatorEnd:]
+	trailingStart, _ := findAccountHealthTrailingSeparator(remainder)
+	if trailingStart < 0 {
+		return line[:separatorStart], remainder, true
 	}
-	return false
+	return line[:separatorStart], remainder[:trailingStart], true
+}
+
+func findAccountHealthTrailingSeparator(value string) (int, int) {
+	for index := 0; index < len(value); {
+		if value[index] != '-' {
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(value) && value[end] == '-' {
+			end++
+		}
+		if end-index >= 3 {
+			return index, end
+		}
+		index = end
+	}
+	return -1, -1
 }
 
 func parseAccountHealthDescriptionURL(rawURL string) (string, *url.URL, error) {
-	rawURL = strings.TrimRight(strings.TrimSpace(rawURL), ".,;，。；)]}>")
+	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" || len(rawURL) > accountHealthMaxURLBytes {
 		return "", nil, errAccountHealthUnsafeMailboxURL
 	}
@@ -545,85 +506,6 @@ func parseAccountHealthDescriptionURL(rawURL string) (string, *url.URL, error) {
 		return "", nil, errAccountHealthUnsafeMailboxURL
 	}
 	return rawURL, parsed, nil
-}
-
-func accountHealthEmailFromURL(parsed *url.URL) string {
-	if parsed == nil {
-		return ""
-	}
-	if email := accountHealthEmailFromRawQuery(parsed.RawQuery); email != "" {
-		return email
-	}
-	decodedPath, err := url.PathUnescape(parsed.EscapedPath())
-	if err != nil {
-		return ""
-	}
-	return findAccountHealthEmail(decodedPath)
-}
-
-func accountHealthDescriptionSecrets(prefix string, structured bool) []string {
-	secrets := make([]string, 0, 2)
-	for index, field := range strings.Split(prefix, "---") {
-		if len(secrets) >= accountHealthMaxURLSecrets {
-			break
-		}
-		value := strings.TrimSpace(field)
-		if structured {
-			if index == 0 || value == "" {
-				continue
-			}
-		} else {
-			value = strings.TrimSpace(accountHealthEmailPattern.ReplaceAllString(value, ""))
-		}
-		if value == "" || (!structured && accountHealthURLPattern.MatchString(value)) {
-			continue
-		}
-		duplicate := false
-		for _, secret := range secrets {
-			if secret == value {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			secrets = append(secrets, value)
-		}
-	}
-	return secrets
-}
-
-func accountHealthEmailFromRawQuery(rawQuery string) string {
-	type queryValue struct {
-		key   string
-		value string
-	}
-	values := make([]queryValue, 0, strings.Count(rawQuery, "&")+1)
-	for _, field := range strings.Split(rawQuery, "&") {
-		rawKey, rawValue, _ := strings.Cut(field, "=")
-		key, keyErr := url.QueryUnescape(rawKey)
-		if keyErr != nil {
-			continue
-		}
-		// QueryUnescape follows form semantics and normally turns a literal '+'
-		// into a space. Mailbox exports use '+' literally for email sub-addresses.
-		value, valueErr := url.QueryUnescape(strings.ReplaceAll(rawValue, "+", "%2B"))
-		if valueErr != nil {
-			continue
-		}
-		values = append(values, queryValue{key: key, value: value})
-	}
-
-	for _, wantedKey := range []string{"mail", "email", "address", "user", "login"} {
-		for _, candidate := range values {
-			if !strings.EqualFold(candidate.key, wantedKey) {
-				continue
-			}
-			if email := findAccountHealthEmail(candidate.value); email != "" {
-				return email
-			}
-		}
-	}
-	return ""
 }
 
 func parseAccountHealthMailboxPage(body []byte, contentType string, maxMessages int) (accountHealthMailboxPage, error) {

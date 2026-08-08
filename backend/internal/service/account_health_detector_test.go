@@ -342,6 +342,33 @@ func TestGroupAccountHealthDetectorUsesAccountNotesInsteadOfGroupDescription(t *
 	require.NotContains(t, fetcher.rawURL, "/group")
 }
 
+func TestGroupAccountHealthDetectorUsesMailURLAndIgnoresTrailingFields(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &accountHealthMailboxFetcherStub{response: accountHealthMailboxPageForTest(
+		[]string{"An ordinary mailbox message with no account health evidence."},
+		"",
+	)}
+	detector := newAccountHealthDetectorForTest(&Group{
+		ID:       42,
+		Name:     "OpenAI primary",
+		Platform: PlatformOpenAI,
+	}, fetcher)
+
+	result, err := detector.DetectAccountNotes(
+		context.Background(),
+		42,
+		"account@example.com---https://mail.example.test/account?user=account@example.com"+
+			"---not-a-phone---http://sms.example.test/api/messages/synthetic-sms-token---anything",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "account@example.com", result.AccountEmail)
+	require.Equal(t, 1, fetcher.calls)
+	require.Contains(t, fetcher.rawURL, "mail.example.test/account")
+	require.NotContains(t, fetcher.rawURL, "sms.example.test")
+}
+
 func TestGroupAccountHealthDetectorDoesNotFallbackToGroupDescriptionForEmptyAccountNotes(t *testing.T) {
 	fetcher := &accountHealthMailboxFetcherStub{}
 	detector := newAccountHealthDetectorForTest(&Group{
@@ -405,12 +432,10 @@ func TestGroupAccountHealthDetectorRejectsInvalidEmailSyntaxWithoutFetching(t *t
 	t.Parallel()
 
 	for _, description := range []string{
-		"user@example..com---password---token---https://mail.example/inbox",
-		"user@.example.com---password---token---https://mail.example/inbox",
-		"user@-example.com---password---token---https://mail.example/inbox",
-		"user@example-.com---password---token---https://mail.example/inbox",
-		"https://mail.example/inbox?mail=bad..user%40example.com",
-		"https://mail.example/inbox?mail=user%40example..com",
+		"user@example..com---https://mail.example/inbox---+19045550123---https://sms.example/messages",
+		"user@.example.com---https://mail.example/inbox---+19045550123---https://sms.example/messages",
+		"user@-example.com---https://mail.example/inbox---+19045550123---https://sms.example/messages",
+		"user@example-.com---https://mail.example/inbox---+19045550123---https://sms.example/messages",
 	} {
 		fetcher := &accountHealthMailboxFetcherStub{}
 		detector := newAccountHealthDetectorForTest(&Group{
@@ -437,7 +462,7 @@ func TestGroupAccountHealthDetectorRejectsInsecureStructuredMailboxBeforeAuxilia
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com---password---token---http://mail.example/inbox---https://docs.example/help",
+		Description: "user@example.com---http://mail.example/inbox---+19045550123---https://sms.example/messages",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -498,7 +523,7 @@ func TestGroupAccountHealthDetectorRejectsEmptyStructuredMailboxBeforeAuxiliaryU
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com---password---token------https://docs.example/help",
+		Description: "user@example.com--- ---+19045550123---https://sms.example/messages",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -531,7 +556,7 @@ func TestGroupAccountHealthDetectorRejectsAlternateRecordSeparatorsWithoutFetchi
 	}
 }
 
-func TestGroupAccountHealthDetectorRejectsMultipleStructuredRecordsOnOneLineWithoutFetching(t *testing.T) {
+func TestGroupAccountHealthDetectorDoesNotFallbackToTrailingURL(t *testing.T) {
 	t.Parallel()
 
 	fetcher := &accountHealthMailboxFetcherStub{}
@@ -547,14 +572,17 @@ func TestGroupAccountHealthDetectorRejectsMultipleStructuredRecordsOnOneLineWith
 
 	require.NoError(t, err)
 	require.Equal(t, accountHealthStatusFormatError, result.Status)
-	require.Equal(t, "multiple_records", result.FormatIssue)
+	require.Equal(t, "missing_url", result.FormatIssue)
 	require.Zero(t, fetcher.calls)
 }
 
-func TestGroupAccountHealthDetectorRejectsMultipleMinimalRecordsOnOneLineWithoutFetching(t *testing.T) {
+func TestGroupAccountHealthDetectorIgnoresAdditionalRecordOnSameLine(t *testing.T) {
 	t.Parallel()
 
-	fetcher := &accountHealthMailboxFetcherStub{}
+	fetcher := &accountHealthMailboxFetcherStub{response: accountHealthMailboxPageForTest(
+		[]string{"An ordinary mailbox message with no account health evidence."},
+		"",
+	)}
 	detector := newAccountHealthDetectorForTest(&Group{
 		ID:       42,
 		Name:     "OpenAI primary",
@@ -566,9 +594,10 @@ func TestGroupAccountHealthDetectorRejectsMultipleMinimalRecordsOnOneLineWithout
 	result, err := detector.DetectGroup(context.Background(), 42)
 
 	require.NoError(t, err)
-	require.Equal(t, accountHealthStatusFormatError, result.Status)
-	require.Equal(t, "multiple_records", result.FormatIssue)
-	require.Zero(t, fetcher.calls)
+	require.NotNil(t, result)
+	require.Equal(t, 1, fetcher.calls)
+	require.Contains(t, fetcher.rawURL, "mail.example/one")
+	require.NotContains(t, fetcher.rawURL, "mail.example/two")
 }
 
 func TestGroupAccountHealthDetectorRejectsMultipleURLOnlyRecordsWithoutFetching(t *testing.T) {
@@ -586,7 +615,7 @@ func TestGroupAccountHealthDetectorRejectsMultipleURLOnlyRecordsWithoutFetching(
 
 	require.NoError(t, err)
 	require.Equal(t, accountHealthStatusFormatError, result.Status)
-	require.Equal(t, "multiple_records", result.FormatIssue)
+	require.Equal(t, "missing_email", result.FormatIssue)
 	require.Zero(t, fetcher.calls)
 }
 
@@ -603,7 +632,7 @@ func TestGroupAccountHealthDetectorDetectsDeactivatedMailbox(t *testing.T) {
 		ID:       42,
 		Name:     "OpenAI primary",
 		Platform: PlatformOpenAI,
-		Description: "user@example.com---password---token---" +
+		Description: "user@example.com---" +
 			"https://mail.example/inbox?mail=user%40example.com&pwd=secret&limit=5",
 	}, fetcher)
 
@@ -653,34 +682,35 @@ func TestGroupAccountHealthDetectorTreatsStructuredEmptyMailboxAsNoEvidence(t *t
 	}
 }
 
-func TestGroupAccountHealthDetectorRedactsDescriptionCredentialsFromResult(t *testing.T) {
+func TestGroupAccountHealthDetectorRedactsMailboxURLCredentialsFromResult(t *testing.T) {
 	t.Parallel()
 
-	const descriptionPassword = "NOTE_PASSWORD_SYNTHETIC"
-	const descriptionToken = "NOTE_TOKEN_SYNTHETIC"
+	const mailboxPassword = "NOTE_MAIL_PASSWORD_SYNTHETIC"
 	fetcher := &accountHealthMailboxFetcherStub{response: accountHealthMailboxPageForTest([]string{
-		"Subject: OpenAI - Access Deactivated " + descriptionPassword + "\n" +
+		"Subject: OpenAI - Access Deactivated " + mailboxPassword + "\n" +
 			"Your OpenAI account has been deactivated and can no longer be used. " +
 			"Associated with user@example.com. 2026-07-21",
 		"You've successfully subscribed to ChatGPT Plus.\n" +
 			"Order number: sub_RedactionSynthetic\nOrder date: Jul 16, 2026\n" +
-			"Payment method: " + descriptionToken,
+			"Payment method: " + mailboxPassword,
 	}, "")}
 	detector := newAccountHealthDetectorForTest(&Group{
 		ID:       42,
 		Name:     "OpenAI primary",
 		Platform: PlatformOpenAI,
-		Description: "user@example.com---" + descriptionPassword + "---" + descriptionToken + "---" +
-			"https://mail.example/inbox?mail=user%40example.com&limit=5",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&limit=5&pwd=" +
+			mailboxPassword + "---ignored-tail",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
 
 	require.NoError(t, err)
+	require.Equal(t, 1, fetcher.calls)
+	require.Contains(t, fetcher.rawURL, "mail.example")
+	require.NotContains(t, fetcher.rawURL, "sms.example")
 	serialized, err := json.Marshal(result)
 	require.NoError(t, err)
-	require.NotContains(t, string(serialized), descriptionPassword)
-	require.NotContains(t, string(serialized), descriptionToken)
+	require.NotContains(t, string(serialized), mailboxPassword)
 	require.Empty(t, result.PaymentMethod)
 }
 
@@ -692,19 +722,9 @@ func TestGroupAccountHealthDetectorRedactsLowercasedEmailSubstringsFromCredentia
 		reflectedCredential string
 	}{
 		{
-			name:                "structured password",
-			description:         "owner@example.com---" + reflectedEmail + "---token---https://mail.example/inbox",
-			reflectedCredential: reflectedEmail,
-		},
-		{
 			name:                "mailbox query credential",
 			description:         "owner@example.com---https://mail.example/inbox?pwd=Password%40Example.net",
 			reflectedCredential: reflectedEmail,
-		},
-		{
-			name:                "wrapped structured password",
-			description:         "owner@example.com---" + reflectedEmail + "!---token---https://mail.example/inbox",
-			reflectedCredential: reflectedEmail + "!",
 		},
 		{
 			name:                "wrapped mailbox query credential",
@@ -715,11 +735,6 @@ func TestGroupAccountHealthDetectorRedactsLowercasedEmailSubstringsFromCredentia
 			name:                "wrapped mailbox path credential",
 			description:         "owner@example.com---https://mail.example/Password@Example.net!/inbox",
 			reflectedCredential: reflectedEmail + "!",
-		},
-		{
-			name:                "trailing dot structured password",
-			description:         "owner@example.com---" + reflectedEmail + ".---token---https://mail.example/inbox",
-			reflectedCredential: reflectedEmail + ".",
 		},
 		{
 			name:                "trailing hyphen mailbox query credential",
@@ -769,7 +784,7 @@ func TestGroupAccountHealthDetectorSerializesEmptyEvidenceAsArray(t *testing.T) 
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -802,7 +817,7 @@ func TestGroupAccountHealthDetectorSharesOneDeadlineAcrossMailboxPages(t *testin
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 	detector.timeout = time.Second
 
@@ -829,7 +844,7 @@ func TestGroupAccountHealthDetectorReturnsStructuredFetchErrorOnInternalTimeout(
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 	detector.timeout = 20 * time.Millisecond
 
@@ -957,7 +972,7 @@ func TestGroupAccountHealthDetectorFindsEvidenceOnSecondPage(t *testing.T) {
 				ID:       42,
 				Name:     "OpenAI primary",
 				Platform: PlatformOpenAI,
-				Description: "user@example.com---password---token---" +
+				Description: "user@example.com---" +
 					"https://mail.example/inbox?mail=user%40example.com&pwd=secret&limit=5",
 			}, fetcher)
 
@@ -1051,7 +1066,7 @@ func TestGroupAccountHealthDetectorResolvesRelativeNextLinkAgainstCurrentPage(t 
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/mail/inbox",
+		Description: "user@example.com---https://mail.example/mail/inbox",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1084,7 +1099,7 @@ func TestGroupAccountHealthDetectorResolvesRelativeNextLinkAgainstRedirectedPage
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1116,7 +1131,7 @@ func TestGroupAccountHealthDetectorStopsAtVisitedNextLink(t *testing.T) {
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1142,7 +1157,7 @@ func TestGroupAccountHealthDetectorFollowsSameHostNextPageAcrossHTTPSPort(t *tes
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1180,7 +1195,7 @@ func TestGroupAccountHealthDetectorRejectsUnsafeNextPageHosts(t *testing.T) {
 				ID:          42,
 				Name:        "OpenAI primary",
 				Platform:    PlatformOpenAI,
-				Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+				Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 			}, fetcher)
 
 			result, err := detector.DetectGroup(context.Background(), 42)
@@ -1214,7 +1229,7 @@ func TestGroupAccountHealthDetectorRejectsNonPaginationNextPageQueries(t *testin
 				ID:          42,
 				Name:        "OpenAI primary",
 				Platform:    PlatformOpenAI,
-				Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=synthetic-password",
+				Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=synthetic-password",
 			}, fetcher)
 
 			result, err := detector.DetectGroup(context.Background(), 42)
@@ -1246,7 +1261,7 @@ func TestGroupAccountHealthDetectorDeduplicatesAndCapsMessagesAcrossPages(t *tes
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1268,7 +1283,7 @@ func TestGroupAccountHealthDetectorAccumulatesDynamicHintAcrossPages(t *testing.
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1288,7 +1303,7 @@ func TestGroupAccountHealthDetectorReportsMalformedJSONAsParseError(t *testing.T
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1311,7 +1326,7 @@ func TestGroupAccountHealthDetectorCapsPagination(t *testing.T) {
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1337,7 +1352,7 @@ func TestGroupAccountHealthDetectorReturnsStableFailureForLaterPage(t *testing.T
 			ID:          42,
 			Name:        "OpenAI primary",
 			Platform:    PlatformOpenAI,
-			Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+			Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 		}, fetcher)
 
 		result, err := detector.DetectGroup(context.Background(), 42)
@@ -1363,7 +1378,7 @@ func TestGroupAccountHealthDetectorReturnsStableFailureForLaterPage(t *testing.T
 			ID:          42,
 			Name:        "OpenAI primary",
 			Platform:    PlatformOpenAI,
-			Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+			Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 		}, fetcher)
 
 		result, err := detector.DetectGroup(context.Background(), 42)
@@ -1390,7 +1405,7 @@ func TestGroupAccountHealthDetectorPropagatesCancellationBetweenPages(t *testing
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(ctx, 42)
@@ -1414,7 +1429,7 @@ func TestGroupAccountHealthDetectorPropagatesCancellationAfterFinalFetch(t *test
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(ctx, 42)
@@ -1432,7 +1447,7 @@ func TestGroupAccountHealthDetectorReturnsStableFetchError(t *testing.T) {
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/?mail=user%40example.com&pwd=secret",
 	}, fetcher)
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1458,7 +1473,7 @@ func TestGroupAccountHealthDetectorRedactsRedirectPathSecrets(t *testing.T) {
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=secret",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=secret",
 	}, &accountHealthMailboxFetcherStub{response: mailbox})
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1507,7 +1522,7 @@ func TestGroupAccountHealthDetectorRedactsShortAndNormalizedPathSecrets(t *testi
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com",
 	}, &accountHealthMailboxFetcherStub{response: mailbox})
 
 	result, err := detector.DetectGroup(context.Background(), 42)
@@ -1525,7 +1540,7 @@ func TestGroupAccountHealthDetectorRedactsOriginalPercentEncodedQuerySecrets(t *
 		ID:          42,
 		Name:        "OpenAI primary",
 		Platform:    PlatformOpenAI,
-		Description: "user@example.com https://mail.example/inbox?mail=user%40example.com&pwd=abc%2fdef%3Aghi&limit=5",
+		Description: "user@example.com---https://mail.example/inbox?mail=user%40example.com&pwd=abc%2fdef%3Aghi&limit=5",
 	}, &accountHealthMailboxFetcherStub{response: accountHealthMailboxPageForTest([]string{
 		"OpenAI account abc%2fdef%3Aghi, abc%2Fdef%3Aghi, and abc%2Fdef%3aghi access deactivated\nYour account has been deactivated and can no longer be used.",
 		"You've successfully subscribed to ChatGPT Plus.\nPayment method: abc%2fdef%3Aghi abc%2Fdef%3aghi",

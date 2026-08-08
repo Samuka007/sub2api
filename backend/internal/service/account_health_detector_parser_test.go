@@ -46,43 +46,55 @@ func TestParseAccountHealthGroupDescription(t *testing.T) {
 		description string
 		wantEmail   string
 		wantURL     string
-		wantSecrets []string
 	}{
 		{
-			name:        "four field export",
-			description: "User@Example.com---password---token---https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5",
-			wantEmail:   "user@example.com",
-			wantURL:     "https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5",
-			wantSecrets: []string{"password", "token"},
+			name: "mail and SMS export",
+			description: "User@Example.com---https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5" +
+				"---+19045550123---https://sms.example/api/system/get_sms/synthetic-sms-token",
+			wantEmail: "user@example.com",
+			wantURL:   "https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5",
 		},
 		{
-			name:        "structured credentials keep email-shaped password private",
-			description: "owner@example.com---password@example.net---token---https://mail.example/inbox",
-			wantEmail:   "owner@example.com",
+			name: "four hyphen export compatibility",
+			description: "User@Example.com----https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5" +
+				"----+19045550123----https://sms.example/api/system/get_sms/synthetic-sms-token",
+			wantEmail: "user@example.com",
+			wantURL:   "https://mail.example/open.php?mail=user%40example.com&pwd=synthetic&limit=5",
+		},
+		{
+			name:        "four hyphen two field compatibility",
+			description: "reader@example.com----https://mail.example/inbox",
+			wantEmail:   "reader@example.com",
 			wantURL:     "https://mail.example/inbox",
-			wantSecrets: []string{"password@example.net", "token"},
 		},
 		{
-			name:        "email only in URL",
-			description: "https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
+			name: "formatted international phone",
+			description: "reader@example.com---https://mail.example/inbox---+1 (904) 882-9730---" +
+				"https://sms.example/messages/synthetic-token",
+			wantEmail: "reader@example.com",
+			wantURL:   "https://mail.example/inbox",
+		},
+		{
+			name:        "two field export",
+			description: "reader@example.com---https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
 			wantEmail:   "reader@example.com",
 			wantURL:     "https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
 		},
 		{
 			name:        "literal plus email in URL query",
-			description: "https://mail.example/open?mail=user+tag%40example.com&pwd=synthetic",
+			description: "user+tag@example.com---https://mail.example/open?mail=user+tag%40example.com&pwd=synthetic",
 			wantEmail:   "user+tag@example.com",
 			wantURL:     "https://mail.example/open?mail=user+tag%40example.com&pwd=synthetic",
 		},
 		{
 			name:        "escaped plus email in URL query",
-			description: "https://mail.example/open?mail=user%2Btag%40example.com&pwd=synthetic",
+			description: "user+tag@example.com---https://mail.example/open?mail=user%2Btag%40example.com&pwd=synthetic",
 			wantEmail:   "user+tag@example.com",
 			wantURL:     "https://mail.example/open?mail=user%2Btag%40example.com&pwd=synthetic",
 		},
 		{
 			name:        "plus email in URL path",
-			description: "https://mail.example/inbox/user+tag@example.com/messages",
+			description: "user+tag@example.com---https://mail.example/inbox/user+tag@example.com/messages",
 			wantEmail:   "user+tag@example.com",
 			wantURL:     "https://mail.example/inbox/user+tag@example.com/messages",
 		},
@@ -93,18 +105,11 @@ func TestParseAccountHealthGroupDescription(t *testing.T) {
 			wantURL:     "https://mail.example/open?mail=other%40example.com&pwd=synthetic",
 		},
 		{
-			name: "export header HTML entities and date suffix",
+			name: "export header and HTML entities",
 			description: "卡密导出\nreader@example.com---https://mail.example/open?mail=reader%40example.com&amp;pwd=synthetic" +
-				"---2026-07-13 01:54:42",
+				"&amp;limit=5",
 			wantEmail: "reader@example.com",
-			wantURL:   "https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
-		},
-		{
-			name: "first mailbox URL ignores auxiliary URL",
-			description: "https://mail.example/open?mail=reader%40example.com&pwd=synthetic" +
-				"|https://sms.example/messages/synthetic",
-			wantEmail: "reader@example.com",
-			wantURL:   "https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
+			wantURL:   "https://mail.example/open?mail=reader%40example.com&pwd=synthetic&limit=5",
 		},
 		{
 			name:        "single mailbox URL can use preceding account email",
@@ -113,18 +118,16 @@ func TestParseAccountHealthGroupDescription(t *testing.T) {
 			wantURL:     "https://mail.example/inbox",
 		},
 		{
-			name: "first mailbox URL with account evidence wins over later auxiliary URL",
-			description: "reader@example.com---https://mail.example/open?mail=reader%40example.com&pwd=synthetic---" +
-				"https://sms.example/messages?mail=reader%40example.com",
-			wantEmail: "reader@example.com",
-			wantURL:   "https://mail.example/open?mail=reader%40example.com&pwd=synthetic",
+			name:        "mail URL trailing punctuation is preserved",
+			description: "reader@example.com---https://mail.example/inbox/token.",
+			wantEmail:   "reader@example.com",
+			wantURL:     "https://mail.example/inbox/token.",
 		},
 		{
-			name: "first mailbox URL without account query wins over later auxiliary URL",
-			description: "reader@example.com---https://mail.example/inbox---" +
-				"https://sms.example/messages?mail=reader%40example.com",
-			wantEmail: "reader@example.com",
-			wantURL:   "https://mail.example/inbox",
+			name:        "encoded field separator stays in mail URL",
+			description: "reader@example.com---https://mail.example/inbox/token%2D%2D%2Dpart",
+			wantEmail:   "reader@example.com",
+			wantURL:     "https://mail.example/inbox/token%2D%2D%2Dpart",
 		},
 	}
 
@@ -134,9 +137,44 @@ func TestParseAccountHealthGroupDescription(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.wantEmail, target.email)
 			require.Equal(t, test.wantURL, target.mailboxURL)
-			if test.wantSecrets != nil {
-				require.ElementsMatch(t, test.wantSecrets, target.secrets)
-			}
+		})
+	}
+}
+
+func TestParseAccountHealthGroupDescriptionIgnoresTrailingSecrets(t *testing.T) {
+	target, err := parseAccountHealthMailboxTarget(
+		"owner@example.com---https://mail.example/inbox?mail=owner%40example.com" +
+			"---+19045550123---https://sms.example/api/system/get_sms/synthetic-sms-token",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "https://mail.example/inbox?mail=owner%40example.com", target.mailboxURL)
+	require.Empty(t, target.secrets)
+}
+
+func TestParseAccountHealthGroupDescriptionIgnoresTrailingFields(t *testing.T) {
+	const mailboxURL = "https://mail.example/open?mail=user%40example.com&pwd=synthetic"
+	tests := []struct {
+		name        string
+		description string
+		wantURL     string
+	}{
+		{name: "single arbitrary field", description: "user@example.com---" + mailboxURL + "---anything", wantURL: mailboxURL},
+		{name: "invalid phone and insecure SMS URL", description: "user@example.com---" + mailboxURL + "---not-a-phone---http://sms.example/messages", wantURL: mailboxURL},
+		{name: "five fields", description: "user@example.com---" + mailboxURL + "---+19045550123---https://sms.example/messages---tail", wantURL: mailboxURL},
+		{name: "mixed separator after three hyphens", description: "user@example.com---" + mailboxURL + "----+19045550123----https://sms.example/messages", wantURL: mailboxURL},
+		{name: "mixed separator after four hyphens", description: "user@example.com----" + mailboxURL + "---+19045550123---https://sms.example/messages", wantURL: mailboxURL},
+		{name: "five hyphens begin ignored suffix", description: "user@example.com---" + mailboxURL + "-----tail", wantURL: mailboxURL},
+		{name: "second account on same line", description: "user@example.com---" + mailboxURL + "---other@example.com---https://mail.example/other", wantURL: mailboxURL},
+		{name: "path-looking suffix", description: "user@example.com---https://mail.example/token---part", wantURL: "https://mail.example/token"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target, err := parseAccountHealthMailboxTarget(test.description)
+			require.NoError(t, err)
+			require.Equal(t, "user@example.com", target.email)
+			require.Equal(t, test.wantURL, target.mailboxURL)
 		})
 	}
 }
@@ -150,49 +188,46 @@ func TestParseAccountHealthGroupDescriptionRejectsInvalidFormatsWithoutLeakingIn
 	}{
 		{name: "empty", description: " \n# ignored", wantKind: accountHealthDescriptionEmpty},
 		{name: "missing URL", description: "user@example.com---do-not-leak", wantKind: accountHealthDescriptionMissingURL},
-		{name: "missing email", description: "https://mail.example/open?pwd=do-not-leak", wantKind: accountHealthDescriptionMissingEmail},
+		{name: "missing email", description: "not-an-email---" + secretURL, wantKind: accountHealthDescriptionMissingEmail},
+		{name: "legacy credential export", description: "user@example.com---password---token---" + secretURL, wantKind: accountHealthDescriptionMissingURL},
+		{name: "URL only", description: secretURL, wantKind: accountHealthDescriptionInvalidURL},
+		{name: "five hyphen separator", description: "user@example.com-----" + secretURL, wantKind: accountHealthDescriptionInvalidURL},
+		{name: "mail URL with surrounding text", description: "user@example.com---prefix " + secretURL + " suffix", wantKind: accountHealthDescriptionInvalidURL},
 		{name: "multiple lines", description: "one@example.com---" + secretURL + "\ntwo@example.com---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
-		{name: "multiple structured records on one line", description: "one@example.com---password---token---" + secretURL + "---two@example.com---password---token---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
-		{name: "multiple minimal records on one line", description: "one@example.com---" + secretURL + "---two@example.com---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
-		{name: "multiple URL-only records on one line", description: "https://mail.example/one?mail=one%40example.com---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
-		{name: "structured then minimal record on one line", description: "one@example.com---password---token---" + secretURL + "---two@example.com---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
-		{name: "minimal then structured record on one line", description: "one@example.com---" + secretURL + "---two@example.com---password---token---https://mail.example/two?mail=two%40example.com", wantKind: accountHealthDescriptionMultipleRecords},
 		{name: "valid and invalid lines", description: "one@example.com---" + secretURL + "\nbroken@example.com---no-link", wantKind: accountHealthDescriptionMixedInvalid},
 		{name: "invalid URL", description: "user@example.com---https://", wantKind: accountHealthDescriptionInvalidURL},
 		{name: "insecure URL", description: "user@example.com---http://mail.example/inbox", wantKind: accountHealthDescriptionInvalidURL},
-		{name: "consecutive domain dots", description: "user@example..com---password---token---https://mail.example/inbox", wantKind: accountHealthDescriptionMissingEmail},
-		{name: "empty domain label", description: "user@.example.com---password---token---https://mail.example/inbox", wantKind: accountHealthDescriptionMissingEmail},
-		{name: "leading domain hyphen", description: "user@-example.com---password---token---https://mail.example/inbox", wantKind: accountHealthDescriptionMissingEmail},
-		{name: "trailing domain hyphen", description: "user@example-.com---password---token---https://mail.example/inbox", wantKind: accountHealthDescriptionMissingEmail},
-		{name: "consecutive local dots in URL", description: "https://mail.example/inbox?mail=bad..user%40example.com", wantKind: accountHealthDescriptionMissingEmail},
-		{name: "invalid email in URL", description: "https://mail.example/inbox?mail=user%40example..com", wantKind: accountHealthDescriptionMissingEmail},
+		{name: "consecutive domain dots", description: "user@example..com---https://mail.example/inbox---+19045550123---https://sms.example/messages", wantKind: accountHealthDescriptionMissingEmail},
+		{name: "empty domain label", description: "user@.example.com---https://mail.example/inbox---+19045550123---https://sms.example/messages", wantKind: accountHealthDescriptionMissingEmail},
+		{name: "leading domain hyphen", description: "user@-example.com---https://mail.example/inbox---+19045550123---https://sms.example/messages", wantKind: accountHealthDescriptionMissingEmail},
+		{name: "trailing domain hyphen", description: "user@example-.com---https://mail.example/inbox---+19045550123---https://sms.example/messages", wantKind: accountHealthDescriptionMissingEmail},
 		{
-			name: "insecure unstructured mailbox is not replaced by HTTPS auxiliary URL",
+			name: "three field insecure mailbox is rejected",
 			description: "user@example.com---http://mail.example/inbox?mail=user%40example.com---" +
 				"https://docs.example/help",
 			wantKind: accountHealthDescriptionInvalidURL,
 		},
 		{
-			name: "insecure unstructured mailbox without account query is not replaced by HTTPS auxiliary URL",
+			name: "three field mailbox without account query is rejected",
 			description: "user@example.com---http://mail.example/inbox---" +
 				"https://docs.example/help",
 			wantKind: accountHealthDescriptionInvalidURL,
 		},
 		{
-			name: "structured account email cannot come from a credential or URL query",
-			description: "not-an-email---password@example.net---token---" +
-				"https://mail.example/inbox?mail=owner%40example.com",
+			name: "fielded account email cannot come from the mailbox URL",
+			description: "not-an-email---https://mail.example/inbox?mail=owner%40example.com" +
+				"---+19045550123---https://sms.example/messages",
 			wantKind: accountHealthDescriptionMissingEmail,
 		},
 		{
-			name: "insecure structured mailbox is not replaced by HTTPS auxiliary URL",
-			description: "user@example.com---password---token---http://mail.example/inbox---" +
-				"https://docs.example/help",
+			name: "insecure mailbox is not replaced by HTTPS SMS URL",
+			description: "user@example.com---http://mail.example/inbox---+19045550123---" +
+				"https://sms.example/messages",
 			wantKind: accountHealthDescriptionInvalidURL,
 		},
 		{
-			name:        "empty structured mailbox field is not replaced by auxiliary URL",
-			description: "user@example.com---password---token------https://docs.example/help",
+			name:        "empty mailbox field is not replaced by SMS URL",
+			description: "user@example.com--- ---+19045550123---https://sms.example/messages",
 			wantKind:    accountHealthDescriptionMissingURL,
 		},
 		{
@@ -261,21 +296,16 @@ func TestParseAccountHealthGroupDescriptionRejectsAlternateRecordSeparators(t *t
 	require.Equal(t, accountHealthDescriptionMixedInvalid, formatErr.kind)
 }
 
-func TestAccountHealthHasAdditionalRecordHandlesLongSuffixLinearly(t *testing.T) {
-	fields := []string{
-		"user@example.com",
-		"password",
-		"token",
-		"https://mail.example/inbox?mail=user%40example.com",
-	}
+func TestParseAccountHealthGroupDescriptionIgnoresLongSuffixLinearly(t *testing.T) {
+	fields := []string{"user@example.com", "https://mail.example/inbox?mail=user%40example.com"}
 	for index := 0; index < 2000; index++ {
-		fields = append(fields, "user@example.com")
+		fields = append(fields, "ignored")
 	}
 
-	require.False(t, accountHealthHasAdditionalRecord(strings.Join(fields, "---")))
-
-	fields = append(fields, "https://mail.example/other?mail=other%40example.com")
-	require.True(t, accountHealthHasAdditionalRecord(strings.Join(fields, "---")))
+	target, err := parseAccountHealthMailboxTarget(strings.Join(fields, "---"))
+	require.NoError(t, err)
+	require.Equal(t, "user@example.com", target.email)
+	require.Equal(t, "https://mail.example/inbox?mail=user%40example.com", target.mailboxURL)
 }
 
 func TestParseAccountHealthMailboxPageExtractsHTMLMessagesAndSrcdoc(t *testing.T) {
