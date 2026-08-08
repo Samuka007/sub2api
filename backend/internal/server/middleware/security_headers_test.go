@@ -329,6 +329,16 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 			{"frame-src", TencentCaptchaStaticDomain},
 			{"connect-src", TencentCaptchaDomain},
 			{"connect-src", TencentCaptchaStaticDomain},
+			{"script-src", TencentCaptchaCDNDomain},
+			{"script-src", TencentCaptchaGlobalDomain},
+			{"script-src", TencentCaptchaGlobalCDNDomain},
+			{"script-src", TencentCaptchaPrehandleDomain},
+			{"script-src", TencentCaptchaJQueryDomain},
+			{"connect-src", TencentCaptchaPrehandleDomain},
+			{"connect-src", TencentCaptchaRceDomain},
+			{"frame-src", TencentCaptchaGlobalDomain},
+			{"frame-src", TencentCaptchaPrehandleDomain},
+			{"worker-src", TencentCaptchaWorkerSource},
 		} {
 			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
 		}
@@ -356,6 +366,34 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 			{"connect-src", AliyunCaptchaDualAPIBackup},
 		} {
 			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
+		}
+	})
+
+	t.Run("does_not_duplicate_tencent_captcha_worker_source", func(t *testing.T) {
+		policy := "default-src 'self'; worker-src 'self' blob:; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "worker-src", TencentCaptchaWorkerSource))
+	})
+
+	t.Run("default_policy_carries_tencent_captcha_dynamic_domains", func(t *testing.T) {
+		for _, required := range []struct {
+			directive string
+			value     string
+		}{
+			{"script-src", TencentCaptchaCDNDomain},
+			{"script-src", TencentCaptchaGlobalDomain},
+			{"script-src", TencentCaptchaGlobalCDNDomain},
+			{"script-src", TencentCaptchaPrehandleDomain},
+			{"script-src", TencentCaptchaJQueryDomain},
+			{"connect-src", TencentCaptchaPrehandleDomain},
+			{"connect-src", TencentCaptchaRceDomain},
+			{"frame-src", TencentCaptchaGlobalDomain},
+			{"frame-src", TencentCaptchaPrehandleDomain},
+			{"worker-src", TencentCaptchaWorkerSource},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(config.DefaultCSPPolicy, required.directive, required.value),
+				"DefaultCSPPolicy missing %s %s", required.directive, required.value)
 		}
 	})
 

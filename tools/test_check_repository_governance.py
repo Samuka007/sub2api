@@ -34,6 +34,13 @@ class RepositoryGovernanceTest(unittest.TestCase):
         for name in ("README_CN.md", "README_JA.md"):
             (self.root / name).write_text("v0.1.169\n", encoding="utf-8")
 
+        (self.root / "deploy/config.example.yaml").write_text(
+            "metrics:\n  enabled: false\n"
+            "quota_recovery:\n  enabled: false\n"
+            "model_tracing:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+
         for relative_path, target in governance.REQUIRED_SYMLINKS.items():
             path = self.root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +129,24 @@ class RepositoryGovernanceTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("README upstream baseline does not match .upstream-version", result.stderr)
+
+    def test_rejects_missing_internal_config_example_sections(self) -> None:
+        config_example = self.root / "deploy/config.example.yaml"
+        config_example.parent.mkdir(parents=True, exist_ok=True)
+        config_example.write_text(
+            "metrics:\n  enabled: false\n"
+            "quota_recovery:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+        self.run_git("add", "deploy/config.example.yaml")
+
+        result = self.run_check()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "internal config example section is missing: model_tracing",
+            result.stderr,
+        )
 
     def test_rejects_missing_ignore_boundaries(self) -> None:
         (self.root / ".gitignore").write_text("", encoding="utf-8")

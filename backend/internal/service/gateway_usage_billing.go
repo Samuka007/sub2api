@@ -343,7 +343,8 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
 		return false, nil
 	}
-	reconcileUsageLogBalanceCharge(usageLog, p, result)
+	effects := resolvePostUsageBillingEffects(cmd, result)
+	reconcileUsageLogCharge(usageLog, p, effects, result)
 
 	if result.APIKeyQuotaExhausted {
 		if invalidator, ok := p.APIKeyService.(apiKeyAuthCacheInvalidator); ok && p.APIKey != nil && p.APIKey.Key != "" {
@@ -351,19 +352,47 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		}
 	}
 
-	finalizePostUsageBilling(billingCtx, p, deps, result)
+	finalizePostUsageBilling(billingCtx, p, deps, result, effects)
 	return true, nil
 }
 
-func reconcileUsageLogBalanceCharge(usageLog *UsageLog, p *postUsageBillingParams, result *UsageBillingApplyResult) {
-	if usageLog == nil || p == nil || p.User == nil || result == nil || result.BalanceCharged == nil {
+type postUsageBillingEffects struct {
+	BalanceCharge         float64
+	SubscriptionCost      float64
+	APIKeyRateLimitCost   float64
+	AccountQuotaCost      float64
+	UserPlatformQuotaCost float64
+}
+
+func resolvePostUsageBillingEffects(cmd *UsageBillingCommand, result *UsageBillingApplyResult) postUsageBillingEffects {
+	if cmd == nil {
+		return postUsageBillingEffects{}
+	}
+	effects := postUsageBillingEffects{
+		BalanceCharge:         cmd.BalanceCost,
+		SubscriptionCost:      cmd.SubscriptionCost,
+		APIKeyRateLimitCost:   cmd.APIKeyRateLimitCost,
+		AccountQuotaCost:      cmd.AccountQuotaCost,
+		UserPlatformQuotaCost: cmd.BalanceCost,
+	}
+	if result != nil && result.BalanceCharged != nil {
+		effects.BalanceCharge = *result.BalanceCharged
+		if effects.BalanceCharge < 0 {
+			effects.BalanceCharge = 0
+		}
+	}
+	return effects
+}
+
+func reconcileUsageLogCharge(usageLog *UsageLog, p *postUsageBillingParams, effects postUsageBillingEffects, result *UsageBillingApplyResult) {
+	if usageLog == nil || p == nil || p.User == nil {
 		return
 	}
-	charged := *result.BalanceCharged
-	if charged < 0 {
-		charged = 0
+	charged := effects.BalanceCharge
+	if p.IsSubscriptionBill {
+		charged = effects.SubscriptionCost
 	}
-	if charged >= usageLog.ActualCost {
+	if charged == usageLog.ActualCost {
 		return
 	}
 	requested := usageLog.ActualCost
@@ -373,25 +402,25 @@ func reconcileUsageLogBalanceCharge(usageLog *UsageLog, p *postUsageBillingParam
 		"user_id", p.User.ID,
 		"requested_cost", requested,
 		"charged_cost", charged,
-		"balance_exhausted", result.BalanceOverdrafted,
+		"balance_exhausted", result != nil && result.BalanceOverdrafted,
 	)
 }
 
-func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult, effects postUsageBillingEffects) {
 	if p == nil || p.Cost == nil || deps == nil {
 		return
 	}
 
 	if p.IsSubscriptionBill {
-		if p.Cost.ActualCost > 0 && p.User != nil && p.APIKey != nil && p.APIKey.GroupID != nil {
-			deps.billingCacheService.QueueUpdateSubscriptionUsage(p.User.ID, *p.APIKey.GroupID, p.Cost.ActualCost)
+		if effects.SubscriptionCost > 0 && p.User != nil && p.APIKey != nil && p.APIKey.GroupID != nil {
+			deps.billingCacheService.QueueUpdateSubscriptionUsage(p.User.ID, *p.APIKey.GroupID, effects.SubscriptionCost)
 		}
-	} else if p.Cost.ActualCost > 0 && p.User != nil {
-		syncBalanceCacheAfterDeduction(ctx, p, deps, result)
+	} else if effects.BalanceCharge > 0 && p.User != nil {
+		syncBalanceCacheAfterDeduction(ctx, p, deps, result, effects.BalanceCharge)
 	}
 
-	if p.Cost.ActualCost > 0 && p.APIKey != nil && p.APIKey.HasRateLimits() {
-		deps.billingCacheService.QueueUpdateAPIKeyRateLimitUsage(p.APIKey.ID, p.Cost.ActualCost)
+	if effects.APIKeyRateLimitCost > 0 && p.APIKey != nil && p.APIKey.HasRateLimits() {
+		deps.billingCacheService.QueueUpdateAPIKeyRateLimitUsage(p.APIKey.ID, effects.APIKeyRateLimitCost)
 	}
 
 	deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
@@ -403,13 +432,13 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 	//     限制在并发 in-flight 请求数量内（旧实现的异步入队会让超支无限累积直到 worker 处理）
 	//   - DB 异步(flusher_enabled=false):在独立 goroutine 中走 detached context,失败用 ALERT log 触发 oncall 对账
 	//   - flusher_enabled=true:不直写 DB,由 flusher 异步批量刷（markDirty 已在 IncrementUserPlatformQuotaUsage 内部完成）
-	if !p.IsSubscriptionBill && p.Platform != "" && p.Cost.ActualCost > 0 && p.User != nil && deps.userPlatformQuotaRepo != nil {
+	if !p.IsSubscriptionBill && p.Platform != "" && effects.UserPlatformQuotaCost > 0 && p.User != nil && deps.userPlatformQuotaRepo != nil {
 		if deps.billingCacheService.HasUserPlatformQuotaLimit(ctx, p.User.ID, p.Platform) {
-			deps.billingCacheService.IncrementUserPlatformQuotaUsage(p.User.ID, p.Platform, p.Cost.ActualCost)
+			deps.billingCacheService.IncrementUserPlatformQuotaUsage(p.User.ID, p.Platform, effects.UserPlatformQuotaCost)
 			if deps.cfg == nil || !deps.cfg.Database.UserPlatformQuotaFlusherEnabled {
 				// 降级路径:flusher 未启用时保留原有异步直写 DB
 				dbCtx, dbCancel := detachUpstreamContext(ctx)
-				userID, platform, cost := p.User.ID, p.Platform, p.Cost.ActualCost
+				userID, platform, cost := p.User.ID, p.Platform, effects.UserPlatformQuotaCost
 				go func() {
 					defer func() {
 						if r := recover(); r != nil {
@@ -433,10 +462,10 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 	// Notification checks run async — all parameters are already captured,
 	// no dependency on the request context or upstream connection.
 	go notifyBalanceLow(p, deps, result)
-	go notifyAccountQuota(p, deps, result)
+	go notifyAccountQuota(p, deps, result, effects.AccountQuotaCost)
 }
 
-func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult, chargedAmount ...float64) {
 	if p == nil || p.Cost == nil || p.User == nil || deps == nil || deps.billingCacheService == nil {
 		return
 	}
@@ -451,7 +480,11 @@ func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingPara
 		}
 		return
 	}
-	deps.billingCacheService.QueueDeductBalance(p.User.ID, p.Cost.ActualCost)
+	charged := p.Cost.ActualCost
+	if len(chargedAmount) > 0 {
+		charged = chargedAmount[0]
+	}
+	deps.billingCacheService.QueueDeductBalance(p.User.ID, charged)
 }
 
 // notifyBalanceLow sends balance low notification after deduction.
@@ -506,7 +539,7 @@ func resolveOldBalance(p *postUsageBillingParams, result *UsageBillingApplyResul
 // notifyAccountQuota sends account quota threshold notification after increment.
 // When result.QuotaState is available (from DB transaction RETURNING), it is passed directly
 // to avoid a separate DB read that may see stale or concurrently-modified data.
-func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult, accountCost float64) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("panic in notifyAccountQuota", "recover", r)
@@ -521,7 +554,7 @@ func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *Us
 		)
 		return
 	}
-	accountCost := p.Cost.TotalCost * p.AccountRateMultiplier
+
 	var quotaState *AccountQuotaState
 	if result != nil {
 		quotaState = result.QuotaState
@@ -1106,6 +1139,16 @@ func (s *GatewayService) buildRecordUsageLog(
 ) *UsageLog {
 	durationMs := int(result.Duration.Milliseconds())
 	requestID := resolveUsageBillingRequestIDForEndpoint(ctx, input.InboundEndpoint, result)
+	sentModel := upstreamSentModel(result.Model, result.UpstreamModel)
+	if result.UpstreamResponseModelConflict {
+		slog.Warn("upstream_response_model_conflict",
+			"platform", account.Platform,
+			"account_id", account.ID,
+			"request_id", requestID,
+			"sent_model", sentModel,
+			"selected_response_model", strings.TrimSpace(result.UpstreamResponseModel),
+		)
+	}
 	usageLog := &UsageLog{
 		UserID:                user.ID,
 		APIKeyID:              apiKey.ID,
@@ -1114,6 +1157,8 @@ func (s *GatewayService) buildRecordUsageLog(
 		Model:                 result.Model,
 		RequestedModel:        requestedModel,
 		UpstreamModel:         optionalTrimmedStringPtr(result.UpstreamModel),
+		UpstreamResponseModel: optionalTrimmedStringPtr(result.UpstreamResponseModel),
+		UpstreamModelMismatch: upstreamModelMismatch(sentModel, result.UpstreamResponseModel),
 		ReasoningEffort:       result.ReasoningEffort,
 		InboundEndpoint:       optionalTrimmedStringPtr(input.InboundEndpoint),
 		UpstreamEndpoint:      optionalTrimmedStringPtr(input.UpstreamEndpoint),

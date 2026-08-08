@@ -1,0 +1,110 @@
+package service
+
+import (
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+func TestUpstreamResponseModelObserverTerminalWinsAndRecordsConflict(t *testing.T) {
+	observer := &upstreamResponseModelObserver{}
+
+	observer.ObserveOpenAI([]byte(`{"type":"response.created","response":{"model":"gpt-5.5"}}`), "response.created")
+	observer.ObserveOpenAI([]byte(`{"type":"response.completed","response":{"model":"gpt-5.4"}}`), "response.completed")
+
+	require.Equal(t, "gpt-5.4", observer.Model())
+	require.True(t, observer.Conflict())
+}
+
+func TestUpstreamResponseModelObserverSupportsAnthropicAndGeminiShapes(t *testing.T) {
+	t.Run("anthropic", func(t *testing.T) {
+		observer := &upstreamResponseModelObserver{}
+		observer.ObserveAnthropic([]byte(`{"type":"message_start","message":{"model":"claude-sonnet-4-20250514"}}`))
+		require.Equal(t, "claude-sonnet-4-20250514", observer.Model())
+	})
+
+	t.Run("gemini outer and nested", func(t *testing.T) {
+		observer := &upstreamResponseModelObserver{}
+		observer.ObserveGemini([]byte(`{"response":{"modelVersion":"gemini-2.5-pro"}}`))
+		observer.ObserveGemini([]byte(`{"modelVersion":"gemini-2.5-pro-latest"}`))
+		require.Equal(t, "gemini-2.5-pro-latest", observer.Model())
+		require.True(t, observer.Conflict())
+	})
+}
+
+func TestUpstreamResponseModelObservationAttemptReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+
+	first := beginUpstreamResponseModelObservation(c)
+	first.Observe("failed-attempt-model", false)
+	second := beginUpstreamResponseModelObservation(c)
+	second.Observe("successful-attempt-model", false)
+
+	require.Equal(t, "successful-attempt-model", observedUpstreamResponseModel(c))
+	require.False(t, observedUpstreamResponseModelConflict(c))
+}
+
+func TestUpstreamModelMismatchThreeStateAndCaseInsensitiveComparison(t *testing.T) {
+	require.Nil(t, upstreamModelMismatch("gpt-5.5", ""))
+
+	matched := upstreamModelMismatch("gpt-5.5", "GPT-5.5")
+	require.NotNil(t, matched)
+	require.False(t, *matched)
+
+	mismatched := upstreamModelMismatch("gpt-5.5", "gpt-5.4")
+	require.NotNil(t, mismatched)
+	require.True(t, *mismatched)
+}
+
+func TestObserveOpenAISSEBodyIgnoresMalformedPayload(t *testing.T) {
+	observer := &upstreamResponseModelObserver{}
+	observeOpenAISSEBody(observer, "data: not-json\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.4\"}}\n\n")
+
+	require.Equal(t, "gpt-5.4", observer.Model())
+	require.False(t, observer.Conflict())
+}
+
+func TestUpstreamResponseModelObserverBoundsUntrustedModelName(t *testing.T) {
+	observer := &upstreamResponseModelObserver{}
+	observer.Observe("  "+strings.Repeat("模", upstreamResponseModelMaxLength+1)+"  ", false)
+
+	require.Len(t, []rune(observer.Model()), upstreamResponseModelMaxLength)
+}
+
+func TestReadCCUpstreamJSONResponseObservesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	beginUpstreamResponseModelObservation(c)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(`{
+		"id":"chatcmpl-1","model":"upstream-json-model","choices":[],
+		"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+	}`))}
+
+	svc := &OpenAIGatewayService{}
+	_, _, err := svc.readCCUpstreamJSONResponse(c, resp, func(*gin.Context, int, string, string) {})
+	require.NoError(t, err)
+	require.Equal(t, "upstream-json-model", observedUpstreamResponseModel(c))
+}
+
+func TestScanCCStreamObservesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	beginUpstreamResponseModelObservation(c)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"upstream-stream-model\",\"choices\":[]}\n\n" +
+			"data: [DONE]\n\n",
+	))}
+
+	svc := &OpenAIGatewayService{}
+	state := svc.scanCCStream(c, resp, "test", "req-1", time.Now(), func(*apicompat.ChatCompletionsChunk) {})
+	require.NoError(t, state.Err)
+	require.True(t, state.SawDone)
+	require.Equal(t, "upstream-stream-model", observedUpstreamResponseModel(c))
+}

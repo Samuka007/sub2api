@@ -22,6 +22,20 @@ const (
 	TencentCaptchaDomain = "https://turing.captcha.qcloud.com"
 	// TencentCaptchaStaticDomain hosts Tencent Captcha scripts and static assets.
 	TencentCaptchaStaticDomain = "https://*.captcha.gtimg.com"
+	// TencentCaptchaCDNDomain hosts the Chinese mainland SDK core script.
+	TencentCaptchaCDNDomain = "https://turing.captcha.gtimg.com"
+	// TencentCaptchaGlobalDomain hosts the international SDK and challenge iframe.
+	TencentCaptchaGlobalDomain = "https://ca.turing.captcha.qcloud.com"
+	// TencentCaptchaGlobalCDNDomain hosts the international SDK core script.
+	TencentCaptchaGlobalCDNDomain = "https://global.turing.captcha.gtimg.com"
+	// TencentCaptchaPrehandleDomain hosts dynamic preprocessing scripts and APIs.
+	TencentCaptchaPrehandleDomain = "https://www.tycaptcha.com"
+	// TencentCaptchaJQueryDomain hosts the jQuery dependency loaded by the mainland SDK.
+	TencentCaptchaJQueryDomain = "https://cloudcache.tencentcs.com"
+	// TencentCaptchaRceDomain hosts the international risk-control API.
+	TencentCaptchaRceDomain = "https://rce.tencentrio.com"
+	// TencentCaptchaWorkerSource allows the international SDK's Web Worker.
+	TencentCaptchaWorkerSource = "blob:"
 	// AliyunCaptchaStaticDomain hosts the Aliyun Captcha 2.0 Web SDK and assets.
 	AliyunCaptchaStaticDomain = "https://*.alicdn.com"
 	// AliyunCaptchaCNStaticDomain hosts China-region Aliyun Captcha assets.
@@ -57,6 +71,16 @@ var requiredCSPDirectiveValues = []struct {
 	{"frame-src", TencentCaptchaStaticDomain},
 	{"connect-src", TencentCaptchaDomain},
 	{"connect-src", TencentCaptchaStaticDomain},
+	{"script-src", TencentCaptchaCDNDomain},
+	{"script-src", TencentCaptchaGlobalDomain},
+	{"script-src", TencentCaptchaGlobalCDNDomain},
+	{"script-src", TencentCaptchaPrehandleDomain},
+	{"script-src", TencentCaptchaJQueryDomain},
+	{"connect-src", TencentCaptchaPrehandleDomain},
+	{"connect-src", TencentCaptchaRceDomain},
+	{"frame-src", TencentCaptchaGlobalDomain},
+	{"frame-src", TencentCaptchaPrehandleDomain},
+	{"worker-src", TencentCaptchaWorkerSource},
 	{"script-src", AliyunCaptchaStaticDomain},
 	{"style-src", AliyunCaptchaStaticDomain},
 	{"script-src", AliyunCaptchaCNStaticDomain},
