@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -182,10 +183,17 @@ type BulkUpdateAccountFilters struct {
 
 const (
 	maxAccountHealthCandidateGroups = 50
+	maxAccountNoteExportIDs         = 5000
+	maxAccountNoteExportRawIDs      = 10000
+	maxAccountNoteExportBodyBytes   = 256 << 10
 )
 
 type accountHealthDetectionRequest struct {
 	GroupID int64 `json:"group_id" binding:"required,gt=0"`
+}
+
+type accountNoteExportRequest struct {
+	AccountIDs []int64 `json:"account_ids"`
 }
 
 // CheckMixedChannelRequest represents check mixed channel risk request
@@ -731,6 +739,99 @@ func (h *AccountHandler) ListAccountHealthCandidates(c *gin.Context) {
 		end = len(candidates)
 	}
 	response.Paginated(c, candidates[start:end], total, page, pageSize)
+}
+
+// ExportNotes exports the selected OpenAI account notes as one UTF-8 text line per account.
+// POST /api/v1/admin/accounts/export-notes
+func (h *AccountHandler) ExportNotes(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAccountNoteExportBodyBytes)
+	if c.Request.ContentLength > maxAccountNoteExportBodyBytes {
+		response.Error(c, http.StatusRequestEntityTooLarge, "Request body too large")
+		return
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			response.Error(c, http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
+		response.BadRequest(c, "Invalid request")
+		return
+	}
+
+	var req accountNoteExportRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		response.BadRequest(c, "Invalid request")
+		return
+	}
+	if len(req.AccountIDs) == 0 {
+		response.BadRequest(c, "account_ids is required")
+		return
+	}
+	if len(req.AccountIDs) > maxAccountNoteExportRawIDs {
+		response.BadRequest(c, "too many account_ids")
+		return
+	}
+
+	preallocCapacity := min(len(req.AccountIDs), maxAccountNoteExportIDs+1)
+	accountIDs := make([]int64, 0, preallocCapacity)
+	seen := make(map[int64]struct{}, preallocCapacity)
+	for _, accountID := range req.AccountIDs {
+		if accountID <= 0 {
+			response.BadRequest(c, "account_ids must contain positive integers")
+			return
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		accountIDs = append(accountIDs, accountID)
+		if len(accountIDs) > maxAccountNoteExportIDs {
+			response.BadRequest(c, "too many account_ids")
+			return
+		}
+	}
+
+	accounts, err := h.adminService.GetAccountsByIDs(c.Request.Context(), accountIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	accountsByID := make(map[int64]*service.Account, len(accounts))
+	for _, account := range accounts {
+		if account != nil {
+			accountsByID[account.ID] = account
+		}
+	}
+
+	notes := make([]string, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		account := accountsByID[accountID]
+		if account == nil {
+			response.NotFound(c, fmt.Sprintf("Account %d not found", accountID))
+			return
+		}
+		if account.Platform != service.PlatformOpenAI {
+			response.BadRequest(c, fmt.Sprintf("Account %d is not an OpenAI account", accountID))
+			return
+		}
+
+		note := ""
+		if account.Notes != nil {
+			note = strings.Join(strings.Fields(*account.Notes), " ")
+		}
+		notes = append(notes, note)
+	}
+
+	filename := fmt.Sprintf("sub2api-account-notes-%s.txt", time.Now().UTC().Format("20060102150405"))
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Exported-Count", strconv.Itoa(len(accountIDs)))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte("\uFEFF"+strings.Join(notes, "\n")+"\n"))
 }
 
 func parseAccountHealthGroupIDs(raw string) ([]int64, error) {

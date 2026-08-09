@@ -34,7 +34,7 @@
                 <SearchInput
                   v-model="groupSearch"
                   class="mt-2 max-w-xl"
-                  :disabled="deleting"
+                  :disabled="deleting || exportingNotes"
                   :placeholder="t('admin.accountHealthDetector.groups.searchPlaceholder')"
                   :aria-label="t('admin.accountHealthDetector.groups.searchLabel')"
                   data-test="group-search"
@@ -44,7 +44,7 @@
                 <button
                   type="button"
                   class="btn btn-secondary px-3 py-2 text-xs"
-                  :disabled="groupsLoading || accountsLoading || scanning || deleting || filteredGroups.length === 0"
+                  :disabled="groupsLoading || accountsLoading || scanning || deleting || exportingNotes || filteredGroups.length === 0"
                   data-test="select-visible-groups"
                   @click="selectVisibleGroups"
                 >
@@ -54,7 +54,7 @@
                 <button
                   type="button"
                   class="btn btn-secondary px-3 py-2 text-xs"
-                  :disabled="groupsLoading || accountsLoading || selectedGroupIds.length === 0 || scanning || deleting"
+                  :disabled="groupsLoading || accountsLoading || selectedGroupIds.length === 0 || scanning || deleting || exportingNotes"
                   data-test="clear-groups"
                   @click="clearSelectedGroups"
                 >
@@ -64,7 +64,7 @@
                 <button
                   type="button"
                   class="btn btn-primary"
-                  :disabled="groupsLoading || accountsLoading || scanning || deleting || selectedGroupIds.length === 0"
+                  :disabled="groupsLoading || accountsLoading || scanning || deleting || exportingNotes || selectedGroupIds.length === 0"
                   data-test="load-accounts"
                   @click="loadAccounts"
                 >
@@ -74,7 +74,7 @@
                 <button
                   type="button"
                   class="btn btn-secondary"
-                  :disabled="groupsLoading || accountsLoading || scanning || deleting"
+                  :disabled="groupsLoading || accountsLoading || scanning || deleting || exportingNotes"
                   :title="t('admin.accountHealthDetector.actions.reloadGroups')"
                   data-test="reload-groups"
                   @click="loadGroups"
@@ -98,7 +98,7 @@
                   type="checkbox"
                   class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-600 dark:bg-dark-700"
                   :checked="selectedGroupIds.includes(group.id)"
-                  :disabled="groupsLoading || scanning || accountsLoading || deleting"
+                  :disabled="groupsLoading || scanning || accountsLoading || deleting || exportingNotes"
                   :data-test="`group-${group.id}`"
                   @change="toggleGroup(group.id, ($event.target as HTMLInputElement).checked)"
                 />
@@ -128,7 +128,7 @@
                 min="1"
                 max="10"
                 step="1"
-                :disabled="scanning || deleting"
+                :disabled="scanning || deleting || exportingNotes"
               />
             </div>
 
@@ -137,7 +137,7 @@
                 type="button"
                 class="btn btn-primary"
                 data-test="start-scan"
-                :disabled="accountsLoading || scanning || deleting || accounts.length === 0"
+                :disabled="accountsLoading || scanning || deleting || exportingNotes || accounts.length === 0"
                 @click="startScan"
               >
                 <Icon :name="scanning ? 'refresh' : 'play'" size="sm" :class="{ 'animate-spin': scanning }" />
@@ -155,9 +155,20 @@
               </button>
               <button
                 type="button"
+                class="btn btn-secondary"
+                data-test="export-selected-notes"
+                :disabled="groupsLoading || accountsLoading || scanning || deleting || exportingNotes || selectedAccountIds.length === 0"
+                :aria-busy="exportingNotes"
+                @click="exportSelectedNotes"
+              >
+                <Icon :name="exportingNotes ? 'refresh' : 'download'" size="sm" :class="{ 'animate-spin': exportingNotes }" />
+                <span>{{ t('admin.accountHealthDetector.actions.exportSelectedNotes', { count: selectedAccountIds.length }) }}</span>
+              </button>
+              <button
+                type="button"
                 class="btn btn-danger"
                 data-test="delete-selected"
-                :disabled="scanning || deleting || selectedAccountIds.length === 0"
+                :disabled="scanning || deleting || exportingNotes || selectedAccountIds.length === 0"
                 @click="requestDeleteSelected"
               >
                 <Icon name="trash" size="sm" />
@@ -167,7 +178,7 @@
                 type="button"
                 class="btn btn-secondary text-red-600 hover:text-red-700 dark:text-red-400"
                 data-test="delete-all"
-                :disabled="scanning || deleting || accounts.length === 0"
+                :disabled="scanning || deleting || exportingNotes || accounts.length === 0"
                 @click="requestDeleteAll"
               >
                 <Icon name="trash" size="sm" />
@@ -206,14 +217,17 @@
         <div class="space-y-3">
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
             <SearchInput
-              v-model="filters.search"
+              :model-value="filters.search"
+              :disabled="exportingNotes"
               :placeholder="t('admin.accountHealthDetector.filters.searchPlaceholder')"
               :aria-label="t('admin.accountHealthDetector.filters.searchLabel')"
+              data-test="account-search"
+              @update:model-value="updateAccountFilter('search', $event)"
             />
-            <Select v-model="filters.localStatus" :options="localStatusOptions" :aria-label="t('admin.accountHealthDetector.filters.localStatusLabel')" />
-            <Select v-model="filters.outcome" :options="outcomeOptions" :aria-label="t('admin.accountHealthDetector.filters.outcomeLabel')" />
-            <Select v-model="filters.banStatus" :options="banStatusOptions" :aria-label="t('admin.accountHealthDetector.filters.banStatusLabel')" />
-            <Select v-model="filters.plusStatus" :options="plusStatusOptions" :aria-label="t('admin.accountHealthDetector.filters.plusStatusLabel')" />
+            <Select :model-value="filters.localStatus" :options="localStatusOptions" :disabled="exportingNotes" :aria-label="t('admin.accountHealthDetector.filters.localStatusLabel')" data-test="local-status-filter" @update:model-value="updateAccountFilter('localStatus', $event)" />
+            <Select :model-value="filters.outcome" :options="outcomeOptions" :disabled="exportingNotes" :aria-label="t('admin.accountHealthDetector.filters.outcomeLabel')" data-test="outcome-filter" @update:model-value="updateAccountFilter('outcome', $event)" />
+            <Select :model-value="filters.banStatus" :options="banStatusOptions" :disabled="exportingNotes" :aria-label="t('admin.accountHealthDetector.filters.banStatusLabel')" data-test="ban-status-filter" @update:model-value="updateAccountFilter('banStatus', $event)" />
+            <Select :model-value="filters.plusStatus" :options="plusStatusOptions" :disabled="exportingNotes" :aria-label="t('admin.accountHealthDetector.filters.plusStatusLabel')" data-test="plus-status-filter" @update:model-value="updateAccountFilter('plusStatus', $event)" />
           </div>
 
           <div class="flex items-end gap-2 md:hidden" data-test="mobile-sort-controls">
@@ -223,6 +237,7 @@
                 id="account-health-mobile-sort"
                 :model-value="sortState.key"
                 :options="mobileSortOptions"
+                :disabled="exportingNotes"
                 :aria-label="t('admin.accountHealthDetector.filters.sortFieldLabel')"
                 data-test="mobile-sort-field"
                 @update:model-value="handleMobileSortKey"
@@ -232,6 +247,7 @@
               type="button"
               class="btn btn-secondary h-10 w-10 shrink-0 p-0"
               data-test="mobile-sort-order"
+              :disabled="exportingNotes"
               :aria-label="mobileSortOrderLabel"
               :title="mobileSortOrderLabel"
               @click="toggleMobileSortOrder"
@@ -245,11 +261,11 @@
               {{ t('admin.accountHealthDetector.filters.visibleCount', { count: filteredRows.length }) }}
             </span>
             <div class="flex flex-wrap items-center gap-2">
-              <button type="button" class="btn btn-secondary px-3 py-1.5 text-xs" :disabled="filteredRows.length === 0 || scanning || deleting" @click="selectFilteredAccounts">
+              <button type="button" class="btn btn-secondary px-3 py-1.5 text-xs" data-test="select-filtered-accounts" :disabled="filteredRows.length === 0 || scanning || deleting || exportingNotes" @click="selectFilteredAccounts">
                 <Icon name="check" size="sm" />
                 <span>{{ t('admin.accountHealthDetector.actions.selectFilteredAccounts') }}</span>
               </button>
-              <button type="button" class="btn btn-secondary px-3 py-1.5 text-xs" :disabled="selectedAccountIds.length === 0 || scanning || deleting" @click="selectedAccountIds = []">
+              <button type="button" class="btn btn-secondary px-3 py-1.5 text-xs" :disabled="selectedAccountIds.length === 0 || scanning || deleting || exportingNotes" @click="selectedAccountIds = []">
                 <Icon name="x" size="sm" />
                 <span>{{ t('admin.accountHealthDetector.actions.clearAccountSelection') }}</span>
               </button>
@@ -267,7 +283,7 @@
           selectable
           server-side-sort
           :selected-keys="selectedAccountIds"
-          :selection-disabled="scanning || deleting"
+          :selection-disabled="scanning || deleting || exportingNotes"
           :selection-label="selectionLabel"
           :sort-key="sortState.key"
           :sort-order="sortState.order"
@@ -322,7 +338,7 @@
             <button
               type="button"
               class="inline-flex h-8 w-8 items-center justify-center rounded text-red-600 hover:bg-red-50 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 dark:text-red-400 dark:hover:bg-red-950/40"
-              :disabled="scanning || deleting"
+              :disabled="scanning || deleting || exportingNotes"
               :aria-label="t('admin.accountHealthDetector.actions.deleteAccount', { name: row.account_name })"
               :title="t('admin.accountHealthDetector.actions.deleteAccount', { name: row.account_name })"
               :data-test="`delete-account-${row.id}`"
@@ -442,6 +458,7 @@ type AccountHealthSortKey = Exclude<keyof AccountHealthRow, 'account' | 'group_n
 
 const maxSelectedGroups = 50
 const maxBatchDeleteAccounts = 500
+const maxAccountNoteExportAccounts = 5000
 const sortableColumnKeys = new Set<AccountHealthSortKey>([
   'account_name', 'account_type', 'group_name', 'email', 'local_status', 'outcome', 'ban_status',
   'plus_status', 'plus_date', 'payment_method', 'ban_date', 'lifespan', 'score',
@@ -460,6 +477,7 @@ const loadedGroupKey = ref('')
 const accounts = ref<AccountHealthCandidate[]>([])
 const accountsLoading = ref(false)
 const selectedAccountIds = ref<number[]>([])
+const exportingNotes = ref(false)
 const deleting = ref(false)
 const concurrency = ref(3)
 const scanning = ref(false)
@@ -474,6 +492,7 @@ const deleteDialog = reactive({ show: false, ids: [] as number[], label: '' })
 let groupsController: AbortController | null = null
 let accountsController: AbortController | null = null
 let scanController: AbortController | null = null
+let notesExportController: AbortController | null = null
 
 const selectedGroupKey = computed(() => [...selectedGroupIds.value].sort((a, b) => a - b).join(','))
 const filteredGroups = computed(() => {
@@ -483,25 +502,25 @@ const filteredGroups = computed(() => {
 })
 
 const columns = computed<Column[]>(() => [
-  { key: 'account_name', label: t('admin.accountHealthDetector.columns.account'), sortable: true },
-  { key: 'group_name', label: t('admin.accountHealthDetector.columns.groups'), sortable: true },
-  { key: 'local_status', label: t('admin.accountHealthDetector.columns.accountStatus'), sortable: true },
-  { key: 'outcome', label: t('admin.accountHealthDetector.columns.outcome'), sortable: true },
-  { key: 'ban_status', label: t('admin.accountHealthDetector.columns.banStatus'), sortable: true },
-  { key: 'plus_status', label: t('admin.accountHealthDetector.columns.plusStatus'), sortable: true },
-  { key: 'plus_date', label: t('admin.accountHealthDetector.columns.plusDate'), sortable: true },
-  { key: 'payment_method', label: t('admin.accountHealthDetector.columns.paymentMethod'), sortable: true },
-  { key: 'ban_date', label: t('admin.accountHealthDetector.columns.banDate'), sortable: true },
-  { key: 'lifespan', label: t('admin.accountHealthDetector.columns.lifespan'), sortable: true },
-  { key: 'score', label: t('admin.accountHealthDetector.columns.score'), sortable: true },
-  { key: 'message_page_count', label: t('admin.accountHealthDetector.columns.messagePageCount'), sortable: true },
-  { key: 'evidence_summary', label: t('admin.accountHealthDetector.columns.evidence'), sortable: true },
-  { key: 'elapsed_ms', label: t('admin.accountHealthDetector.columns.elapsed'), sortable: true },
-  { key: 'checked_at', label: t('admin.accountHealthDetector.columns.checkedAt'), sortable: true },
+  { key: 'account_name', label: t('admin.accountHealthDetector.columns.account'), sortable: !exportingNotes.value },
+  { key: 'group_name', label: t('admin.accountHealthDetector.columns.groups'), sortable: !exportingNotes.value },
+  { key: 'local_status', label: t('admin.accountHealthDetector.columns.accountStatus'), sortable: !exportingNotes.value },
+  { key: 'outcome', label: t('admin.accountHealthDetector.columns.outcome'), sortable: !exportingNotes.value },
+  { key: 'ban_status', label: t('admin.accountHealthDetector.columns.banStatus'), sortable: !exportingNotes.value },
+  { key: 'plus_status', label: t('admin.accountHealthDetector.columns.plusStatus'), sortable: !exportingNotes.value },
+  { key: 'plus_date', label: t('admin.accountHealthDetector.columns.plusDate'), sortable: !exportingNotes.value },
+  { key: 'payment_method', label: t('admin.accountHealthDetector.columns.paymentMethod'), sortable: !exportingNotes.value },
+  { key: 'ban_date', label: t('admin.accountHealthDetector.columns.banDate'), sortable: !exportingNotes.value },
+  { key: 'lifespan', label: t('admin.accountHealthDetector.columns.lifespan'), sortable: !exportingNotes.value },
+  { key: 'score', label: t('admin.accountHealthDetector.columns.score'), sortable: !exportingNotes.value },
+  { key: 'message_page_count', label: t('admin.accountHealthDetector.columns.messagePageCount'), sortable: !exportingNotes.value },
+  { key: 'evidence_summary', label: t('admin.accountHealthDetector.columns.evidence'), sortable: !exportingNotes.value },
+  { key: 'elapsed_ms', label: t('admin.accountHealthDetector.columns.elapsed'), sortable: !exportingNotes.value },
+  { key: 'checked_at', label: t('admin.accountHealthDetector.columns.checkedAt'), sortable: !exportingNotes.value },
   { key: 'actions', label: t('common.actions') }
 ])
 const mobileSortOptions = computed(() => columns.value
-  .filter((column) => column.sortable)
+  .filter((column) => sortableColumnKeys.has(column.key as AccountHealthSortKey))
   .map((column) => ({ value: column.key, label: column.label })))
 const mobileSortOrderLabel = computed(() => t(
   sortState.order === 'asc'
@@ -692,7 +711,7 @@ watch(selectedGroupKey, (next) => {
 })
 
 async function loadGroups() {
-  if (accountsLoading.value || deleting.value) return
+  if (accountsLoading.value || deleting.value || exportingNotes.value) return
   groupsController?.abort()
   const controller = new AbortController()
   groupsController = controller
@@ -722,7 +741,7 @@ async function loadGroups() {
 }
 
 async function loadAccounts() {
-  if (groupsLoading.value || deleting.value) return
+  if (groupsLoading.value || deleting.value || exportingNotes.value) return
   if (selectedGroupIds.value.length === 0) {
     appStore.showWarning(t('admin.accountHealthDetector.messages.noGroupSelection'))
     return
@@ -763,7 +782,7 @@ async function loadAccounts() {
 }
 
 function toggleGroup(groupID: number, checked: boolean) {
-  if (groupsLoading.value || accountsLoading.value || deleting.value) return
+  if (groupsLoading.value || accountsLoading.value || deleting.value || exportingNotes.value) return
   if (checked) {
     if (selectedGroupIds.value.includes(groupID)) return
     if (selectedGroupIds.value.length >= maxSelectedGroups) {
@@ -777,7 +796,7 @@ function toggleGroup(groupID: number, checked: boolean) {
 }
 
 function selectVisibleGroups() {
-  if (groupsLoading.value || accountsLoading.value || deleting.value) return
+  if (groupsLoading.value || accountsLoading.value || deleting.value || exportingNotes.value) return
   const selected = new Set(selectedGroupIds.value)
   for (const group of filteredGroups.value) {
     if (selected.size >= maxSelectedGroups) break
@@ -790,7 +809,7 @@ function selectVisibleGroups() {
 }
 
 function clearSelectedGroups() {
-  if (groupsLoading.value || accountsLoading.value || deleting.value) return
+  if (groupsLoading.value || accountsLoading.value || deleting.value || exportingNotes.value) return
   selectedGroupIds.value = []
 }
 
@@ -809,7 +828,7 @@ function resetScanResults() {
 }
 
 async function startScan() {
-  if (scanning.value || deleting.value) return
+  if (scanning.value || deleting.value || exportingNotes.value) return
   const targets = [...accounts.value]
   if (targets.length === 0) {
     appStore.showWarning(t('admin.accountHealthDetector.messages.noAccounts'))
@@ -867,17 +886,63 @@ function stopScan() {
 }
 
 function selectFilteredAccounts() {
-  selectedAccountIds.value = filteredRows.value.map((row) => row.id)
+  if (scanning.value || deleting.value || exportingNotes.value) return
+  selectedAccountIds.value = sortedRows.value.map((row) => row.id)
 }
 
 function updateSelectedAccountIds(keys: Array<string | number>) {
-  if (scanning.value || deleting.value) return
+  if (scanning.value || deleting.value || exportingNotes.value) return
   const available = new Set(accounts.value.map((account) => account.id))
   selectedAccountIds.value = keys.map(Number).filter((id) => Number.isFinite(id) && available.has(id))
 }
 
 function selectionLabel(row: AccountHealthRow): string {
   return t('admin.accountHealthDetector.selectionLabel', { name: row.account_name })
+}
+
+function accountNotesExportTimestamp(): string {
+  return new Date().toISOString().replace(/\D/g, '').slice(0, 14)
+}
+
+async function exportSelectedNotes() {
+  if (groupsLoading.value || accountsLoading.value || scanning.value || deleting.value || exportingNotes.value) return
+  const accountIds = [...selectedAccountIds.value]
+  if (accountIds.length === 0) return
+  if (accountIds.length > maxAccountNoteExportAccounts) {
+    appStore.showWarning(t('admin.accountHealthDetector.messages.accountNoteExportLimit', {
+      count: maxAccountNoteExportAccounts
+    }))
+    return
+  }
+
+  const controller = new AbortController()
+  notesExportController = controller
+  exportingNotes.value = true
+  try {
+    const result = await adminAPI.accounts.exportAccountNotes(accountIds, { signal: controller.signal })
+    if (controller.signal.aborted) return
+
+    const url = window.URL.createObjectURL(result.blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.filename
+      || `sub2api-account-health-notes-${accountNotesExportTimestamp()}.txt`
+    try {
+      link.click()
+    } finally {
+      window.URL.revokeObjectURL(url)
+    }
+    appStore.showSuccess(t('admin.accountHealthDetector.messages.accountNotesExported', { count: result.count }))
+  } catch (error) {
+    if (!isCancelledScanError(error, controller.signal)) {
+      appStore.showError(t('admin.accountHealthDetector.messages.exportAccountNotesFailed'))
+    }
+  } finally {
+    if (notesExportController === controller) {
+      notesExportController = null
+      exportingNotes.value = false
+    }
+  }
 }
 
 function requestDeleteAccount(row: AccountHealthRow) {
@@ -893,7 +958,7 @@ function requestDeleteAll() {
 }
 
 function openDeleteDialog(ids: number[], label: string) {
-  if (ids.length === 0 || scanning.value || deleting.value) return
+  if (ids.length === 0 || scanning.value || deleting.value || exportingNotes.value) return
   deleteDialog.ids = Array.from(new Set(ids))
   deleteDialog.label = label
   deleteDialog.show = true
@@ -908,7 +973,7 @@ function closeDeleteDialog() {
 
 async function confirmDelete() {
   const ids = [...deleteDialog.ids]
-  if (ids.length === 0 || deleting.value) return
+  if (ids.length === 0 || deleting.value || exportingNotes.value) return
   deleteDialog.show = false
   deleting.value = true
   const deleted = new Set<number>()
@@ -949,7 +1014,16 @@ function handlePageSizeChange(pageSize: number) {
   pagination.page = 1
 }
 
+function updateAccountFilter(
+  key: keyof typeof filters,
+  value: string | number | boolean | null
+) {
+  if (exportingNotes.value || typeof value !== 'string') return
+  filters[key] = value
+}
+
 function handleSort(key: string, order: 'asc' | 'desc') {
+  if (exportingNotes.value) return
   const sortKey = key as AccountHealthSortKey
   if (!sortableColumnKeys.has(sortKey)) return
   sortState.key = sortKey
@@ -1045,6 +1119,7 @@ onUnmounted(() => {
   groupsController?.abort()
   accountsController?.abort()
   scanController?.abort()
+  notesExportController?.abort()
 })
 </script>
 

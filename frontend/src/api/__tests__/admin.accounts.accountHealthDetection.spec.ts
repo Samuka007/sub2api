@@ -7,6 +7,7 @@ vi.mock('@/api/client', () => ({ apiClient: { get, post } }))
 import {
   batchDelete,
   detectAccountHealth,
+  exportAccountNotes,
   listAccountHealthCandidates
 } from '@/api/admin/accounts'
 
@@ -80,4 +81,29 @@ describe('admin account health detection API', () => {
       account_ids: [42, 43]
     })
   })
+
+  it('downloads the selected account notes as a TXT blob', async () => {
+    const controller = new AbortController()
+    const blob = new Blob(['\uFEFFnote one\nnote two'], { type: 'text/plain;charset=utf-8' })
+    post.mockResolvedValueOnce({
+      data: blob,
+      status: 200,
+      headers: {
+        'content-disposition': 'attachment; filename="account-health-notes.txt"',
+        'x-exported-count': '2'
+      }
+    })
+
+    await expect(exportAccountNotes([42, 43], { signal: controller.signal })).resolves.toEqual({
+      blob,
+      count: 2,
+      filename: 'account-health-notes.txt'
+    })
+    expect(post).toHaveBeenCalledWith(
+      '/admin/accounts/export-notes',
+      { account_ids: [42, 43] },
+      { responseType: 'blob', signal: controller.signal }
+    )
+  })
+
 })

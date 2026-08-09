@@ -305,6 +305,119 @@ describe('API Client', () => {
 
       window.removeEventListener('admin-compliance-required', listener)
     })
+
+    it('Blob JSON 错误仍广播 423 合规事件并返回结构化错误', async () => {
+      localStorage.setItem('auth_token', 'admin-token')
+      const listener = vi.fn()
+      const readBlob = vi.fn().mockResolvedValue(JSON.stringify({
+        code: 'ADMIN_COMPLIANCE_ACK_REQUIRED',
+        message: 'administrator compliance acknowledgement is required',
+        metadata: { version: 'v2026.08.09' },
+      }))
+      const blobFromAnotherRealm = {
+        text: readBlob,
+      } as unknown as Blob
+      const error = {
+        response: {
+          status: 423,
+          data: blobFromAnotherRealm,
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        },
+        config: {
+          url: '/admin/accounts/export-notes',
+          responseType: 'blob',
+          headers: { Authorization: 'Bearer admin-token' },
+        },
+        code: 'ERR_BAD_REQUEST',
+        message: 'Request failed with status code 423',
+      }
+      window.addEventListener('admin-compliance-required', listener)
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue(error)
+
+      try {
+        await expect(
+          apiClient.post('/admin/accounts/export-notes', {}, { responseType: 'blob' })
+        ).rejects.toEqual(expect.objectContaining({
+          status: 423,
+          code: 'ADMIN_COMPLIANCE_ACK_REQUIRED',
+          message: 'administrator compliance acknowledgement is required',
+          metadata: { version: 'v2026.08.09' },
+        }))
+
+        expect(readBlob).toHaveBeenCalledTimes(1)
+        expect(listener).toHaveBeenCalledTimes(1)
+        expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({
+          version: 'v2026.08.09',
+        })
+        expect(localStorage.getItem('auth_token')).toBe('admin-token')
+      } finally {
+        window.removeEventListener('admin-compliance-required', listener)
+      }
+    })
+
+    it('maps JSON Blob response fields through the generic structured error path', async () => {
+      const blobFromAnotherRealm = {
+        type: '',
+        text: async () => JSON.stringify({
+          code: 'INVALID_ACCOUNT_SELECTION',
+          reason: 'unsupported_account',
+          error: 'validation_failed',
+          detail: 'The selected account cannot be exported',
+          metadata: { account_id: 42 },
+        }),
+      } as unknown as Blob
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue({
+        response: {
+          status: 400,
+          data: blobFromAnotherRealm,
+          headers: { 'Content-Type': 'Application/Problem+JSON; charset=utf-8' },
+        },
+        config: {
+          url: '/admin/accounts/export-notes',
+          responseType: 'blob',
+          headers: {},
+        },
+        code: 'ERR_BAD_REQUEST',
+        message: 'Request failed with status code 400',
+      })
+
+      await expect(
+        apiClient.post('/admin/accounts/export-notes', {}, { responseType: 'blob' })
+      ).rejects.toEqual({
+        status: 400,
+        code: 'INVALID_ACCOUNT_SELECTION',
+        reason: 'unsupported_account',
+        error: 'validation_failed',
+        message: 'The selected account cannot be exported',
+        metadata: { account_id: 42 },
+      })
+    })
+
+    it('非 JSON Blob 错误保留通用结构且不读取响应正文', async () => {
+      const readBlob = vi.fn().mockResolvedValue('plain text failure')
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue({
+        response: {
+          status: 500,
+          data: { type: 'text/plain', text: readBlob },
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        },
+        config: {
+          url: '/admin/accounts/export-notes',
+          responseType: 'blob',
+          headers: {},
+        },
+        code: 'ERR_BAD_RESPONSE',
+        message: 'Request failed with status code 500',
+      })
+
+      await expect(
+        apiClient.post('/admin/accounts/export-notes', {}, { responseType: 'blob' })
+      ).rejects.toEqual(expect.objectContaining({
+        status: 500,
+        message: 'Request failed with status code 500',
+      }))
+      expect(readBlob).not.toHaveBeenCalled()
+    })
   })
 
   // --- 401 Token 刷新 ---
@@ -469,6 +582,30 @@ describe('API Client', () => {
       await expect(
         apiClient.get('/test', { cancelToken: source.token })
       ).rejects.toBeDefined()
+    })
+
+    it('Blob 请求取消时保留原始错误且不读取响应正文', async () => {
+      const readBlob = vi.fn().mockResolvedValue('{"message":"must not be parsed"}')
+      const canceled = {
+        code: 'ERR_CANCELED',
+        message: 'Operation canceled',
+        response: {
+          status: 423,
+          data: { type: 'application/json', text: readBlob },
+          headers: { 'content-type': 'application/json' },
+        },
+        config: {
+          url: '/admin/accounts/export-notes',
+          responseType: 'blob',
+          headers: {},
+        },
+      }
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue(canceled)
+
+      await expect(
+        apiClient.post('/admin/accounts/export-notes', {}, { responseType: 'blob' })
+      ).rejects.toBe(canceled)
+      expect(readBlob).not.toHaveBeenCalled()
     })
   })
 })

@@ -78,6 +78,49 @@ apiClient.interceptors.request.use(
 
 // ==================== Response Interceptor ====================
 
+interface BlobTextLike {
+  type?: unknown
+  text: () => PromiseLike<string> | string
+}
+
+function isBlobTextLike(value: unknown): value is BlobTextLike {
+  if (!value || typeof value !== 'object') return false
+  return typeof (value as { text?: unknown }).text === 'function'
+}
+
+function responseHeader(headers: unknown, name: string): string {
+  if (!headers || typeof headers !== 'object') return ''
+  const values = headers as Record<string, unknown> & { get?: (headerName: string) => unknown }
+  if (typeof values.get === 'function') {
+    const value = values.get(name)
+    if (typeof value === 'string') return value
+  }
+  for (const [headerName, value] of Object.entries(values)) {
+    if (headerName.toLowerCase() === name.toLowerCase() && typeof value === 'string') return value
+  }
+  return ''
+}
+
+function isJSONContentType(contentType: string): boolean {
+  const mediaType = contentType.split(';', 1)[0]?.trim().toLowerCase() || ''
+  return mediaType === 'application/json' || mediaType.endsWith('+json')
+}
+
+async function parseJSONBlobErrorData(error: AxiosError<unknown>): Promise<unknown> {
+  const data = error.response?.data
+  if (error.config?.responseType !== 'blob' || !isBlobTextLike(data)) return data
+
+  const contentType = responseHeader(error.response?.headers, 'content-type')
+    || (typeof data.type === 'string' ? data.type : '')
+  if (!isJSONContentType(contentType)) return data
+
+  try {
+    return JSON.parse(await data.text())
+  } catch {
+    return data
+  }
+}
+
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => {
     // Unwrap standard API response format { code, message, data }
@@ -111,7 +154,8 @@ apiClient.interceptors.response.use(
 
     // Handle common errors
     if (error.response) {
-      const { status, data } = error.response
+      const { status } = error.response
+      const data = await parseJSONBlobErrorData(error)
       const url = String(error.config?.url || '')
 
       // Validate `data` shape to avoid HTML error pages breaking our error handling.

@@ -45,6 +45,12 @@ export interface AccountHealthDetectionResult extends GroupAccountHealthDetectio
   account_name: string
 }
 
+export interface AccountNotesExport {
+  blob: Blob
+  count: number
+  filename: string | null
+}
+
 /**
  * List all accounts with pagination
  * @param page - Page number (default: 1)
@@ -268,6 +274,29 @@ export async function detectAccountHealth(
     { signal: options?.signal, timeout: 65_000 }
   )
   return data
+}
+
+/** Export the selected account notes as one UTF-8 TXT line per account. */
+export async function exportAccountNotes(
+  accountIds: number[],
+  options?: { signal?: AbortSignal }
+): Promise<AccountNotesExport> {
+  const response = await apiClient.post<Blob>(
+    '/admin/accounts/export-notes',
+    { account_ids: accountIds },
+    { responseType: 'blob', signal: options?.signal }
+  )
+
+  const disposition = response.headers?.['content-disposition']
+  const filenameMatch = typeof disposition === 'string'
+    ? disposition.match(/filename="?([^";]+)"?/i)
+    : null
+  const count = Number.parseInt(String(response.headers?.['x-exported-count'] || ''), 10)
+  return {
+    blob: response.data,
+    count: Number.isFinite(count) && count > 0 ? count : 0,
+    filename: filenameMatch?.[1] || null
+  }
 }
 
 /**
@@ -1034,6 +1063,7 @@ export const accountsAPI = {
   delete: deleteAccount,
   listAccountHealthCandidates,
   detectAccountHealth,
+  exportAccountNotes,
   toggleStatus,
   testAccount,
   refreshCredentials,

@@ -21,6 +21,7 @@ export default {
       clearGroups: 'Clear groups',
       selectFilteredAccounts: 'Select filtered accounts',
       clearAccountSelection: 'Clear account selection',
+      exportSelectedNotes: 'Export selected notes ({count})',
       deleteSelected: 'Delete selected ({count})',
       deleteAll: 'Delete all ({count})',
       deleteAccount: 'Delete account {name}'
@@ -31,7 +32,7 @@ export default {
     summary: {
       selectedGroups: 'Groups',
       loadedAccounts: 'Accounts',
-      selectedAccounts: 'To delete',
+      selectedAccounts: 'Selected accounts',
       checked: 'Checked',
       plus: 'Plus valid',
       banned: 'Deactivated',
@@ -165,6 +166,9 @@ export default {
       noGroupSelection: 'Select at least one group',
       noAccounts: 'There are no accounts to check',
       groupLimit: 'Select at most {count} groups at a time',
+      accountNoteExportLimit: 'Select no more than {count} accounts for each note export',
+      accountNotesExported: 'Exported notes for {count} accounts',
+      exportAccountNotesFailed: 'Failed to export notes for the selected accounts',
       deleteSuccess: 'Deleted {count} accounts',
       deletePartial: 'Deletion finished: {success} succeeded and {failed} failed',
       deleteFailed: 'Failed to delete accounts'

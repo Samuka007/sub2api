@@ -21,6 +21,7 @@ export default {
       clearGroups: '清空分组',
       selectFilteredAccounts: '选择筛选账号',
       clearAccountSelection: '清空账号选择',
+      exportSelectedNotes: '导出所选备注（{count}）',
       deleteSelected: '删除选中（{count}）',
       deleteAll: '一键删除全部（{count}）',
       deleteAccount: '删除账号 {name}'
@@ -31,7 +32,7 @@ export default {
     summary: {
       selectedGroups: '已选分组',
       loadedAccounts: '账号数',
-      selectedAccounts: '待删除',
+      selectedAccounts: '已选账号',
       checked: '已检测',
       plus: 'Plus 有效',
       banned: '已封禁',
@@ -165,6 +166,9 @@ export default {
       noGroupSelection: '请至少选择一个分组',
       noAccounts: '当前没有可检测账号',
       groupLimit: '一次最多选择 {count} 个分组',
+      accountNoteExportLimit: '每次最多导出 {count} 个账号的备注',
+      accountNotesExported: '已导出 {count} 个账号的备注',
+      exportAccountNotesFailed: '导出所选账号备注失败',
       deleteSuccess: '已删除 {count} 个账号',
       deletePartial: '删除完成：成功 {success} 个，失败 {failed} 个',
       deleteFailed: '删除账号失败'

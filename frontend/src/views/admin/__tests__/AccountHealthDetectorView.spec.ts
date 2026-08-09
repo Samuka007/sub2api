@@ -10,6 +10,7 @@ const {
   listGroups,
   listAccounts,
   detectAccountHealth,
+  exportAccountNotes,
   batchDelete,
   showError,
   showWarning,
@@ -18,6 +19,7 @@ const {
   listGroups: vi.fn(),
   listAccounts: vi.fn(),
   detectAccountHealth: vi.fn(),
+  exportAccountNotes: vi.fn(),
   batchDelete: vi.fn(),
   showError: vi.fn(),
   showWarning: vi.fn(),
@@ -30,6 +32,7 @@ vi.mock('@/api/admin', () => ({
     accounts: {
       listAccountHealthCandidates: listAccounts,
       detectAccountHealth,
+      exportAccountNotes,
       batchDelete
     }
   }
@@ -83,14 +86,15 @@ const SelectStub = defineComponent({
   inheritAttrs: false,
   props: {
     modelValue: { type: [String, Number, Boolean], default: '' },
-    options: { type: Array, default: () => [] }
+    options: { type: Array, default: () => [] },
+    disabled: { type: Boolean, default: false }
   },
   emits: ['update:modelValue'],
   setup(_props, { emit }) {
     return { onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value) }
   },
   template: `
-    <select v-bind="$attrs" :value="modelValue" @change="onChange">
+    <select v-bind="$attrs" :value="modelValue" :disabled="disabled" @change="onChange">
       <option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option>
     </select>
   `
@@ -98,6 +102,7 @@ const SelectStub = defineComponent({
 
 const DataTableStub = defineComponent({
   props: {
+    columns: { type: Array, default: () => [] },
     data: { type: Array, default: () => [] },
     selectedKeys: { type: Array, default: () => [] },
     selectionDisabled: { type: Boolean, default: false }
@@ -202,8 +207,8 @@ function detection(overrides: Partial<AccountHealthDetectionResult> = {}): Accou
   }
 }
 
-function page<T>(items: T[], current = 1, pages = 1) {
-  return { items, total: items.length, page: current, page_size: 1000, pages }
+function page<T>(items: T[], current = 1, pages = 1, total = items.length) {
+  return { items, total, page: current, page_size: 1000, pages }
 }
 
 function deferred<T>() {
@@ -214,6 +219,38 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+function mockBlobDownload(url: string) {
+  const originalCreateObjectURL = window.URL.createObjectURL
+  const originalRevokeObjectURL = window.URL.revokeObjectURL
+  const createObjectURL = vi.fn(() => url)
+  const revokeObjectURL = vi.fn(() => {})
+  let filename = ''
+  let href = ''
+  window.URL.createObjectURL = createObjectURL as typeof window.URL.createObjectURL
+  window.URL.revokeObjectURL = revokeObjectURL as typeof window.URL.revokeObjectURL
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    filename = this.download
+    href = this.href
+  })
+
+  return {
+    createObjectURL,
+    revokeObjectURL,
+    click,
+    get filename() {
+      return filename
+    },
+    get href() {
+      return href
+    },
+    restore() {
+      window.URL.createObjectURL = originalCreateObjectURL
+      window.URL.revokeObjectURL = originalRevokeObjectURL
+      click.mockRestore()
+    }
+  }
 }
 
 function mountView() {
@@ -244,6 +281,7 @@ describe('admin AccountHealthDetectorView', () => {
     listGroups.mockReset()
     listAccounts.mockReset()
     detectAccountHealth.mockReset()
+    exportAccountNotes.mockReset()
     batchDelete.mockReset()
     showError.mockReset()
     showWarning.mockReset()
@@ -252,6 +290,11 @@ describe('admin AccountHealthDetectorView', () => {
     listGroups.mockResolvedValue(page([group(), group({ id: 2, name: 'OpenAI backup', status: 'inactive' })]))
     listAccounts.mockResolvedValue(page([account()]))
     detectAccountHealth.mockResolvedValue(detection())
+    exportAccountNotes.mockResolvedValue({
+      blob: new Blob(['\uFEFF\n'], { type: 'text/plain;charset=utf-8' }),
+      count: 1,
+      filename: 'account-health-notes.txt'
+    })
     batchDelete.mockResolvedValue({ success: 1, failed: 0, success_ids: [101], failed_ids: [], results: [] })
   })
 
@@ -322,6 +365,394 @@ describe('admin AccountHealthDetectorView', () => {
     expect(wrapper.get('[data-test="row-101"]').text()).toContain('admin.accountHealthDetector.formatIssue.missing_url')
   })
 
+  it('downloads notes for exactly the selected accounts', async () => {
+    listAccounts.mockResolvedValue(page([
+      account(),
+      account({ id: 202, name: 'second@example.com' }),
+      account({ id: 303, name: 'not-selected@example.com' })
+    ]))
+    const exportBlob = new Blob(['\uFEFFfirst note\nsecond note'], { type: 'text/plain;charset=utf-8' })
+    exportAccountNotes.mockResolvedValueOnce({
+      blob: exportBlob,
+      count: 2,
+      filename: 'selected-account-notes.txt'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+
+    const exportButton = wrapper.get('[data-test="export-selected-notes"]')
+    expect(exportButton.attributes('disabled')).toBeDefined()
+    wrapper.findComponent(DataTableStub).vm.$emit('update:selectedKeys', [202, 101])
+    await flushPromises()
+    expect(exportButton.attributes('disabled')).toBeUndefined()
+
+    const download = mockBlobDownload('blob:selected-account-notes')
+
+    try {
+      await exportButton.trigger('click')
+      await flushPromises()
+
+      expect(exportAccountNotes).toHaveBeenCalledWith(
+        [202, 101],
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+      expect(download.createObjectURL).toHaveBeenCalledWith(exportBlob)
+      expect(download.href).toBe('blob:selected-account-notes')
+      expect(download.filename).toBe('selected-account-notes.txt')
+      expect(download.click).toHaveBeenCalledTimes(1)
+      expect(download.revokeObjectURL).toHaveBeenCalledWith('blob:selected-account-notes')
+      expect(showSuccess).toHaveBeenCalledWith(
+        'admin.accountHealthDetector.messages.accountNotesExported:{"count":2}'
+      )
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it('exports filtered accounts in the current table sort order', async () => {
+    listAccounts.mockResolvedValue(page([
+      account({ id: 202, name: 'Alpha included' }),
+      account({ id: 101, name: 'Charlie included' }),
+      account({ id: 404, name: 'Delta excluded' }),
+      account({ id: 303, name: 'Beta included' })
+    ]))
+    const exportBlob = new Blob(['\uFEFFnotes\n'], { type: 'text/plain;charset=utf-8' })
+    exportAccountNotes.mockResolvedValueOnce({
+      blob: exportBlob,
+      count: 3,
+      filename: 'sorted-filtered-account-notes.txt'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+
+    await wrapper.get('[data-test="account-search"] input').setValue('included')
+    wrapper.findComponent(DataTableStub).vm.$emit('sort', 'account_name', 'desc')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test^="row-"]').map((row) => row.attributes('data-test'))).toEqual([
+      'row-101',
+      'row-303',
+      'row-202'
+    ])
+
+    await wrapper.get('[data-test="select-filtered-accounts"]').trigger('click')
+    expect(wrapper.get('[data-test="selected-keys"]').text()).toBe('101,303,202')
+
+    const download = mockBlobDownload('blob:sorted-filtered-account-notes')
+    try {
+      await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+      await flushPromises()
+
+      expect(exportAccountNotes).toHaveBeenCalledWith(
+        [101, 303, 202],
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+      expect(download.createObjectURL).toHaveBeenCalledWith(exportBlob)
+      expect(download.click).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it('downloads an empty account note represented by a BOM and line terminator', async () => {
+    const exportBlob = new Blob(['\uFEFF\n'], { type: 'text/plain;charset=utf-8' })
+    exportAccountNotes.mockResolvedValueOnce({
+      blob: exportBlob,
+      count: 1,
+      filename: 'empty-account-note.txt'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+    await wrapper.get('[data-test="select-first-account"]').trigger('click')
+    const download = mockBlobDownload('blob:empty-account-note')
+
+    try {
+      await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+      await flushPromises()
+
+      expect(download.createObjectURL).toHaveBeenCalledWith(exportBlob)
+      expect(download.filename).toBe('empty-account-note.txt')
+      expect(download.click).toHaveBeenCalledTimes(1)
+      expect(download.revokeObjectURL).toHaveBeenCalledWith('blob:empty-account-note')
+      expect(showWarning).not.toHaveBeenCalled()
+      expect(showSuccess).toHaveBeenCalledWith(
+        'admin.accountHealthDetector.messages.accountNotesExported:{"count":1}'
+      )
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it('exports exactly 5000 selected accounts', async () => {
+    const loadedAccounts = Array.from({ length: 5000 }, (_, index) => account({
+      id: index + 1,
+      name: `account-${index + 1}`
+    }))
+    const selectedIDs = loadedAccounts.map((item) => item.id)
+    const exportBlob = new Blob(['\uFEFFnotes\n'], { type: 'text/plain;charset=utf-8' })
+    listAccounts.mockImplementation(async (currentPage: number) => {
+      const start = (currentPage - 1) * 1000
+      return page(loadedAccounts.slice(start, start + 1000), currentPage, 5, 5000)
+    })
+    exportAccountNotes.mockResolvedValueOnce({
+      blob: exportBlob,
+      count: 5000,
+      filename: 'account-health-notes.txt'
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+    expect(listAccounts.mock.calls.map(([currentPage, pageSize, groupIDs]) => [
+      currentPage,
+      pageSize,
+      groupIDs
+    ])).toEqual(Array.from({ length: 5 }, (_, index) => [index + 1, 1000, [1]]))
+    wrapper.findComponent(DataTableStub).vm.$emit('update:selectedKeys', selectedIDs)
+    await flushPromises()
+    const download = mockBlobDownload('blob:5000-account-notes')
+
+    try {
+      await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+      await flushPromises()
+
+      expect(exportAccountNotes).toHaveBeenCalledWith(
+        selectedIDs,
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+      expect(download.createObjectURL).toHaveBeenCalledWith(exportBlob)
+      expect(showWarning).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it('explains the export limit before sending an oversized selection', async () => {
+    const loadedAccounts = Array.from({ length: 5001 }, (_, index) => account({
+      id: index + 1,
+      name: `account-${index + 1}`
+    }))
+    listAccounts.mockResolvedValue(page(loadedAccounts))
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+
+    wrapper.findComponent(DataTableStub).vm.$emit(
+      'update:selectedKeys',
+      loadedAccounts.map((item) => item.id)
+    )
+    await flushPromises()
+    await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+
+    expect(exportAccountNotes).not.toHaveBeenCalled()
+    expect(showWarning).toHaveBeenCalledWith(
+      'admin.accountHealthDetector.messages.accountNoteExportLimit:{"count":5000}'
+    )
+    wrapper.unmount()
+  })
+
+  it('reports selected account note export failures', async () => {
+    exportAccountNotes.mockRejectedValueOnce(new Error('unavailable'))
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+    await wrapper.get('[data-test="select-first-account"]').trigger('click')
+
+    const exportButton = wrapper.get('[data-test="export-selected-notes"]')
+    await exportButton.trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith(
+      'admin.accountHealthDetector.messages.exportAccountNotesFailed'
+    )
+    expect(showSuccess).not.toHaveBeenCalled()
+    for (const selector of [
+      '[data-test="export-selected-notes"]',
+      '[data-test="delete-selected"]',
+      '[data-test="start-scan"]',
+      '[data-test="group-1"]',
+      '[data-test="load-accounts"]',
+      '#account-health-concurrency'
+    ]) {
+      expect(wrapper.get(selector).attributes('disabled')).toBeUndefined()
+    }
+    expect(wrapper.findComponent(DataTableStub).props('selectionDisabled')).toBe(false)
+
+    const download = mockBlobDownload('blob:retried-account-notes')
+    try {
+      await exportButton.trigger('click')
+      await flushPromises()
+
+      expect(exportAccountNotes).toHaveBeenCalledTimes(2)
+      expect(download.createObjectURL).toHaveBeenCalledTimes(1)
+      expect(download.click).toHaveBeenCalledTimes(1)
+      expect(showSuccess).toHaveBeenCalledWith(
+        'admin.accountHealthDetector.messages.accountNotesExported:{"count":1}'
+      )
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it.each(['resolve', 'reject'] as const)(
+    'aborts a pending note export on unmount and ignores a late %s',
+    async (settlement) => {
+      const pendingExport = deferred<{ blob: Blob; count: number; filename: string | null }>()
+      exportAccountNotes.mockReturnValueOnce(pendingExport.promise)
+      const wrapper = mountView()
+      await flushPromises()
+      await selectGroupAndLoad(wrapper)
+      await wrapper.get('[data-test="select-first-account"]').trigger('click')
+      const download = mockBlobDownload(`blob:late-${settlement}`)
+
+      try {
+        await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+        const signal = exportAccountNotes.mock.calls[0]?.[1]?.signal as AbortSignal
+        expect(signal.aborted).toBe(false)
+
+        wrapper.unmount()
+        expect(signal.aborted).toBe(true)
+
+        if (settlement === 'resolve') {
+          pendingExport.resolve({
+            blob: new Blob(['\uFEFFlate note\n'], { type: 'text/plain;charset=utf-8' }),
+            count: 1,
+            filename: 'late-account-notes.txt'
+          })
+        } else {
+          pendingExport.reject(new Error('late export failure'))
+        }
+        await flushPromises()
+
+        expect(download.createObjectURL).not.toHaveBeenCalled()
+        expect(download.click).not.toHaveBeenCalled()
+        expect(showSuccess).not.toHaveBeenCalled()
+        expect(showError).not.toHaveBeenCalled()
+      } finally {
+        download.restore()
+      }
+    }
+  )
+
+  it('locks scoped actions while selected account notes are exporting', async () => {
+    listAccounts.mockResolvedValue(page([
+      account({ id: 101, name: 'Charlie account' }),
+      account({
+        id: 202,
+        name: 'Alpha account',
+        group_id: 2,
+        group_name: 'Zulu group',
+        group_ids: [2],
+        group_names: ['Zulu group']
+      })
+    ]))
+    const pendingExport = deferred<{ blob: Blob; count: number; filename: string | null }>()
+    exportAccountNotes.mockReturnValueOnce(pendingExport.promise)
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+    await wrapper.get('[data-test="select-first-account"]').trigger('click')
+    const resolvedBlob = new Blob(['\uFEFFnote\n'], { type: 'text/plain;charset=utf-8' })
+    const download = mockBlobDownload('blob:pending-account-notes')
+
+    try {
+      await wrapper.get('[data-test="export-selected-notes"]').trigger('click')
+
+      for (const selector of [
+        '[data-test="export-selected-notes"]',
+        '[data-test="delete-selected"]',
+        '[data-test="delete-all"]',
+        '[data-test="delete-account-101"]',
+        '[data-test="start-scan"]',
+        '[data-test="group-1"]',
+        '[data-test="load-accounts"]',
+        '#account-health-concurrency',
+        '[data-test="account-search"] input',
+        '[data-test="local-status-filter"]',
+        '[data-test="outcome-filter"]',
+        '[data-test="ban-status-filter"]',
+        '[data-test="plus-status-filter"]',
+        '[data-test="mobile-sort-field"]',
+        '[data-test="mobile-sort-order"]'
+      ]) {
+        expect(wrapper.get(selector).attributes('disabled')).toBeDefined()
+      }
+      expect(wrapper.findComponent(DataTableStub).props('selectionDisabled')).toBe(true)
+      expect(wrapper.get('[data-test="group-search"] input').attributes('disabled')).toBeDefined()
+      expect((wrapper.findComponent(DataTableStub).props('columns') as Array<{ sortable?: boolean }>)
+        .some((column) => column.sortable)).toBe(false)
+
+      const rowOrder = () => wrapper.findAll('[data-test^="row-"]')
+        .map((row) => row.attributes('data-test'))
+      expect(rowOrder()).toEqual(['row-202', 'row-101'])
+      wrapper.getComponent('[data-test="account-search"]').vm.$emit('update:modelValue', 'Charlie')
+      wrapper.getComponent('[data-test="local-status-filter"]').vm.$emit('update:modelValue', 'inactive')
+      wrapper.getComponent('[data-test="outcome-filter"]').vm.$emit('update:modelValue', 'failed')
+      wrapper.getComponent('[data-test="ban-status-filter"]').vm.$emit('update:modelValue', 'banned')
+      wrapper.getComponent('[data-test="plus-status-filter"]').vm.$emit('update:modelValue', 'detected')
+      wrapper.getComponent('[data-test="mobile-sort-field"]').vm.$emit('update:modelValue', 'group_name')
+      await wrapper.get('[data-test="mobile-sort-order"]').trigger('click')
+      wrapper.findComponent(DataTableStub).vm.$emit('sort', 'account_name', 'desc')
+      await flushPromises()
+
+      expect(rowOrder()).toEqual(['row-202', 'row-101'])
+      expect((wrapper.get('[data-test="mobile-sort-field"]').element as HTMLSelectElement).value)
+        .toBe('account_name')
+      expect(wrapper.get('[data-test="mobile-sort-order"]').attributes('aria-label'))
+        .toBe('admin.accountHealthDetector.filters.sortAscending')
+      expect((wrapper.get('[data-test="account-search"] input').element as HTMLInputElement).value).toBe('')
+      for (const selector of [
+        '[data-test="local-status-filter"]',
+        '[data-test="outcome-filter"]',
+        '[data-test="ban-status-filter"]',
+        '[data-test="plus-status-filter"]'
+      ]) {
+        expect((wrapper.get(selector).element as HTMLSelectElement).value).toBe('all')
+      }
+
+      pendingExport.resolve({ blob: resolvedBlob, count: 1, filename: 'pending-account-notes.txt' })
+      await flushPromises()
+
+      expect(download.createObjectURL).toHaveBeenCalledWith(resolvedBlob)
+      expect(download.filename).toBe('pending-account-notes.txt')
+      expect(download.click).toHaveBeenCalledTimes(1)
+      expect(download.revokeObjectURL).toHaveBeenCalledWith('blob:pending-account-notes')
+      expect(wrapper.get('[data-test="export-selected-notes"]').attributes('disabled')).toBeUndefined()
+      expect(wrapper.get('[data-test="account-search"] input').attributes('disabled')).toBeUndefined()
+      expect((wrapper.findComponent(DataTableStub).props('columns') as Array<{ sortable?: boolean }>)
+        .some((column) => column.sortable)).toBe(true)
+    } finally {
+      wrapper.unmount()
+      download.restore()
+    }
+  })
+
+  it('disables note export while groups are loading and does not call the API', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await selectGroupAndLoad(wrapper)
+    await wrapper.get('[data-test="select-first-account"]').trigger('click')
+    const pendingGroups = deferred<ReturnType<typeof page<GroupAccountHealthCandidate>>>()
+    listGroups.mockReturnValueOnce(pendingGroups.promise)
+
+    await wrapper.get('[data-test="reload-groups"]').trigger('click')
+    const exportButton = wrapper.get('[data-test="export-selected-notes"]')
+    expect(exportButton.attributes('disabled')).toBeDefined()
+    await exportButton.trigger('click')
+    expect(exportAccountNotes).not.toHaveBeenCalled()
+
+    pendingGroups.resolve(page([group(), group({ id: 2, name: 'OpenAI backup', status: 'inactive' })]))
+    await flushPromises()
+    wrapper.unmount()
+  })
+
   it('deletes one account through the row action after confirmation', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -340,7 +771,7 @@ describe('admin AccountHealthDetectorView', () => {
     expect(showSuccess).toHaveBeenCalled()
   })
 
-  it('uses table selection only for batch deletion', async () => {
+  it('uses table selection for scoped account actions', async () => {
     const wrapper = mountView()
     await flushPromises()
     await selectGroupAndLoad(wrapper)
