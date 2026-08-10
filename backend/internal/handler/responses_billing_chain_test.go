@@ -329,6 +329,15 @@ func assertResponsesBillingChain(
 	wantExecutionIDs []string,
 ) {
 	t.Helper()
+	for _, wantID := range wantExecutionIDs {
+		select {
+		case usageLog := <-usageLogs:
+			require.Equal(t, wantID, usageLog.RequestID)
+			require.Positive(t, usageLog.ActualCost)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("等待 usage log %s 超时", wantID)
+		}
+	}
 	commands, applied, charged := billingRepo.snapshot()
 	require.Len(t, commands, len(wantExecutionIDs))
 	require.Equal(t, len(wantExecutionIDs), applied, "每个 Responses turn 必须形成独立幂等计费")
@@ -344,13 +353,4 @@ func assertResponsesBillingChain(
 		seen[command.RequestID] = struct{}{}
 	}
 
-	for _, wantID := range wantExecutionIDs {
-		select {
-		case usageLog := <-usageLogs:
-			require.Equal(t, wantID, usageLog.RequestID)
-			require.Positive(t, usageLog.ActualCost)
-		case <-time.After(3 * time.Second):
-			t.Fatalf("等待 usage log %s 超时", wantID)
-		}
-	}
 }
