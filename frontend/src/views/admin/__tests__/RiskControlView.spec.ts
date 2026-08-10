@@ -9,6 +9,7 @@ import type { ContentModerationConfig, UpdateContentModerationConfig } from '@/a
 const {
   getConfig,
   updateConfig,
+  testAPIKeys,
   getStatus,
   listLogs,
   getGroups,
@@ -18,6 +19,7 @@ const {
 } = vi.hoisted(() => ({
   getConfig: vi.fn(),
   updateConfig: vi.fn(),
+  testAPIKeys: vi.fn(),
   getStatus: vi.fn(),
   listLogs: vi.fn(),
   getGroups: vi.fn(),
@@ -33,7 +35,7 @@ vi.mock('@/api/admin', () => ({
       updateConfig,
       getStatus,
       listLogs,
-      testAPIKeys: vi.fn(),
+      testAPIKeys,
       deleteFlaggedHash: vi.fn(),
       clearFlaggedHashes: vi.fn(),
       unbanUser: vi.fn(),
@@ -76,6 +78,7 @@ vi.mock('vue-i18n', async () => {
 const baseConfig = (): ContentModerationConfig => ({
   enabled: true,
   mode: 'pre_block',
+  upstream_protocol: 'openai_moderations',
   base_url: 'https://api.openai.com',
   model: 'omni-moderation-latest',
   proxy_id: null,
@@ -112,6 +115,7 @@ const baseConfig = (): ContentModerationConfig => ({
     models: [],
   },
   trusted_api_keys: [],
+  cyber_policy_exclude_from_ban_count: false,
 })
 
 const runtimeStatus = () => ({
@@ -182,6 +186,34 @@ const ModelWhitelistSelectorStub = defineComponent({
       })
   },
 })
+const SelectStub = defineComponent({
+  props: {
+    modelValue: {
+      type: [String, Number, Boolean],
+      default: '',
+    },
+    options: {
+      type: Array,
+      default: () => [],
+    },
+  },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { emit }) {
+    const onChange = (event: Event) => {
+      const value = (event.target as HTMLSelectElement).value
+      emit('update:modelValue', value)
+      emit('change', value)
+    }
+    return () =>
+      h(
+        'select',
+        { value: props.modelValue, onChange },
+        (props.options as Array<{ value: string | number; label: string }>).map((option) =>
+          h('option', { value: option.value }, option.label)
+        )
+      )
+  },
+})
 
 function findButtonByText(wrapper: VueWrapper, text: string): DOMWrapper<HTMLButtonElement> {
   const button = wrapper.findAll<HTMLButtonElement>('button').find((item) => item.text().includes(text))
@@ -195,6 +227,7 @@ describe('admin RiskControlView', () => {
   beforeEach(() => {
     getConfig.mockReset()
     updateConfig.mockReset()
+    testAPIKeys.mockReset()
     getStatus.mockReset()
     listLogs.mockReset()
     getGroups.mockReset()
@@ -216,6 +249,7 @@ describe('admin RiskControlView', () => {
       api_key_masks: [],
       api_key_statuses: [],
     }))
+    testAPIKeys.mockResolvedValue({ items: [], image_count: 0 })
   })
 
   it('saves the selected model filter mode and models', async () => {
@@ -251,6 +285,192 @@ describe('admin RiskControlView', () => {
       },
     }))
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('switches, tests, and saves the Anthropic Messages moderation upstream', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+
+    const protocolSelect = wrapper.get('[data-test="moderation-upstream-protocol"] select')
+    await protocolSelect.setValue('anthropic_messages')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://api.anthropic.com')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', '')
+    expect(wrapper.text()).toContain('admin.riskControl.upstreamProtocolAnthropicHint')
+
+
+    await wrapper.get('[data-test="moderation-model"]').setValue('claude-test')
+    await wrapper.find('textarea').setValue('sk-ant-test')
+    await findButtonByText(wrapper, 'admin.riskControl.testInputApiKeys').trigger('click')
+    await flushPromises()
+    expect(testAPIKeys).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      base_url: 'https://api.anthropic.com',
+      model: 'claude-test',
+      api_keys: ['sk-ant-test'],
+    }))
+
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      base_url: 'https://api.anthropic.com',
+      model: 'claude-test',
+    }))
+
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('openai_moderations')
+    await flushPromises()
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://api.openai.com')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', 'omni-moderation-latest')
+  })
+
+  it('requires explicit API key replacement when switching moderation providers', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      api_key_configured: true,
+      api_key_count: 1,
+      api_key_masks: ['****old'],
+    })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('anthropic_messages')
+    await flushPromises()
+
+    const setupState = (wrapper.vm.$ as unknown as {
+      setupState: { configForm: { api_keys_mode: string } }
+    }).setupState
+    expect(setupState.configForm.api_keys_mode).toBe('replace')
+    expect(findButtonByText(wrapper, 'admin.riskControl.testStoredApiKeys').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-test="moderation-model"]').setValue('claude-test')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(showError).toHaveBeenCalledWith('admin.riskControl.apiKeysReplaceNoInput')
+    expect(updateConfig).not.toHaveBeenCalled()
+
+    await wrapper.find('textarea').setValue('sk-ant-new')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      api_keys: ['sk-ant-new'],
+      api_keys_mode: 'replace',
+    }))
+  })
+
+  it('drops a pending provider key when switching back to the saved protocol', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      base_url: 'https://openai-gateway.example',
+      model: 'custom-openai-moderation',
+      api_key_configured: true,
+      api_key_count: 1,
+      api_key_masks: ['****old'],
+    })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+    const protocolSelect = wrapper.get('[data-test="moderation-upstream-protocol"] select')
+    await protocolSelect.setValue('anthropic_messages')
+    await wrapper.find('textarea').setValue('sk-ant-pending')
+    await protocolSelect.setValue('openai_moderations')
+    await flushPromises()
+
+    const setupState = (wrapper.vm.$ as unknown as {
+      setupState: { configForm: { api_keys_mode: string; api_keys_text: string } }
+    }).setupState
+    expect(setupState.configForm.api_keys_mode).toBe('append')
+    expect(setupState.configForm.api_keys_text).toBe('')
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://openai-gateway.example')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', 'custom-openai-moderation')
+
+    await wrapper.find('textarea').setValue('sk-openai-pending')
+    await protocolSelect.setValue('openai_moderations')
+    expect(wrapper.find('textarea').element).toHaveProperty('value', 'sk-openai-pending')
+    await wrapper.find('textarea').setValue('')
+
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(updateConfig).toHaveBeenCalledOnce()
+    expect(updateConfig.mock.calls[0]?.[0]).not.toHaveProperty('api_keys')
+  })
+
+  it('keeps an explicitly configured gateway when switching moderation protocols', async () => {
+    getConfig.mockResolvedValue({ ...baseConfig(), base_url: 'https://gateway.example' })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('anthropic_messages')
+    await flushPromises()
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://gateway.example')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', '')
   })
 
   it('saves scoped trusted API keys in observe-only mode', async () => {

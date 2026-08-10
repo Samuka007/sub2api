@@ -401,13 +401,35 @@
                 <Select v-model="configForm.mode" :options="modeOptions" />
                 <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{{ modeDescription(configForm.mode) }}</p>
               </div>
+              <div data-test="moderation-upstream-protocol">
+                <label class="input-label">{{ t('admin.riskControl.upstreamProtocol') }}</label>
+                <Select
+                  v-model="configForm.upstream_protocol"
+                  :options="upstreamProtocolOptions"
+                  :disabled="apiKeyTesting"
+                  @change="handleUpstreamProtocolChange"
+                />
+                <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">{{ upstreamProtocolHint }}</p>
+              </div>
               <div>
                 <label class="input-label">{{ t('admin.riskControl.baseUrl') }}</label>
-                <input v-model.trim="configForm.base_url" type="url" class="input" placeholder="https://api.openai.com" />
+                <input
+                  v-model.trim="configForm.base_url"
+                  data-test="moderation-base-url"
+                  type="url"
+                  class="input"
+                  :placeholder="moderationBaseURLPlaceholder"
+                />
               </div>
               <div>
                 <label class="input-label">{{ t('admin.riskControl.model') }}</label>
-                <input v-model.trim="configForm.model" type="text" class="input" placeholder="omni-moderation-latest" />
+                <input
+                  v-model.trim="configForm.model"
+                  data-test="moderation-model"
+                  type="text"
+                  class="input"
+                  :placeholder="moderationModelPlaceholder"
+                />
               </div>
               <div>
                 <label class="input-label">{{ t('admin.riskControl.timeoutMs') }}</label>
@@ -1257,6 +1279,7 @@ import type {
   ContentModerationRuntimeStatus,
   ContentModerationTestAuditResult,
   ContentModerationTrustedAPIKey,
+  ContentModerationUpstreamProtocol,
   KeywordBlockingMode,
   ModerationMode,
   UpdateContentModerationConfig,
@@ -1350,10 +1373,12 @@ const moderationTestResult = ref<ContentModerationTestAuditResult | null>(null)
 const inputDetailRow = ref<ContentModerationLog | null>(null)
 let statusTimer: number | null = null
 let settingsBaseline: ContentModerationConfig | null = null
+let lastModerationUpstreamProtocol: ContentModerationUpstreamProtocol = 'openai_moderations'
 
 const configForm = reactive({
   enabled: false,
   mode: 'pre_block' as ModerationMode,
+  upstream_protocol: 'openai_moderations' as ContentModerationUpstreamProtocol,
   base_url: 'https://api.openai.com',
   model: 'omni-moderation-latest',
   proxy_id: null as number | null,
@@ -1423,6 +1448,29 @@ const modeOptions = computed<SelectOption[]>(() => [
   { value: 'observe', label: t('admin.riskControl.modeObserve') },
   { value: 'off', label: t('admin.riskControl.modeOff') },
 ])
+
+const upstreamProtocolOptions = computed<SelectOption[]>(() => [
+  { value: 'openai_moderations', label: t('admin.riskControl.upstreamProtocolOpenAI') },
+  { value: 'anthropic_messages', label: t('admin.riskControl.upstreamProtocolAnthropic') },
+])
+
+const upstreamProtocolHint = computed(() => t(
+  configForm.upstream_protocol === 'anthropic_messages'
+    ? 'admin.riskControl.upstreamProtocolAnthropicHint'
+    : 'admin.riskControl.upstreamProtocolOpenAIHint'
+))
+
+const moderationBaseURLPlaceholder = computed(() => (
+  configForm.upstream_protocol === 'anthropic_messages'
+    ? 'https://api.anthropic.com'
+    : 'https://api.openai.com'
+))
+
+const moderationModelPlaceholder = computed(() => (
+  configForm.upstream_protocol === 'anthropic_messages'
+    ? 'claude-...'
+    : 'omni-moderation-latest'
+))
 
 const keywordBlockingModeOptions = computed<Array<{ value: KeywordBlockingMode; label: string; description: string }>>(() => [
   {
@@ -1831,8 +1879,10 @@ const runtimeBadgeClass = computed(() => {
 function applyConfig(config: ContentModerationConfig) {
   configForm.enabled = config.enabled
   configForm.mode = config.mode
-  configForm.base_url = config.base_url || 'https://api.openai.com'
-  configForm.model = config.model || 'omni-moderation-latest'
+  configForm.upstream_protocol = config.upstream_protocol || 'openai_moderations'
+  lastModerationUpstreamProtocol = configForm.upstream_protocol
+  configForm.base_url = config.base_url || moderationBaseURLPlaceholder.value
+  configForm.model = config.model || (configForm.upstream_protocol === 'openai_moderations' ? 'omni-moderation-latest' : '')
   configForm.proxy_id = config.proxy_id || null
   configForm.api_keys_text = ''
   configForm.api_key_configured = config.api_key_configured
@@ -1931,6 +1981,7 @@ async function saveConfig() {
     const payload: UpdateContentModerationConfig = {
       enabled: configForm.enabled,
       mode: configForm.mode,
+      upstream_protocol: configForm.upstream_protocol,
       base_url: configForm.base_url,
       model: configForm.model,
       // 后端语义：0 清除代理（直连），>0 指定代理
@@ -2148,6 +2199,7 @@ async function testApiKeys(useInputKeys: boolean) {
   try {
     const result = await adminAPI.riskControl.testAPIKeys({
       api_keys: keys,
+      upstream_protocol: configForm.upstream_protocol,
       base_url: configForm.base_url,
       model: configForm.model,
       timeout_ms: Number(configForm.timeout_ms) || 3000,
@@ -2170,6 +2222,43 @@ async function testApiKeys(useInputKeys: boolean) {
   } finally {
     apiKeyTesting.value = false
   }
+}
+
+function handleUpstreamProtocolChange(value: string | number | boolean | null) {
+  if (value !== 'openai_moderations' && value !== 'anthropic_messages') return
+  if (value === lastModerationUpstreamProtocol) return
+  lastModerationUpstreamProtocol = value
+  configForm.upstream_protocol = value
+  // A pending credential is valid only for the protocol under which it was entered.
+  // Clear transient key state on every protocol change, including a switch back.
+  configForm.api_keys_text = ''
+  configForm.clear_api_key = false
+  pendingDeleteApiKeyHashes.value = []
+  testedApiKeyStatuses.value = []
+  const protocolChanged = value !== settingsBaseline?.upstream_protocol
+  if (protocolChanged && configForm.api_key_configured) {
+    // Provider credentials are never carried across protocols implicitly.
+    // Replace mode disables stored-key testing and requires an explicit new key on save.
+    configForm.api_keys_mode = 'replace'
+  } else {
+    configForm.api_keys_mode = 'append'
+  }
+  if (!protocolChanged && settingsBaseline) {
+    configForm.base_url = settingsBaseline.base_url
+    configForm.model = settingsBaseline.model
+    return
+  }
+  if (value === 'anthropic_messages') {
+    if (!configForm.base_url || configForm.base_url === 'https://api.openai.com') {
+      configForm.base_url = 'https://api.anthropic.com'
+    }
+    configForm.model = ''
+    return
+  }
+  if (!configForm.base_url || configForm.base_url === 'https://api.anthropic.com') {
+    configForm.base_url = 'https://api.openai.com'
+  }
+  configForm.model = 'omni-moderation-latest'
 }
 
 function mergeConfiguredAPIKeyStatuses(items: ContentModerationAPIKeyStatus[]) {

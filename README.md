@@ -78,6 +78,30 @@ Model IQ 为已登录用户提供 GPT 模型测试结果对比页面。页面会
 - [`frontend/src/views/user/ModelIqView.vue`](frontend/src/views/user/ModelIqView.vue)
 - [`frontend/src/views/user/__tests__/ModelIqView.spec.ts`](frontend/src/views/user/__tests__/ModelIqView.spec.ts)
 
+### 2. 多上游内容审核
+
+管理员可以在「管理后台 → 风控中心 → 内容审计设置」选择内容审核上游协议：
+
+- `OpenAI Moderations`：直接调用配置的 Base URL 下的 `/v1/moderations`。
+- `Anthropic Messages`：直接调用配置的 Base URL 下的 `/v1/messages`，使用 `x-api-key` 和
+  `anthropic-version` 请求头，并强制模型调用审核工具返回完整的结构化分类分数。
+
+两种协议共用现有的多 API Key 轮询、失败冻结、超时、重试、代理服务器、前置拦截和异步观察机制。
+Anthropic 路径支持文本、HTTP(S) 图片和最大 8 MiB 的受支持图片格式 base64 data URL；用户内容始终
+作为不可信审核输入发送，不会拼接到系统指令中。工具启用严格 JSON Schema，输出必须恰好包含一次
+指定工具调用、全部审核类别和 0–1 范围内的分数。Anthropic 明确拒绝或返回无法验证的 2xx 结果时，
+`pre_block` 模式返回 503，避免把未审核内容放行；网络错误仍沿用原有策略。旧配置没有
+`upstream_protocol` 字段时继续默认使用 `openai_moderations`，无需迁移数据库或设置记录。
+
+核心文件：
+
+- [`backend/internal/service/content_moderation.go`](backend/internal/service/content_moderation.go)
+- [`backend/internal/service/content_moderation_anthropic.go`](backend/internal/service/content_moderation_anthropic.go)
+- [`backend/internal/service/content_moderation_anthropic_test.go`](backend/internal/service/content_moderation_anthropic_test.go)
+- [`backend/internal/handler/admin/content_moderation_handler.go`](backend/internal/handler/admin/content_moderation_handler.go)
+- [`frontend/src/api/admin/riskControl.ts`](frontend/src/api/admin/riskControl.ts)
+- [`frontend/src/views/admin/RiskControlView.vue`](frontend/src/views/admin/RiskControlView.vue)
+
 ### 3. 分组模型价格展示
 
 用户可以在 API Key 页面查看每个可见分组支持的模型价格。鼠标悬停或键盘聚焦

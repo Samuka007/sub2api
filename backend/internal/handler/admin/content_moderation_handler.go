@@ -20,10 +20,11 @@ func NewContentModerationHandler(svc *service.ContentModerationService) *Content
 }
 
 type contentModerationConfigRequest struct {
-	Enabled *bool   `json:"enabled"`
-	Mode    *string `json:"mode"`
-	BaseURL *string `json:"base_url"`
-	Model   *string `json:"model"`
+	Enabled          *bool   `json:"enabled"`
+	Mode             *string `json:"mode"`
+	UpstreamProtocol *string `json:"upstream_protocol"`
+	BaseURL          *string `json:"base_url"`
+	Model            *string `json:"model"`
 	// 审计请求使用的代理服务器：null 不修改；0 清除（直连）；>0 指定代理。
 	ProxyID              *int64              `json:"proxy_id"`
 	APIKey               *string             `json:"api_key"`
@@ -59,13 +60,14 @@ type contentModerationConfigRequest struct {
 }
 
 type contentModerationAPIKeyTestRequest struct {
-	APIKeys   []string `json:"api_keys"`
-	BaseURL   string   `json:"base_url"`
-	Model     string   `json:"model"`
-	TimeoutMS int      `json:"timeout_ms"`
-	ProxyID   *int64   `json:"proxy_id"`
-	Prompt    string   `json:"prompt"`
-	Images    []string `json:"images"`
+	APIKeys          []string `json:"api_keys"`
+	UpstreamProtocol string   `json:"upstream_protocol"`
+	BaseURL          string   `json:"base_url"`
+	Model            string   `json:"model"`
+	TimeoutMS        int      `json:"timeout_ms"`
+	ProxyID          *int64   `json:"proxy_id"`
+	Prompt           string   `json:"prompt"`
+	Images           []string `json:"images"`
 }
 
 type contentModerationHashRequest struct {
@@ -90,6 +92,7 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 	cfg, err := h.service.UpdateConfig(c.Request.Context(), service.UpdateContentModerationConfigInput{
 		Enabled:                        req.Enabled,
 		Mode:                           req.Mode,
+		UpstreamProtocol:               req.UpstreamProtocol,
 		BaseURL:                        req.BaseURL,
 		Model:                          req.Model,
 		ProxyID:                        req.ProxyID,
@@ -136,13 +139,14 @@ func (h *ContentModerationHandler) TestAPIKeys(c *gin.Context) {
 		return
 	}
 	result, err := h.service.TestAPIKeys(c.Request.Context(), service.TestContentModerationAPIKeysInput{
-		APIKeys:   req.APIKeys,
-		BaseURL:   req.BaseURL,
-		Model:     req.Model,
-		TimeoutMS: req.TimeoutMS,
-		ProxyID:   req.ProxyID,
-		Prompt:    req.Prompt,
-		Images:    req.Images,
+		APIKeys:          req.APIKeys,
+		UpstreamProtocol: req.UpstreamProtocol,
+		BaseURL:          req.BaseURL,
+		Model:            req.Model,
+		TimeoutMS:        req.TimeoutMS,
+		ProxyID:          req.ProxyID,
+		Prompt:           req.Prompt,
+		Images:           req.Images,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

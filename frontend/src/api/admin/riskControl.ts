@@ -1,6 +1,7 @@
 import { apiClient } from '../client'
 
 export type ModerationMode = 'off' | 'observe' | 'pre_block'
+export type ContentModerationUpstreamProtocol = 'openai_moderations' | 'anthropic_messages'
 export type KeywordBlockingMode = 'keyword_only' | 'keyword_and_api' | 'api_only'
 export type ContentModerationModelFilterType = 'all' | 'include' | 'exclude'
 
@@ -20,6 +21,7 @@ export interface ContentModerationTrustedAPIKey {
 export interface ContentModerationConfig {
   enabled: boolean
   mode: ModerationMode
+  upstream_protocol: ContentModerationUpstreamProtocol
   base_url: string
   model: string
   proxy_id: number | null
@@ -73,6 +75,7 @@ export interface ContentModerationAPIKeyStatus {
 
 export interface TestContentModerationAPIKeysPayload {
   api_keys?: string[]
+  upstream_protocol?: ContentModerationUpstreamProtocol
   base_url?: string
   model?: string
   timeout_ms?: number
@@ -100,6 +103,7 @@ export interface ContentModerationTestAuditResult {
 export interface UpdateContentModerationConfig {
   enabled?: boolean
   mode?: ModerationMode
+  upstream_protocol?: ContentModerationUpstreamProtocol
   base_url?: string
   model?: string
   // undefined 不修改；0 清除（直连）；>0 指定代理

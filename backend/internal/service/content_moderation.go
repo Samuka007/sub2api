@@ -53,18 +53,23 @@ const (
 	ContentModerationModelFilterInclude = "include"
 	ContentModerationModelFilterExclude = "exclude"
 
+	ContentModerationUpstreamProtocolOpenAIModerations = "openai_moderations"
+	ContentModerationUpstreamProtocolAnthropicMessages = "anthropic_messages"
+
 	ContentModerationProtocolAnthropicMessages = "anthropic_messages"
 	ContentModerationProtocolOpenAIResponses   = "openai_responses"
 	ContentModerationProtocolOpenAIChat        = "openai_chat_completions"
 	ContentModerationProtocolGemini            = "gemini"
 	ContentModerationProtocolOpenAIImages      = "openai_images"
 
-	defaultContentModerationBaseURL   = "https://api.openai.com"
-	defaultContentModerationModel     = "omni-moderation-latest"
-	defaultContentModerationTimeoutMS = 3000
-	maxContentModerationTimeoutMS     = 30000
-	maxModerationInputRunes           = 12000
-	maxModerationExcerptRunes         = 240
+	defaultContentModerationUpstreamProtocol = ContentModerationUpstreamProtocolOpenAIModerations
+	defaultContentModerationBaseURL          = "https://api.openai.com"
+	defaultContentModerationAnthropicBaseURL = "https://api.anthropic.com"
+	defaultContentModerationModel            = "omni-moderation-latest"
+	defaultContentModerationTimeoutMS        = 3000
+	maxContentModerationTimeoutMS            = 30000
+	maxModerationInputRunes                  = 12000
+	maxModerationExcerptRunes                = 240
 
 	defaultContentModerationWorkerCount          = 4
 	maxContentModerationWorkerCount              = 32
@@ -85,8 +90,8 @@ const (
 	contentModerationKeyHTTPErrorFreezeDuration  = 10 * time.Second
 	maxContentModerationInputImages              = 1
 	maxContentModerationTestImages               = maxContentModerationInputImages
-	maxContentModerationTestImageBytes           = 8 * 1024 * 1024
-	maxContentModerationTestImageDataURLBytes    = 12 * 1024 * 1024
+	maxContentModerationImageBytes               = 8 * 1024 * 1024
+	maxContentModerationImageDataURLBytes        = 12 * 1024 * 1024
 	maxContentModerationBlockedKeywords          = 10000
 	maxContentModerationBlockedKeywordRunes      = 200
 	maxContentModerationModelFilterModels        = 1000
@@ -104,7 +109,11 @@ const (
 	contentModerationRuntimeRefreshTimeout = 5 * time.Second
 )
 
-var errContentModerationProxyUnavailable = errors.New("content moderation proxy unavailable")
+var (
+	errContentModerationProxyUnavailable       = errors.New("content moderation proxy unavailable")
+	errContentModerationUnusableUpstreamResult = errors.New("content moderation upstream returned an unusable result")
+	errContentModerationUnmoderatableInput     = errors.New("content moderation upstream cannot inspect the request input")
+)
 
 var contentModerationCategoryOrder = []string{
 	"harassment",
@@ -147,10 +156,11 @@ func ContentModerationCategories() []string {
 }
 
 type ContentModerationConfig struct {
-	Enabled bool   `json:"enabled"`
-	Mode    string `json:"mode"`
-	BaseURL string `json:"base_url"`
-	Model   string `json:"model"`
+	Enabled          bool   `json:"enabled"`
+	Mode             string `json:"mode"`
+	UpstreamProtocol string `json:"upstream_protocol"`
+	BaseURL          string `json:"base_url"`
+	Model            string `json:"model"`
 	// ProxyID 指定审计请求使用的代理服务器（IP管理-代理服务器），nil 表示直连。
 	ProxyID              *int64                           `json:"proxy_id,omitempty"`
 	APIKey               string                           `json:"api_key,omitempty"`
@@ -186,6 +196,7 @@ type ContentModerationConfig struct {
 type ContentModerationConfigView struct {
 	Enabled                        bool                             `json:"enabled"`
 	Mode                           string                           `json:"mode"`
+	UpstreamProtocol               string                           `json:"upstream_protocol"`
 	BaseURL                        string                           `json:"base_url"`
 	Model                          string                           `json:"model"`
 	ProxyID                        *int64                           `json:"proxy_id"`
@@ -250,10 +261,11 @@ type ContentModerationAPIKeyLoad struct {
 }
 
 type TestContentModerationAPIKeysInput struct {
-	APIKeys   []string `json:"api_keys"`
-	BaseURL   string   `json:"base_url"`
-	Model     string   `json:"model"`
-	TimeoutMS int      `json:"timeout_ms"`
+	APIKeys          []string `json:"api_keys"`
+	UpstreamProtocol string   `json:"upstream_protocol"`
+	BaseURL          string   `json:"base_url"`
+	Model            string   `json:"model"`
+	TimeoutMS        int      `json:"timeout_ms"`
 	// ProxyID nil 表示沿用已保存配置的代理；<=0 表示强制直连测试；>0 表示指定代理测试。
 	ProxyID *int64   `json:"proxy_id"`
 	Prompt  string   `json:"prompt"`
@@ -276,10 +288,11 @@ type ContentModerationTestAuditResult struct {
 }
 
 type UpdateContentModerationConfigInput struct {
-	Enabled *bool   `json:"enabled"`
-	Mode    *string `json:"mode"`
-	BaseURL *string `json:"base_url"`
-	Model   *string `json:"model"`
+	Enabled          *bool   `json:"enabled"`
+	Mode             *string `json:"mode"`
+	UpstreamProtocol *string `json:"upstream_protocol"`
+	BaseURL          *string `json:"base_url"`
+	Model            *string `json:"model"`
 	// ProxyID nil 表示不修改；<=0 表示清除代理（恢复直连）；>0 表示指定代理。
 	ProxyID                        *int64                            `json:"proxy_id"`
 	APIKey                         *string                           `json:"api_key"`
@@ -642,12 +655,26 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	if input.Mode != nil {
 		cfg.Mode = strings.TrimSpace(*input.Mode)
 	}
-	if input.BaseURL != nil {
-		cfg.BaseURL = strings.TrimSpace(*input.BaseURL)
+	requestedUpstreamProtocol := ""
+	if input.UpstreamProtocol != nil {
+		requestedUpstreamProtocol = *input.UpstreamProtocol
 	}
-	if input.Model != nil {
-		cfg.Model = strings.TrimSpace(*input.Model)
+	protocolChanged := input.UpstreamProtocol != nil &&
+		strings.TrimSpace(requestedUpstreamProtocol) != cfg.UpstreamProtocol
+	if protocolChanged && isContentModerationUpstreamProtocol(strings.TrimSpace(requestedUpstreamProtocol)) &&
+		len(cfg.apiKeys()) > 0 && !contentModerationReplacesKeysForProtocolChange(input) {
+		return nil, infraerrors.BadRequest(
+			"CONTENT_MODERATION_PROTOCOL_CHANGE_REQUIRES_API_KEY_REPLACEMENT",
+			"切换内容审核上游协议时，必须明确清除或覆盖 API Key，避免把旧提供方密钥发送给新提供方",
+		)
 	}
+	applyContentModerationUpstreamTransition(
+		cfg,
+		input.UpstreamProtocol != nil,
+		requestedUpstreamProtocol,
+		input.BaseURL,
+		input.Model,
+	)
 	if input.ProxyID != nil {
 		if *input.ProxyID > 0 {
 			id := *input.ProxyID
@@ -776,12 +803,28 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		keys = cfg.apiKeys()
 		configured = true
 	}
+	requestedUpstreamProtocol := strings.TrimSpace(input.UpstreamProtocol)
+	if configured && len(keys) > 0 && requestedUpstreamProtocol != "" && requestedUpstreamProtocol != cfg.UpstreamProtocol {
+		return nil, infraerrors.BadRequest(
+			"CONTENT_MODERATION_STORED_API_KEY_PROTOCOL_MISMATCH",
+			"不能使用已保存的旧提供方 API Key 测试新的上游协议，请输入新提供方 API Key",
+		)
+	}
+	var requestedBaseURL *string
 	if strings.TrimSpace(input.BaseURL) != "" {
-		cfg.BaseURL = input.BaseURL
+		requestedBaseURL = &input.BaseURL
 	}
+	var requestedModel *string
 	if strings.TrimSpace(input.Model) != "" {
-		cfg.Model = input.Model
+		requestedModel = &input.Model
 	}
+	applyContentModerationUpstreamTransition(
+		cfg,
+		requestedUpstreamProtocol != "",
+		requestedUpstreamProtocol,
+		requestedBaseURL,
+		requestedModel,
+	)
 	if input.TimeoutMS > 0 {
 		cfg.TimeoutMS = input.TimeoutMS
 	}
@@ -794,6 +837,12 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		}
 	}
 	cfg.normalize()
+	if !isContentModerationUpstreamProtocol(cfg.UpstreamProtocol) {
+		return nil, infraerrors.BadRequest("INVALID_CONTENT_MODERATION_UPSTREAM_PROTOCOL", "内容审核上游协议无效")
+	}
+	if strings.TrimSpace(cfg.Model) == "" {
+		return nil, infraerrors.BadRequest("INVALID_CONTENT_MODERATION_MODEL", "内容审核上游模型不能为空")
+	}
 	testInput, imageCount, err := buildModerationTestInput(input.Prompt, input.Images)
 	if err != nil {
 		return nil, err
@@ -821,7 +870,10 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		latency := int(time.Since(start).Milliseconds())
 		keyHash := moderationAPIKeyHash(key)
 		if err != nil {
-			s.markAPIKeyError(key, err.Error(), latency, httpStatus)
+			if !errors.Is(err, errContentModerationUnusableUpstreamResult) &&
+				!errors.Is(err, errContentModerationUnmoderatableInput) {
+				s.markAPIKeyError(key, err.Error(), latency, httpStatus)
+			}
 		} else {
 			s.markAPIKeySuccess(key, latency, httpStatus)
 			if auditResult == nil {
@@ -830,6 +882,14 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		}
 		status := s.apiKeyStatusForHash(idx, keyHash, maskSecretTail(key), configured)
 		status.LastTested = true
+		if err != nil && (errors.Is(err, errContentModerationUnusableUpstreamResult) ||
+			errors.Is(err, errContentModerationUnmoderatableInput)) {
+			// Surface content/model-specific failures in this test response without
+			// persisting them as credential health failures.
+			status.Status = "error"
+			status.LastError = trimRunes(err.Error(), 180)
+			status.LastHTTPStatus = httpStatus
+		}
 		items = append(items, status)
 	}
 	return &TestContentModerationAPIKeysResult{Items: items, AuditResult: auditResult, ImageCount: imageCount}, nil
@@ -1118,11 +1178,21 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 			log := s.buildLog(input, cfg, ContentModerationActionError, false, "", 0, nil, content.ExcerptText(), &latency, queueDelay, err.Error())
 			_ = s.repo.CreateLog(ctx, log)
 		}
-		if allowBlock && cfg.Mode == ContentModerationModePreBlock && errors.Is(err, errContentModerationProxyUnavailable) {
+		if allowBlock && cfg.Mode == ContentModerationModePreBlock &&
+			(errors.Is(err, errContentModerationProxyUnavailable) ||
+				(cfg.UpstreamProtocol == ContentModerationUpstreamProtocolAnthropicMessages &&
+					(errors.Is(err, errContentModerationUnusableUpstreamResult) ||
+						errors.Is(err, errContentModerationUnmoderatableInput)))) {
+			message := "content moderation proxy is unavailable"
+			if errors.Is(err, errContentModerationUnusableUpstreamResult) {
+				message = "content moderation upstream returned an unusable result"
+			} else if errors.Is(err, errContentModerationUnmoderatableInput) {
+				message = "content moderation upstream cannot inspect the request input"
+			}
 			return &ContentModerationDecision{
 				Allowed:    false,
 				Blocked:    true,
-				Message:    "content moderation proxy is unavailable",
+				Message:    message,
 				StatusCode: http.StatusServiceUnavailable,
 				Action:     ContentModerationActionError,
 			}
@@ -1781,8 +1851,14 @@ func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *Cont
 	default:
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_MODE", "内容审计模式无效")
 	}
+	if !isContentModerationUpstreamProtocol(cfg.UpstreamProtocol) {
+		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_UPSTREAM_PROTOCOL", "内容审核上游协议无效")
+	}
 	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
-		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_BASE_URL", "OpenAI Base URL 无效")
+		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_BASE_URL", "内容审核上游 Base URL 无效")
+	}
+	if strings.TrimSpace(cfg.Model) == "" {
+		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_MODEL", "内容审核上游模型不能为空")
 	}
 	if cfg.ProxyID != nil && s.proxyRepo != nil {
 		if _, err := s.proxyRepo.GetByID(ctx, *cfg.ProxyID); err != nil {
@@ -1859,11 +1935,25 @@ func (s *ContentModerationService) callModeration(ctx context.Context, cfg *Cont
 			s.markAPIKeySuccess(key, latency, httpStatus)
 			return result, nil
 		}
+		unusableUpstreamResult := errors.Is(err, errContentModerationUnusableUpstreamResult)
+		unmoderatableInput := errors.Is(err, errContentModerationUnmoderatableInput)
+		credentialIndependentError := unusableUpstreamResult || unmoderatableInput
 		if trackLoad {
-			s.finishModerationAPIKeyCall(key, latency, false)
+			if unmoderatableInput {
+				s.cancelModerationAPIKeyCall(key)
+			} else {
+				s.finishModerationAPIKeyCall(key, latency, false)
+			}
+		}
+		lastErr = err
+		if credentialIndependentError {
+			// A refusal or invalid 2xx payload is tied to the content/model, not
+			// the credential. Local input conversion failures are also independent
+			// of the credential. Retrying with another key only repeats the unsafe
+			// result and can incorrectly exhaust the entire key pool.
+			break
 		}
 		s.markAPIKeyError(key, err.Error(), latency, httpStatus)
-		lastErr = err
 		if httpStatus == http.StatusBadRequest {
 			break
 		}
@@ -1881,6 +1971,18 @@ func (s *ContentModerationService) callModeration(ctx context.Context, cfg *Cont
 }
 
 func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Context, cfg *ContentModerationConfig, apiKey string, input any, httpStatus *int) (*moderationAPIResult, error) {
+	upstreamProtocol := strings.TrimSpace(cfg.UpstreamProtocol)
+	if upstreamProtocol == "" {
+		upstreamProtocol = defaultContentModerationUpstreamProtocol
+	}
+	switch upstreamProtocol {
+	case ContentModerationUpstreamProtocolAnthropicMessages:
+		return s.callAnthropicModerationOnceWithInput(ctx, cfg, apiKey, input, httpStatus)
+	case ContentModerationUpstreamProtocolOpenAIModerations:
+		// Continue with the existing OpenAI Moderations request below.
+	default:
+		return nil, fmt.Errorf("unsupported content moderation upstream protocol %q", upstreamProtocol)
+	}
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	endpoint, err := url.JoinPath(base, "/v1/moderations")
 	if err != nil {
@@ -2201,6 +2303,7 @@ func defaultContentModerationConfig() *ContentModerationConfig {
 	return &ContentModerationConfig{
 		Enabled:              false,
 		Mode:                 ContentModerationModePreBlock,
+		UpstreamProtocol:     defaultContentModerationUpstreamProtocol,
 		BaseURL:              defaultContentModerationBaseURL,
 		Model:                defaultContentModerationModel,
 		TimeoutMS:            defaultContentModerationTimeoutMS,
@@ -2250,6 +2353,43 @@ func cloneContentModerationConfig(cfg *ContentModerationConfig) *ContentModerati
 	return &clone
 }
 
+func applyContentModerationUpstreamTransition(
+	cfg *ContentModerationConfig,
+	protocolSpecified bool,
+	requestedProtocol string,
+	requestedBaseURL *string,
+	requestedModel *string,
+) {
+	if cfg == nil {
+		return
+	}
+	requestedProtocol = strings.TrimSpace(requestedProtocol)
+	protocolChanged := protocolSpecified && requestedProtocol != cfg.UpstreamProtocol
+	if protocolSpecified {
+		cfg.UpstreamProtocol = requestedProtocol
+	}
+	if requestedBaseURL != nil {
+		cfg.BaseURL = strings.TrimSpace(*requestedBaseURL)
+	} else if protocolChanged {
+		// Custom gateways cross provider boundaries only when the caller
+		// deliberately resubmits them for the new protocol.
+		cfg.BaseURL = ""
+	}
+	if requestedModel != nil {
+		cfg.Model = strings.TrimSpace(*requestedModel)
+	} else if protocolChanged {
+		cfg.Model = ""
+	}
+}
+
+func contentModerationReplacesKeysForProtocolChange(input UpdateContentModerationConfigInput) bool {
+	if input.ClearAPIKey {
+		return true
+	}
+	return normalizeContentModerationAPIKeysMode(input.APIKeysMode) == contentModerationAPIKeysModeReplace &&
+		input.APIKeys != nil
+}
+
 func (cfg *ContentModerationConfig) normalize() {
 	if cfg.APIKey != "" {
 		cfg.APIKeys = normalizeModerationAPIKeys(append(cfg.APIKeys, cfg.APIKey))
@@ -2260,11 +2400,19 @@ func (cfg *ContentModerationConfig) normalize() {
 	if cfg.Mode == "" {
 		cfg.Mode = ContentModerationModePreBlock
 	}
+	if cfg.UpstreamProtocol == "" {
+		cfg.UpstreamProtocol = defaultContentModerationUpstreamProtocol
+	}
+	cfg.UpstreamProtocol = strings.TrimSpace(cfg.UpstreamProtocol)
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = defaultContentModerationBaseURL
+		if cfg.UpstreamProtocol == ContentModerationUpstreamProtocolAnthropicMessages {
+			cfg.BaseURL = defaultContentModerationAnthropicBaseURL
+		} else {
+			cfg.BaseURL = defaultContentModerationBaseURL
+		}
 	}
 	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if cfg.Model == "" {
+	if cfg.Model == "" && cfg.UpstreamProtocol == ContentModerationUpstreamProtocolOpenAIModerations {
 		cfg.Model = defaultContentModerationModel
 	}
 	cfg.Model = strings.TrimSpace(cfg.Model)
@@ -2467,6 +2615,19 @@ func (s *ContentModerationService) beginModerationAPIKeyCall(key string) {
 	state.SyncActive++
 }
 
+func (s *ContentModerationService) cancelModerationAPIKeyCall(key string) {
+	hash := moderationAPIKeyHash(key)
+	if hash == "" || s == nil {
+		return
+	}
+	s.keyHealthMu.Lock()
+	defer s.keyHealthMu.Unlock()
+	state := s.ensureAPIKeyHealthLocked(hash, maskSecretTail(key))
+	if state.SyncActive > 0 {
+		state.SyncActive--
+	}
+}
+
 func (s *ContentModerationService) finishModerationAPIKeyCall(key string, latencyMS int, success bool) {
 	hash := moderationAPIKeyHash(key)
 	if hash == "" || s == nil {
@@ -2530,6 +2691,9 @@ func (s *ContentModerationService) markAPIKeyError(key string, errText string, l
 }
 
 func contentModerationFreezeDurationForHTTPStatus(httpStatus int) time.Duration {
+	if httpStatus >= http.StatusOK && httpStatus < http.StatusMultipleChoices {
+		return 0
+	}
 	switch httpStatus {
 	case 0, http.StatusBadRequest:
 		return 0
@@ -2570,6 +2734,7 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 	return &ContentModerationConfigView{
 		Enabled:                        cfg.Enabled,
 		Mode:                           cfg.Mode,
+		UpstreamProtocol:               cfg.UpstreamProtocol,
 		BaseURL:                        cfg.BaseURL,
 		Model:                          cfg.Model,
 		ProxyID:                        cloneInt64Ptr(cfg.ProxyID),
@@ -2601,6 +2766,15 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		ModelFilter:                    cloneContentModerationModelFilter(cfg.ModelFilter),
 		TrustedAPIKeys:                 cloneContentModerationTrustedAPIKeys(cfg.TrustedAPIKeys),
 		CyberPolicyExcludeFromBanCount: cfg.CyberPolicyExcludeFromBanCount,
+	}
+}
+
+func isContentModerationUpstreamProtocol(protocol string) bool {
+	switch protocol {
+	case ContentModerationUpstreamProtocolOpenAIModerations, ContentModerationUpstreamProtocolAnthropicMessages:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -2778,7 +2952,7 @@ func contentModerationTestHasAuditInput(prompt string, images []string) bool {
 }
 
 func validateModerationTestImageDataURL(value string) error {
-	if len(value) > maxContentModerationTestImageDataURLBytes {
+	if len(value) > maxContentModerationImageDataURLBytes {
 		return infraerrors.BadRequest("MODERATION_TEST_IMAGE_TOO_LARGE", "测试图片不能超过 8MB")
 	}
 	if !strings.HasPrefix(value, "data:image/") {
@@ -2792,7 +2966,7 @@ func validateModerationTestImageDataURL(value string) error {
 	if err != nil {
 		return infraerrors.BadRequest("INVALID_MODERATION_TEST_IMAGE", "测试图片 base64 无效")
 	}
-	if len(raw) > maxContentModerationTestImageBytes {
+	if len(raw) > maxContentModerationImageBytes {
 		return infraerrors.BadRequest("MODERATION_TEST_IMAGE_TOO_LARGE", "测试图片不能超过 8MB")
 	}
 	return nil

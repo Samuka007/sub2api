@@ -21,4 +21,11 @@ describe('risk control locale copy', () => {
     expect(zh.admin.riskControl.preBlockAPIKeyLoadHint).not.toContain('Worker 池')
     expect(en.admin.riskControl.preBlockAPIKeyLoadHint).not.toContain('worker pool')
   })
+
+  it('documents both moderation upstream protocols', () => {
+    expect(zh.admin.riskControl.upstreamProtocolOpenAIHint).toContain('/v1/moderations')
+    expect(zh.admin.riskControl.upstreamProtocolAnthropicHint).toContain('/v1/messages')
+    expect(en.admin.riskControl.upstreamProtocolOpenAIHint).toContain('/v1/moderations')
+    expect(en.admin.riskControl.upstreamProtocolAnthropicHint).toContain('/v1/messages')
+  })
 })
