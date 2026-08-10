@@ -128,10 +128,13 @@ jobs:
       - name: Run golangci-lint
         if: github.event_name != 'schedule'
         uses: golangci/golangci-lint-action@v9
+        env:
+          HOME: ${{ runner.temp }}/golangci-lint-home
         with:
           version: v2.9
           working-directory: backend
-          args: --timeout=30m
+          args: --timeout=30m --allow-parallel-runners
+          skip-cache: true
       - name: Run govulncheck
         working-directory: backend
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
