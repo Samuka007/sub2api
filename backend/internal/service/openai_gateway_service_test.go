@@ -258,6 +258,22 @@ func (r *openAIStreamReadThenErrorCloser) Read(p []byte) (int, error) {
 
 func (r *openAIStreamReadThenErrorCloser) Close() error { return nil }
 
+type signalingGinWriter struct {
+	gin.ResponseWriter
+	match    []byte
+	written  chan struct{}
+	signaled bool
+}
+
+func (w *signalingGinWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	if !w.signaled && bytes.Contains(p, w.match) {
+		w.signaled = true
+		close(w.written)
+	}
+	return n, err
+}
+
 type failingGinWriter struct {
 	gin.ResponseWriter
 	failAfter int
@@ -1400,7 +1416,7 @@ func TestOpenAIStreamingTimeout(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamingContextCanceledReturnsIncompleteErrorWithoutInjectingErrorEvent(t *testing.T) {
+func TestOpenAIStreamingContextCanceledBeforeTerminalStopsUpstreamWithoutInjectingErrorEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
@@ -1419,14 +1435,19 @@ func TestOpenAIStreamingContextCanceledReturnsIncompleteErrorWithoutInjectingErr
 
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
-		Body:       cancelReadCloser{},
-		Header:     http.Header{},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.output_text.delta","response_id":"resp_queued","delta":"must-not-leak"}`,
+			"",
+			`data: {"type":"response.completed","response":{"id":"resp_queued","usage":{"input_tokens":3,"output_tokens":5}}}`,
+			"",
+		}, "\n"))),
+		Header: http.Header{"X-Request-Id": []string{"req_queued"}},
 	}
 
 	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1}, time.Now(), "model", "model")
-	if err == nil || !strings.Contains(err.Error(), "stream usage incomplete") {
-		t.Fatalf("expected incomplete stream error, got %v", err)
-	}
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "client disconnected before terminal event")
+	require.NotContains(t, rec.Body.String(), "must-not-leak")
 	if strings.Contains(rec.Body.String(), "event: error") || strings.Contains(rec.Body.String(), "stream_read_error") {
 		t.Fatalf("expected no injected SSE error event, got %q", rec.Body.String())
 	}
@@ -2145,48 +2166,227 @@ func TestOpenAIStreamingPolicyResponseFailedBeforeOutputPassesThrough(t *testing
 	require.Contains(t, rec.Body.String(), "high-risk cyber activity")
 }
 
-func TestOpenAIStreamingClientDisconnectDrainsUpstreamUsage(t *testing.T) {
+func TestOpenAIStreamingClientDisconnectBeforeSemanticOutputStopsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	cfg := &config.Config{
-		Gateway: config.GatewayConfig{
-			StreamDataIntervalTimeout: 0,
-			StreamKeepaliveInterval:   0,
-			MaxLineSize:               defaultMaxLineSize,
-		},
-	}
-	svc := &OpenAIGatewayService{cfg: cfg}
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
+		StreamDataIntervalTimeout: 1,
+		StreamKeepaliveInterval:   0,
+		MaxLineSize:               defaultMaxLineSize,
+	}}}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-	c.Writer = &failingGinWriter{ResponseWriter: c.Writer, failAfter: 0}
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(requestCtx)
 
-	pr, pw := io.Pipe()
-	resp := &http.Response{
+	upstreamReader, upstreamWriter := io.Pipe()
+	response := &http.Response{
 		StatusCode: http.StatusOK,
-		Body:       pr,
-		Header:     http.Header{},
+		Body:       upstreamReader,
+		Header:     http.Header{"X-Request-Id": []string{"req_before_output"}},
 	}
-
+	createdRead := make(chan struct{})
+	releaseUpstream := make(chan struct{})
 	go func() {
-		defer func() { _ = pw.Close() }()
-		_, _ = pw.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{}}\n\n"))
-		_, _ = pw.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n"))
+		defer func() { _ = upstreamWriter.Close() }()
+		_, _ = upstreamWriter.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_before_output\"}}\n\n"))
+		close(createdRead)
+		<-releaseUpstream
+		_, _ = upstreamWriter.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_before_output\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}}\n\n"))
+	}()
+	defer close(releaseUpstream)
+
+	resultCh := make(chan struct {
+		result *openaiStreamingResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := svc.handleStreamingResponse(
+			requestCtx,
+			response,
+			c,
+			&Account{ID: 1, Platform: PlatformOpenAI},
+			time.Now(),
+			"gpt-5.5",
+			"gpt-5.5",
+		)
+		resultCh <- struct {
+			result *openaiStreamingResult
+			err    error
+		}{result: result, err: err}
 	}()
 
-	result, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1}, time.Now(), "model", "model")
-	_ = pr.Close()
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
+	<-createdRead
+	cancelRequest()
+
+	select {
+	case outcome := <-resultCh:
+		require.Error(t, outcome.err)
+		require.ErrorIs(t, outcome.err, context.Canceled)
+		require.Contains(t, outcome.err.Error(), "client disconnected before terminal event")
+		require.NotNil(t, outcome.result)
+		require.Zero(t, outcome.result.usage.InputTokens)
+		require.Zero(t, outcome.result.usage.OutputTokens)
+		require.NotContains(t, rec.Body.String(), "response.completed")
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("stream did not stop promptly after the client disconnected")
 	}
-	if result == nil || result.usage == nil {
-		t.Fatalf("expected usage result")
+}
+
+func TestOpenAIStreamingClientDisconnectAfterTerminalPreservesUsagePastFirstOutputDeadline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
+		OpenAIFirstOutputTimeoutSeconds: 1,
+		StreamDataIntervalTimeout:       5,
+		MaxLineSize:                     defaultMaxLineSize,
+	}}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(requestCtx)
+
+	upstreamReader, upstreamWriter := io.Pipe()
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       upstreamReader,
+		Header:     http.Header{"X-Request-Id": []string{"req_terminal_disconnect"}},
 	}
-	if result.usage.InputTokens != 3 || result.usage.OutputTokens != 5 || result.usage.CacheReadInputTokens != 1 {
-		t.Fatalf("unexpected usage: %+v", *result.usage)
+	terminalProcessed := make(chan struct{})
+	releaseBoundary := make(chan struct{})
+	go func() {
+		defer func() { _ = upstreamWriter.Close() }()
+		_, _ = upstreamWriter.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_terminal_disconnect\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}}\n"))
+		_, _ = upstreamWriter.Write([]byte("event: response.completed\n"))
+		close(terminalProcessed)
+		<-releaseBoundary
+		_, _ = upstreamWriter.Write([]byte("\n"))
+	}()
+
+	resultCh := make(chan struct {
+		result *openaiStreamingResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := svc.handleStreamingResponse(
+			requestCtx,
+			response,
+			c,
+			&Account{ID: 1, Platform: PlatformOpenAI},
+			time.Now(),
+			"gpt-5.5",
+			"gpt-5.5",
+		)
+		resultCh <- struct {
+			result *openaiStreamingResult
+			err    error
+		}{result: result, err: err}
+	}()
+
+	select {
+	case <-terminalProcessed:
+	case <-time.After(time.Second):
+		t.Fatal("terminal data was not processed")
 	}
-	if strings.Contains(rec.Body.String(), "event: error") || strings.Contains(rec.Body.String(), "write_failed") {
-		t.Fatalf("expected no injected SSE error event, got %q", rec.Body.String())
+	cancelRequest()
+	time.Sleep(1100 * time.Millisecond)
+	close(releaseBoundary)
+
+	select {
+	case outcome := <-resultCh:
+		if outcome.err != nil {
+			t.Fatalf("unexpected terminal drain error: type=%T value=%#v message=%q", outcome.err, outcome.err, outcome.err.Error())
+		}
+		require.NotNil(t, outcome.result)
+		require.Equal(t, 3, outcome.result.usage.InputTokens)
+		require.Equal(t, 5, outcome.result.usage.OutputTokens)
+		require.True(t, outcome.result.clientDisconnected)
+		_, hasOpsTimeout := c.Get(OpsUpstreamErrorsKey)
+		require.False(t, hasOpsTimeout, "terminal usage must not be reclassified as first-output timeout")
+		require.Empty(t, rec.Body.String(), "terminal event must not be written after the client disconnects")
+	case <-time.After(time.Second):
+		t.Fatal("stream did not finish after the terminal boundary was released")
+	}
+}
+
+func TestOpenAIStreamingClientDisconnectAfterSemanticOutputStopsUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
+		StreamDataIntervalTimeout: 5,
+		StreamKeepaliveInterval:   0,
+		MaxLineSize:               defaultMaxLineSize,
+	}}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(requestCtx)
+	outputWritten := make(chan struct{})
+	c.Writer = &signalingGinWriter{
+		ResponseWriter: c.Writer,
+		match:          []byte("partial"),
+		written:        outputWritten,
+	}
+
+	upstreamReader, upstreamWriter := io.Pipe()
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       upstreamReader,
+		Header:     http.Header{"X-Request-Id": []string{"req_after_output"}},
+	}
+	releaseTerminal := make(chan struct{})
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+		defer func() { _ = upstreamWriter.Close() }()
+		_, _ = upstreamWriter.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_after_output\",\"delta\":\"partial\"}\n\n"))
+		<-releaseTerminal
+		_, _ = upstreamWriter.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after_output\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n"))
+	}()
+	defer func() {
+		close(releaseTerminal)
+		<-upstreamDone
+	}()
+
+	resultCh := make(chan struct {
+		result *openaiStreamingResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := svc.handleStreamingResponse(
+			requestCtx,
+			response,
+			c,
+			&Account{ID: 1, Platform: PlatformOpenAI},
+			time.Now(),
+			"gpt-5.5",
+			"gpt-5.5",
+		)
+		resultCh <- struct {
+			result *openaiStreamingResult
+			err    error
+		}{result: result, err: err}
+	}()
+
+	select {
+	case <-outputWritten:
+	case <-time.After(time.Second):
+		t.Fatal("semantic output was not delivered before the client disconnected")
+	}
+	cancelRequest()
+
+	select {
+	case outcome := <-resultCh:
+		require.ErrorIs(t, outcome.err, context.Canceled)
+		require.Contains(t, outcome.err.Error(), "client disconnected before terminal event")
+		require.NotNil(t, outcome.result)
+		require.Zero(t, outcome.result.usage.InputTokens)
+		require.Zero(t, outcome.result.usage.OutputTokens)
+		require.Zero(t, outcome.result.usage.CacheReadInputTokens)
+		require.Contains(t, rec.Body.String(), "partial")
+		require.NotContains(t, rec.Body.String(), "response.completed")
+	case <-time.After(time.Second):
+		t.Fatal("stream did not stop after the client disconnected")
 	}
 }
 

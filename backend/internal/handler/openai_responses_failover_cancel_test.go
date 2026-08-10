@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -49,6 +50,73 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 	return append([]int64(nil), u.accountIDs...)
 }
 
+type openAIResponsesStreamingCancelUpstream struct {
+	service.HTTPUpstream
+	mu                  sync.Mutex
+	accountIDs          []int64
+	started             chan struct{}
+	release             chan struct{}
+	terminalBoundaryErr chan error
+	semanticOutput      bool
+	terminalEvent       bool
+}
+
+func (u *openAIResponsesStreamingCancelUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	u.mu.Lock()
+	u.accountIDs = append(u.accountIDs, accountID)
+	u.mu.Unlock()
+
+	reader, writer := io.Pipe()
+	go func() {
+		defer func() { _ = writer.Close() }()
+		if u.terminalEvent {
+			_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_terminal\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}}\n"))
+			_, _ = writer.Write([]byte("event: response.completed\n"))
+			close(u.started)
+			<-u.release
+			_, err := writer.Write([]byte("\n"))
+			if u.terminalBoundaryErr != nil {
+				u.terminalBoundaryErr <- err
+			}
+			return
+		}
+		firstEvent := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_abandoned\"}}\n\n"
+		if u.semanticOutput {
+			firstEvent = "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_abandoned\",\"delta\":\"partial\"}\n\n"
+		}
+		_, _ = writer.Write([]byte(firstEvent))
+		close(u.started)
+		<-u.release
+		_, _ = writer.Write([]byte(":\n\n"))
+	}()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"req_abandoned"}},
+		Body:       reader,
+	}, nil
+}
+
+func (u *openAIResponsesStreamingCancelUpstream) calls() []int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]int64(nil), u.accountIDs...)
+}
+
+type openAIResponsesSignalingWriter struct {
+	gin.ResponseWriter
+	match   []byte
+	written chan struct{}
+	once    sync.Once
+}
+
+func (w *openAIResponsesSignalingWriter) Write(data []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(data)
+	if bytes.Contains(data, w.match) {
+		w.once.Do(func() { close(w.written) })
+	}
+	return n, err
+}
+
 func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
 	t.Helper()
 	accounts := []service.Account{
@@ -76,7 +144,7 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 		},
 	}
 	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
-	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg := &config.Config{RunMode: config.RunModeSimple, Gateway: config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 30}}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -174,6 +242,136 @@ func TestOpenAIGatewayHandlerResponses_FailoverAbortsWhenClientDisconnected(t *t
 	require.Len(t, events, 1)
 	require.Equal(t, "failover", events[0].Kind)
 	require.Equal(t, 520, events[0].UpstreamStatusCode)
+}
+
+func TestOpenAIGatewayHandlerResponses_ClientDisconnectBeforeSemanticOutputReturns499(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	upstream := &openAIResponsesStreamingCancelUpstream{started: make(chan struct{}), release: make(chan struct{})}
+	handler := newOpenAIResponsesFailoverTestHandler(t, upstream)
+	c, rec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	body := []byte(`{"model":"gpt-5.1","stream":true,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	done := make(chan struct{})
+	go func() {
+		handler.Responses(c)
+		close(done)
+	}()
+
+	select {
+	case <-upstream.started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream stream did not start")
+	}
+	cancel()
+	close(upstream.release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after the client disconnected")
+	}
+
+	require.Equal(t, []int64{1}, upstream.calls(), "客户端断开后不应发起第二个上游请求")
+	require.Equal(t, statusClientClosedRequest, c.Writer.Status(), "客户端断开应按 499 归类")
+	require.Zero(t, rec.Body.Len(), "不应向已断开的客户端补写 502 响应")
+}
+
+func TestOpenAIGatewayHandlerResponses_ClientDisconnectAfterSemanticOutputStopsUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	upstream := &openAIResponsesStreamingCancelUpstream{
+		started:        make(chan struct{}),
+		release:        make(chan struct{}),
+		semanticOutput: true,
+	}
+	defer close(upstream.release)
+	handler := newOpenAIResponsesFailoverTestHandler(t, upstream)
+	c, rec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	body := []byte(`{"model":"gpt-5.1","stream":true,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+	outputWritten := make(chan struct{})
+	c.Writer = &openAIResponsesSignalingWriter{
+		ResponseWriter: c.Writer,
+		match:          []byte("partial"),
+		written:        outputWritten,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handler.Responses(c)
+		close(done)
+	}()
+
+	select {
+	case <-outputWritten:
+	case <-time.After(time.Second):
+		t.Fatal("semantic output was not delivered before the client disconnected")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler continued draining after the client disconnected")
+	}
+
+	require.Equal(t, []int64{1}, upstream.calls(), "客户端断开后不应发起第二个上游请求")
+	require.Equal(t, http.StatusOK, c.Writer.Status(), "语义输出已提交后不能覆盖响应状态")
+	require.Contains(t, rec.Body.String(), "partial")
+	require.NotContains(t, rec.Body.String(), "response.completed")
+}
+
+func TestOpenAIGatewayHandlerResponses_ClientDisconnectAfterTerminalBeforeCommitReturns499(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	upstream := &openAIResponsesStreamingCancelUpstream{
+		started:             make(chan struct{}),
+		release:             make(chan struct{}),
+		terminalBoundaryErr: make(chan error, 1),
+		terminalEvent:       true,
+	}
+	handler := newOpenAIResponsesFailoverTestHandler(t, upstream)
+	c, rec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	body := []byte(`{"model":"gpt-5.1","stream":true,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	done := make(chan struct{})
+	go func() {
+		handler.Responses(c)
+		close(done)
+	}()
+
+	select {
+	case <-upstream.started:
+	case <-time.After(time.Second):
+		t.Fatal("terminal event was not processed before the client disconnected")
+	}
+	cancel()
+	close(upstream.release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after terminal usage was drained")
+	}
+
+	select {
+	case err := <-upstream.terminalBoundaryErr:
+		require.NoError(t, err, "terminal 后断连必须继续读取 usage 边界，而不是提前关闭 upstream body")
+	case <-time.After(time.Second):
+		t.Fatal("terminal usage boundary was not drained")
+	}
+	require.Equal(t, []int64{1}, upstream.calls())
+	require.Equal(t, statusClientClosedRequest, c.Writer.Status(), "未提交响应时应按 499 归类")
+	require.Empty(t, rec.Body.String(), "客户端断开后不得写出已缓冲的 terminal event")
 }
 
 // TestOpenAIGatewayHandlerResponses_FailoverContinuesForConnectedClient 回归

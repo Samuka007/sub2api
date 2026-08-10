@@ -23,11 +23,12 @@ import (
 
 // openaiStreamingResult streaming response result
 type openaiStreamingResult struct {
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
+	usage              *OpenAIUsage
+	firstTokenMs       *int
+	responseID         string
+	imageCount         int
+	imageOutputSizes   []string
+	clientDisconnected bool
 }
 
 type openaiNonStreamingResult struct {
@@ -294,11 +295,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	streamSeenImages := make(map[string]struct{})
 	resultWithUsage := func() *openaiStreamingResult {
 		return &openaiStreamingResult{
-			usage:            usage,
-			firstTokenMs:     firstTokenMs,
-			responseID:       responseID,
-			imageCount:       imageCounter.Count(),
-			imageOutputSizes: imageCounter.Sizes(),
+			usage:              usage,
+			firstTokenMs:       firstTokenMs,
+			responseID:         responseID,
+			imageCount:         imageCounter.Count(),
+			imageOutputSizes:   imageCounter.Sizes(),
+			clientDisconnected: clientDisconnected,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -591,8 +593,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 	}
 
+	var clientDoneCh <-chan struct{}
+	if ctx != nil {
+		clientDoneCh = ctx.Done()
+	}
+
 	// 无超时/无 keepalive 的常见路径走同步扫描，减少 goroutine 与 channel 开销。
-	if streamInterval <= 0 && keepaliveInterval <= 0 && firstOutputTimeout <= 0 {
+	if streamInterval <= 0 && keepaliveInterval <= 0 && firstOutputTimeout <= 0 && clientDoneCh == nil {
 		defer putSSEScannerBuf64K(scanBuf)
 		for documentScanner.Scan() {
 			processSSELine(documentScanner.Text(), true)
@@ -658,9 +665,67 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}(scanBuf)
 	defer close(done)
 
+	handleClientCancellation := func(pending *scanEvent) (*openaiStreamingResult, error, bool) {
+		clientDoneCh = nil
+		if sawTerminalEvent {
+			stopFirstOutputTimer()
+			clientDisconnected = true
+			logger.LegacyPrintf(
+				"service.openai_gateway",
+				"Client disconnected after terminal event, continuing to drain upstream for billing: account=%d model=%s upstream_request_id=%s response_id=%s",
+				account.ID,
+				originalModel,
+				upstreamRequestID,
+				responseID,
+			)
+			return nil, nil, false
+		}
+		if pending != nil {
+			markEventProcessed(*pending)
+		}
+		_ = resp.Body.Close()
+		for ev := range events {
+			markEventProcessed(ev)
+		}
+		clientErr := context.Canceled
+		if err := ctx.Err(); err != nil {
+			clientErr = err
+		}
+		logger.LegacyPrintf(
+			"service.openai_gateway",
+			"Client disconnected before terminal event, stopping upstream: account=%d model=%s upstream_request_id=%s response_id=%s",
+			account.ID,
+			originalModel,
+			upstreamRequestID,
+			responseID,
+		)
+		return resultWithUsage(), fmt.Errorf("client disconnected before terminal event: %w", clientErr), true
+	}
+	checkClientCancellation := func(pending *scanEvent) (*openaiStreamingResult, bool, bool, error) {
+		if clientDoneCh == nil || ctx == nil || ctx.Err() == nil {
+			return nil, false, false, nil
+		}
+		result, err, stop := handleClientCancellation(pending)
+		return result, true, stop, err
+	}
+
 	for {
+		if result, handled, stop, err := checkClientCancellation(nil); handled {
+			if stop {
+				return result, err
+			}
+			continue
+		}
+
 		select {
 		case ev, ok := <-events:
+			var pending *scanEvent
+			if ok {
+				pending = &ev
+			}
+			if result, _, stop, err := checkClientCancellation(pending); stop {
+				return result, err
+			}
 			if !ok {
 				if guardFirstOutput && eventInProgress {
 					// EOF dispatches the final SSE event even without a trailing blank
@@ -679,7 +744,19 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				return resultWithUsage(), streamEarlyErr
 			}
 
+		case <-clientDoneCh:
+			result, err, stop := handleClientCancellation(nil)
+			if stop {
+				return result, err
+			}
+
 		case <-intervalCh:
+			if result, handled, stop, err := checkClientCancellation(nil); handled {
+				if stop {
+					return result, err
+				}
+				continue
+			}
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 			if time.Since(lastRead) < streamInterval {
 				continue
@@ -696,6 +773,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
 		case <-firstOutputCh:
+			if result, handled, stop, err := checkClientCancellation(nil); handled {
+				if stop {
+					return result, err
+				}
+				continue
+			}
 			if firstTokenMs != nil {
 				stopFirstOutputTimer()
 				continue
@@ -710,6 +793,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			)
 
 		case <-keepaliveCh:
+			if result, handled, stop, err := checkClientCancellation(nil); handled {
+				if stop {
+					return result, err
+				}
+				continue
+			}
 			if clientDisconnected {
 				continue
 			}

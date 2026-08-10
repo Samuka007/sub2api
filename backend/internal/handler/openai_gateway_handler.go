@@ -687,6 +687,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					reqLog.Warn("openai.upstream_failover_switching", failoverSwitchFields...)
 					continue
 				}
+				if failoverClientGone(c) {
+					reqLog.Info("openai.forward_aborted_client_disconnected",
+						zap.Int64("account_id", account.ID),
+						zap.Error(err),
+					)
+					return
+				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(reqModel), false, nil)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
@@ -706,6 +713,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				reqLog.Error("openai.forward_failed", fields...)
 				return
 			}
+		}
+		if result != nil && result.ClientDisconnect {
+			_ = failoverClientGone(c)
+			reqLog.Info("openai.client_disconnected_after_terminal",
+				zap.Int64("account_id", account.ID),
+			)
 		}
 		if result != nil {
 			// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
