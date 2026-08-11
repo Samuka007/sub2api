@@ -44,6 +44,7 @@ services:
       # Optional private listener for Alloy on the Compose network. Port 9091 is
       # deliberately not published to the host.
       - METRICS_ENABLED=${METRICS_ENABLED:-false}
+      - METRICS_PPROF_ENABLED=${METRICS_PPROF_ENABLED:-false}
       - METRICS_HOST=${METRICS_HOST:-0.0.0.0}
       - METRICS_PORT=${METRICS_PORT:-9091}
       - METRICS_PATH=${METRICS_PATH:-/metrics}

@@ -110,10 +110,11 @@ type Config struct {
 
 // MetricsConfig controls the optional private Prometheus listener.
 type MetricsConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	Host    string `mapstructure:"host"`
-	Port    int    `mapstructure:"port"`
-	Path    string `mapstructure:"path"`
+	Enabled      bool   `mapstructure:"enabled"`
+	PprofEnabled bool   `mapstructure:"pprof_enabled"`
+	Host         string `mapstructure:"host"`
+	Port         int    `mapstructure:"port"`
+	Path         string `mapstructure:"path"`
 }
 
 func (c MetricsConfig) Address() string {
@@ -2001,6 +2002,7 @@ func setDefaults() {
 
 	// Private Prometheus listener (disabled and loopback-bound by default).
 	viper.SetDefault("metrics.enabled", false)
+	viper.SetDefault("metrics.pprof_enabled", false)
 	viper.SetDefault("metrics.host", "127.0.0.1")
 	viper.SetDefault("metrics.port", 9091)
 	viper.SetDefault("metrics.path", "/metrics")
@@ -2640,6 +2642,9 @@ func (c *Config) Validate() error {
 	}
 	c.Security.ForwardedClientIPHeaders = forwardedClientIPHeaders
 	c.SetForwardedClientIPSettings(c.Security.TrustForwardedIPForAPIKeyACL, forwardedClientIPHeaders)
+	if c.Metrics.PprofEnabled && !c.Metrics.Enabled {
+		return fmt.Errorf("metrics.pprof_enabled requires metrics.enabled")
+	}
 	if c.Metrics.Enabled {
 		if net.ParseIP(c.Metrics.Host) == nil {
 			return fmt.Errorf("metrics.host must be an IP address")
@@ -2649,6 +2654,10 @@ func (c *Config) Validate() error {
 		}
 		if c.Metrics.Path == "" || c.Metrics.Path[0] != '/' || c.Metrics.Path == "/" || strings.HasSuffix(c.Metrics.Path, "/") || strings.ContainsAny(c.Metrics.Path, "?#") {
 			return fmt.Errorf("metrics.path must be an exact non-root HTTP path without a trailing slash, query, or fragment")
+		}
+		if c.Metrics.PprofEnabled &&
+			(c.Metrics.Path == "/debug/pprof" || strings.HasPrefix(c.Metrics.Path, "/debug/pprof/")) {
+			return fmt.Errorf("metrics.path must not overlap /debug/pprof when metrics.pprof_enabled is true")
 		}
 	}
 	if c.Server.ReadHeaderTimeout < 1 || c.Server.ReadHeaderTimeout > 60 {

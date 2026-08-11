@@ -31,6 +31,31 @@ type fakeExportSource struct {
 func (f fakeExportSource) ExportStatus() modeltrace.ExportStatus { return f.status }
 func (f fakeExportSource) ExportTotals() modeltrace.ExportTotals { return f.totals }
 
+type notifyingResponseRecorder struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	started chan struct{}
+}
+
+func (r *notifyingResponseRecorder) notify() {
+	r.once.Do(func() { close(r.started) })
+}
+
+func (r *notifyingResponseRecorder) Header() http.Header {
+	r.notify()
+	return r.ResponseRecorder.Header()
+}
+
+func (r *notifyingResponseRecorder) WriteHeader(statusCode int) {
+	r.notify()
+	r.ResponseRecorder.WriteHeader(statusCode)
+}
+
+func (r *notifyingResponseRecorder) Write(body []byte) (int, error) {
+	r.notify()
+	return r.ResponseRecorder.Write(body)
+}
+
 func TestServeFailureClearsStateIsObservableAndAllowsRestart(t *testing.T) {
 	metrics, err := New(config.MetricsConfig{Enabled: true, Host: "127.0.0.1", Port: 0}, fakeOpsSource{}, fakeExportSource{})
 	require.NoError(t, err)
@@ -308,4 +333,146 @@ func TestAllExportedSnapshotSamplesUseTheirDeclaredLifecycleType(t *testing.T) {
 	require.Contains(t, body, "# TYPE sub2api_requests_completed_total counter")
 	require.Contains(t, body, "# TYPE sub2api_modeltrace_exported_spans gauge")
 	require.Contains(t, body, "# TYPE sub2api_modeltrace_export_terminal_spans_total counter")
+}
+
+func TestPprofRoutesAreDisabledByDefault(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true}, nil, nil)
+	require.NoError(t, err)
+
+	for _, path := range []string{
+		"/debug/pprof/", "/debug/pprof/cmdline", "/debug/pprof/profile",
+		"/debug/pprof/symbol", "/debug/pprof/trace", "/debug/pprof/heap",
+	} {
+		recorder := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		require.Equal(t, http.StatusNotFound, recorder.Code, path)
+	}
+}
+
+func TestPprofPrivateMuxExposesOnlyExplicitProfiles(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true, PprofEnabled: true}, nil, nil)
+	require.NoError(t, err)
+
+	for _, path := range []string{
+		"/debug/pprof/",
+		"/debug/pprof/cmdline",
+		"/debug/pprof/symbol",
+		"/debug/pprof/heap",
+		"/debug/pprof/goroutine",
+		"/debug/pprof/allocs",
+		"/debug/pprof/block",
+		"/debug/pprof/mutex",
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.RemoteAddr = "127.0.0.1:1234"
+		metrics.Handler().ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code, path)
+	}
+
+	symbol := httptest.NewRecorder()
+	symbolRequest := httptest.NewRequest(http.MethodPost, "/debug/pprof/symbol", strings.NewReader("0x1"))
+	symbolRequest.RemoteAddr = "[::1]:1234"
+	metrics.Handler().ServeHTTP(symbol, symbolRequest)
+	require.Equal(t, http.StatusOK, symbol.Code)
+
+	for _, path := range []string{"/debug/pprof/profile?seconds=1", "/debug/pprof/trace?seconds=1"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+		request.RemoteAddr = "127.0.0.1:1234"
+		metrics.Handler().ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code, path)
+	}
+
+	for _, path := range []string{
+		"/debug/pprof/threadcreate",
+		"/debug/pprof/cmdline/extra",
+		"/debug/pprof/",
+	} {
+		method := http.MethodGet
+		if path == "/debug/pprof/" {
+			method = http.MethodPost
+		}
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, nil)
+		request.RemoteAddr = "127.0.0.1:1234"
+		metrics.Handler().ServeHTTP(recorder, request)
+		expected := http.StatusNotFound
+		if method == http.MethodPost {
+			expected = http.StatusMethodNotAllowed
+		}
+		require.Equal(t, expected, recorder.Code, method+" "+path)
+	}
+}
+
+func TestPprofPrivateMuxRejectsNonLoopbackPeers(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true, PprofEnabled: true}, nil, nil)
+	require.NoError(t, err)
+
+	for _, path := range []string{"/debug/pprof/heap", "/debug/pprof/profile?seconds=1", "/debug/pprof/symbol"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.RemoteAddr = "172.18.0.5:4321"
+		metrics.Handler().ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusNotFound, recorder.Code, path)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/debug/pprof/symbol", strings.NewReader("0x1"))
+	request.RemoteAddr = "malformed"
+	metrics.Handler().ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+
+	metricsRecorder := httptest.NewRecorder()
+	metricsRequest := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRequest.RemoteAddr = "172.18.0.5:4321"
+	metrics.Handler().ServeHTTP(metricsRecorder, metricsRequest)
+	require.Equal(t, http.StatusOK, metricsRecorder.Code)
+}
+
+func TestPprofProfilesShareSingleNonBlockingGate(t *testing.T) {
+	metrics, err := New(config.MetricsConfig{Enabled: true, PprofEnabled: true}, nil, nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := &notifyingResponseRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		started:          make(chan struct{}),
+	}
+	firstRequest := httptest.NewRequest(http.MethodGet, "/debug/pprof/profile?seconds=60", nil).WithContext(ctx)
+	firstRequest.RemoteAddr = "127.0.0.1:1234"
+	firstDone := make(chan struct{})
+	go func() {
+		metrics.Handler().ServeHTTP(first, firstRequest)
+		close(firstDone)
+	}()
+
+	select {
+	case <-first.started:
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for first profile to start")
+	}
+
+	concurrent := httptest.NewRecorder()
+	concurrentRequest := httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil)
+	concurrentRequest.RemoteAddr = "127.0.0.1:1234"
+	metrics.Handler().ServeHTTP(concurrent, concurrentRequest)
+	require.Equal(t, http.StatusTooManyRequests, concurrent.Code)
+
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for canceled profile to finish")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+
+	after := httptest.NewRecorder()
+	afterRequest := httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil)
+	afterRequest.RemoteAddr = "127.0.0.1:1234"
+	metrics.Handler().ServeHTTP(after, afterRequest)
+	require.Equal(t, http.StatusOK, after.Code)
 }

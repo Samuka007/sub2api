@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	httpPprof "net/http/pprof"
 	"sync"
 	"time"
 
@@ -51,16 +52,61 @@ func New(cfg config.MetricsConfig, ops OpsSnapshotSource, exports ExportStatusSo
 		path = "/metrics"
 	}
 	promHandler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
-	exactHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != path {
-			http.NotFound(w, r)
+	privateMux := http.NewServeMux()
+	pprofEnabled := cfg.Enabled && cfg.PprofEnabled
+	if pprofEnabled {
+		profileGate := make(chan struct{}, 1)
+		withProfileGate := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case profileGate <- struct{}{}:
+					defer func() { <-profileGate }()
+					next.ServeHTTP(w, r)
+				default:
+					http.Error(w, "another profile is already running", http.StatusTooManyRequests)
+				}
+			})
+		}
+		privateMux.HandleFunc("GET /debug/pprof/{$}", httpPprof.Index)
+		privateMux.HandleFunc("GET /debug/pprof/cmdline", httpPprof.Cmdline)
+		privateMux.Handle("GET /debug/pprof/profile", withProfileGate(http.HandlerFunc(httpPprof.Profile)))
+		privateMux.HandleFunc("GET /debug/pprof/symbol", httpPprof.Symbol)
+		privateMux.HandleFunc("POST /debug/pprof/symbol", httpPprof.Symbol)
+		privateMux.Handle("GET /debug/pprof/trace", withProfileGate(http.HandlerFunc(httpPprof.Trace)))
+		for _, profile := range []string{"heap", "goroutine", "allocs", "block", "mutex"} {
+			privateMux.Handle("GET /debug/pprof/"+profile, withProfileGate(httpPprof.Handler(profile)))
+		}
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == path {
+			promHandler.ServeHTTP(w, r)
 			return
 		}
-		promHandler.ServeHTTP(w, r)
+		if pprofEnabled {
+			if !isLoopbackRequest(r) {
+				http.NotFound(w, r)
+				return
+			}
+			privateMux.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	})
-	return &Metrics{cfg: cfg, handler: exactHandler, serve: func(server *http.Server, listener net.Listener) error {
+	return &Metrics{cfg: cfg, handler: handler, serve: func(server *http.Server, listener net.Listener) error {
 		return server.Serve(listener)
 	}}, nil
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (m *Metrics) Handler() http.Handler {

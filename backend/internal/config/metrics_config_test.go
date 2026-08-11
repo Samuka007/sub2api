@@ -17,12 +17,13 @@ func TestMetricsConfigDefaultsAndEnvironment(t *testing.T) {
 	t.Cleanup(viper.Reset)
 	t.Setenv("JWT_SECRET", "01234567890123456789012345678901")
 	t.Setenv("METRICS_ENABLED", "true")
+	t.Setenv("METRICS_PPROF_ENABLED", "true")
 	t.Setenv("METRICS_HOST", "0.0.0.0")
 	t.Setenv("METRICS_PORT", "9191")
 	t.Setenv("METRICS_PATH", "/internal/metrics")
 	cfg, err = Load()
 	require.NoError(t, err)
-	require.Equal(t, MetricsConfig{Enabled: true, Host: "0.0.0.0", Port: 9191, Path: "/internal/metrics"}, cfg.Metrics)
+	require.Equal(t, MetricsConfig{Enabled: true, PprofEnabled: true, Host: "0.0.0.0", Port: 9191, Path: "/internal/metrics"}, cfg.Metrics)
 }
 
 func TestMetricsConfigRejectsInvalidEnabledListener(t *testing.T) {
@@ -42,6 +43,30 @@ func TestMetricsConfigRejectsInvalidEnabledListener(t *testing.T) {
 			cfg.Metrics.Enabled = true
 			configure(cfg)
 			require.Error(t, cfg.Validate())
+		})
+	}
+}
+
+func TestMetricsConfigRejectsPprofWithoutPrivateListener(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("METRICS_PPROF_ENABLED", "true")
+
+	_, err := Load()
+
+	require.EqualError(t, err, "validate config error: metrics.pprof_enabled requires metrics.enabled")
+}
+
+func TestMetricsConfigRejectsMetricsPathOverlappingPprof(t *testing.T) {
+	for _, path := range []string{"/debug/pprof", "/debug/pprof/heap"} {
+		t.Run(path, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			cfg, err := Load()
+			require.NoError(t, err)
+			cfg.Metrics.Enabled = true
+			cfg.Metrics.PprofEnabled = true
+			cfg.Metrics.Path = path
+
+			require.EqualError(t, cfg.Validate(), "metrics.path must not overlap /debug/pprof when metrics.pprof_enabled is true")
 		})
 	}
 }

@@ -78,9 +78,12 @@ server:
 # =============================================================================
 # Keep this listener on loopback or an internal container network. Alloy should
 # scrape this exact path; it is intentionally separate from the public API.
+# pprof is separately opt-in and is served only by this private listener.
 # 保持监听在回环地址或容器内部网络；由 Alloy 抓取精确路径，不接入公网 API。
+# pprof 需单独显式开启，且只由这个私有监听器提供。
 metrics:
   enabled: false
+  pprof_enabled: false
   host: "127.0.0.1"
   port: 9091
   path: "/metrics"
