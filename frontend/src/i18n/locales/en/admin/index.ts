@@ -9,6 +9,7 @@ import promptAudit from './promptAudit'
 import modelTracing from './modelTracing'
 import plusQuotaAutomation from './plusQuotaAutomation'
 import accountHealthDetector from './accountHealthDetector'
+import oneClickAccountNotes from './oneClickAccountNotes'
 
 export default {
   ...overview,
@@ -22,4 +23,5 @@ export default {
   ...modelTracing,
   ...plusQuotaAutomation,
   ...accountHealthDetector,
+  ...oneClickAccountNotes,
 }

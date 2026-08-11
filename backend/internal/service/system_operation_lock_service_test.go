@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,12 +71,12 @@ type flakySystemLockRenewRepo struct {
 	extendCalls int32
 }
 
-func (r *flakySystemLockRenewRepo) ExtendProcessingLock(ctx context.Context, id int64, requestFingerprint string, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+func (r *flakySystemLockRenewRepo) ExtendProcessingLock(ctx context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
 	call := atomic.AddInt32(&r.extendCalls, 1)
 	if call == 1 {
 		return false, errors.New("transient extend failure")
 	}
-	return r.inMemoryIdempotencyRepo.ExtendProcessingLock(ctx, id, requestFingerprint, newLockedUntil, newExpiresAt)
+	return r.inMemoryIdempotencyRepo.ExtendProcessingLock(ctx, id, requestFingerprint, expectedLockedUntil, newLockedUntil, newExpiresAt)
 }
 
 func TestSystemOperationLockService_RenewLeaseContinuesAfterTransientFailure(t *testing.T) {
@@ -106,6 +107,207 @@ func TestSystemOperationLockService_RenewLeaseContinuesAfterTransientFailure(t *
 		}
 		return atomic.LoadInt32(&repo.extendCalls) >= 2 && updated.LockedUntil.After(initialLockedUntil)
 	}, 4*time.Second, 100*time.Millisecond, "renew loop should continue after transient error")
+}
+
+type cancelAwareSystemLockRenewRepo struct {
+	*inMemoryIdempotencyRepo
+	started     chan struct{}
+	startedOnce sync.Once
+}
+
+type delayedSystemLockRenewRepo struct {
+	*inMemoryIdempotencyRepo
+	started     chan struct{}
+	continueRun chan struct{}
+	finished    chan struct{}
+	startedOnce sync.Once
+}
+
+type ambiguousCommitSystemLockRenewRepo struct {
+	*inMemoryIdempotencyRepo
+	extendCalls      int32
+	readbackStarted  chan struct{}
+	continueReadback chan struct{}
+	readbackOnce     sync.Once
+}
+
+func (r *ambiguousCommitSystemLockRenewRepo) ExtendProcessingLock(ctx context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+	call := atomic.AddInt32(&r.extendCalls, 1)
+	ok, err := r.inMemoryIdempotencyRepo.ExtendProcessingLock(ctx, id, requestFingerprint, expectedLockedUntil, newLockedUntil, newExpiresAt)
+	if call == 1 && err == nil && ok {
+		return false, errors.New("connection lost after commit")
+	}
+	return ok, err
+}
+
+func (r *ambiguousCommitSystemLockRenewRepo) GetByScopeAndKeyHash(ctx context.Context, scope, keyHash string) (*IdempotencyRecord, error) {
+	if atomic.LoadInt32(&r.extendCalls) > 0 {
+		r.readbackOnce.Do(func() { close(r.readbackStarted) })
+		<-r.continueReadback
+	}
+	return r.inMemoryIdempotencyRepo.GetByScopeAndKeyHash(ctx, scope, keyHash)
+}
+
+func (r *delayedSystemLockRenewRepo) ExtendProcessingLock(ctx context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+	ok, err := r.inMemoryIdempotencyRepo.ExtendProcessingLock(ctx, id, requestFingerprint, expectedLockedUntil, newLockedUntil, newExpiresAt)
+	r.startedOnce.Do(func() { close(r.started) })
+	<-r.continueRun
+	close(r.finished)
+	return ok, err
+}
+
+func (r *cancelAwareSystemLockRenewRepo) ExtendProcessingLock(ctx context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+	r.startedOnce.Do(func() { close(r.started) })
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+func TestSystemOperationLockService_ReleaseFinalizesWhileCommittedRenewalResponseIsDelayed(t *testing.T) {
+	repo := &delayedSystemLockRenewRepo{
+		inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(),
+		started:                 make(chan struct{}),
+		continueRun:             make(chan struct{}),
+		finished:                make(chan struct{}),
+	}
+	var continueOnce sync.Once
+	continueRenewal := func() {
+		continueOnce.Do(func() { close(repo.continueRun) })
+	}
+	t.Cleanup(continueRenewal)
+
+	svc := NewSystemOperationLockService(repo, IdempotencyConfig{
+		SystemOperationTTL: 10 * time.Second,
+		ProcessingTimeout:  3 * time.Second,
+	})
+
+	lock, err := svc.Acquire(context.Background(), "op-delayed-renew")
+	require.NoError(t, err)
+	require.NotNil(t, lock)
+
+	select {
+	case <-repo.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("renewal did not start")
+	}
+
+	released := make(chan error, 1)
+	go func() {
+		released <- svc.Release(context.Background(), lock, true, "")
+	}()
+
+	select {
+	case err := <-released:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("release waited for the delayed renewal response")
+	}
+
+	record, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		systemOperationLockScope,
+		HashIdempotencyKey(systemOperationLockKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, IdempotencyStatusSucceeded, record.Status)
+
+	continueRenewal()
+	select {
+	case <-repo.finished:
+	case <-time.After(time.Second):
+		t.Fatal("renewal did not finish after it was released")
+	}
+	record, err = repo.GetByScopeAndKeyHash(
+		context.Background(),
+		systemOperationLockScope,
+		HashIdempotencyKey(systemOperationLockKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, IdempotencyStatusSucceeded, record.Status, "late renewal response must not revive the terminal record")
+}
+
+func TestSystemOperationLockService_ReleaseUsesCandidateAfterAmbiguousRenewalCommit(t *testing.T) {
+	repo := &ambiguousCommitSystemLockRenewRepo{
+		inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(),
+		readbackStarted:         make(chan struct{}),
+		continueReadback:        make(chan struct{}),
+	}
+	var continueOnce sync.Once
+	continueReadback := func() {
+		continueOnce.Do(func() { close(repo.continueReadback) })
+	}
+	t.Cleanup(continueReadback)
+
+	svc := NewSystemOperationLockService(repo, IdempotencyConfig{
+		SystemOperationTTL: 10 * time.Second,
+		ProcessingTimeout:  3 * time.Second,
+	})
+	lock, err := svc.Acquire(context.Background(), "op-ambiguous-renew")
+	require.NoError(t, err)
+	require.NotNil(t, lock)
+
+	select {
+	case <-repo.readbackStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("renewal did not attempt to reconcile the ambiguous commit")
+	}
+
+	released := make(chan error, 1)
+	go func() {
+		released <- svc.Release(context.Background(), lock, true, "")
+	}()
+	select {
+	case err := <-released:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("release waited for the blocked renewal readback")
+	}
+
+	record, err := repo.inMemoryIdempotencyRepo.GetByScopeAndKeyHash(
+		context.Background(),
+		systemOperationLockScope,
+		HashIdempotencyKey(systemOperationLockKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, IdempotencyStatusSucceeded, record.Status)
+
+	continueReadback()
+}
+
+func TestSystemOperationLockService_ReleaseCancelsInFlightRenewal(t *testing.T) {
+	repo := &cancelAwareSystemLockRenewRepo{
+		inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(),
+		started:                 make(chan struct{}),
+	}
+	svc := NewSystemOperationLockService(repo, IdempotencyConfig{
+		SystemOperationTTL: 10 * time.Second,
+		ProcessingTimeout:  3 * time.Second,
+	})
+
+	lock, err := svc.Acquire(context.Background(), "op-cancel-renew")
+	require.NoError(t, err)
+	require.NotNil(t, lock)
+
+	select {
+	case <-repo.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("renewal did not start")
+	}
+
+	releaseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, svc.Release(releaseCtx, lock, true, ""))
+
+	record, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		systemOperationLockScope,
+		HashIdempotencyKey(systemOperationLockKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, IdempotencyStatusSucceeded, record.Status)
 }
 
 func TestSystemOperationLockService_SameOperationIDRetryWhileRunning(t *testing.T) {
@@ -154,6 +356,14 @@ func TestSystemOperationLockService_RecoverAfterLeaseExpired(t *testing.T) {
 	lock2, err := svc.Acquire(context.Background(), "op-recovered")
 	require.NoError(t, err, "expired lease should allow a new operation to reclaim lock")
 	require.NotNil(t, lock2)
+	recovered, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		systemOperationLockScope,
+		HashIdempotencyKey(systemOperationLockKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, recovered)
+	require.Equal(t, "op-recovered", recovered.RequestFingerprint, "reclaim must fence the new operation identity")
 	require.NoError(t, svc.Release(context.Background(), lock2, true, ""))
 }
 
@@ -182,22 +392,22 @@ func (s *systemLockRepoStub) GetByScopeAndKeyHash(context.Context, string, strin
 	return cloneRecord(s.existing), nil
 }
 
-func (s *systemLockRepoStub) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (s *systemLockRepoStub) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	if s.reclaimErr != nil {
 		return false, s.reclaimErr
 	}
 	return s.reclaimOK, nil
 }
 
-func (s *systemLockRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (s *systemLockRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return true, nil
 }
 
-func (s *systemLockRepoStub) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+func (s *systemLockRepoStub) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
 	return s.markSuccErr
 }
 
-func (s *systemLockRepoStub) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (s *systemLockRepoStub) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return s.markFailErr
 }
 
@@ -281,6 +491,13 @@ func TestSystemOperationLockService_ReleaseBranchesAndOperationID(t *testing.T) 
 	require.NotNil(t, lock)
 
 	require.NoError(t, svc.Release(context.Background(), lock, false, ""))
+
+	svc = NewSystemOperationLockService(newInMemoryIdempotencyRepo(), IdempotencyConfig{
+		SystemOperationTTL: 10 * time.Second,
+		ProcessingTimeout:  2 * time.Second,
+	})
+	lock, err = svc.Acquire(context.Background(), "op-success")
+	require.NoError(t, err)
 	require.NoError(t, svc.Release(context.Background(), lock, true, ""))
 
 	repo := &systemLockRepoStub{

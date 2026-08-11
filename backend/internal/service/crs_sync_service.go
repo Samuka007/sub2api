@@ -432,7 +432,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++
@@ -561,7 +561,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++
@@ -711,7 +711,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++
@@ -868,7 +868,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++
@@ -1000,7 +1000,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++
@@ -1127,7 +1127,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable
 
-		if err := s.accountRepo.Update(ctx, existing); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, existing, false); err != nil {
 			item.Action = "failed"
 			item.Error = "update failed: " + err.Error()
 			result.Failed++

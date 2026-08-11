@@ -16,8 +16,52 @@ import (
 
 type inMemoryIdempotencyRepo struct {
 	mu     sync.Mutex
+	txMu   sync.Mutex
 	nextID int64
 	data   map[string]*IdempotencyRecord
+}
+
+func (r *inMemoryIdempotencyRepo) WithinTransaction(
+	ctx context.Context,
+	execute func(context.Context, IdempotencyRepository) error,
+) error {
+	r.txMu.Lock()
+	defer r.txMu.Unlock()
+	txRepo := cloneInMemoryIdempotencyRepo(r)
+
+	if err := execute(ctx, txRepo); err != nil {
+		return err
+	}
+	commitInMemoryIdempotencyRepo(r, txRepo)
+	return nil
+}
+
+func cloneInMemoryIdempotencyRepo(source *inMemoryIdempotencyRepo) *inMemoryIdempotencyRepo {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	cloned := &inMemoryIdempotencyRepo{
+		nextID: source.nextID,
+		data:   make(map[string]*IdempotencyRecord, len(source.data)),
+	}
+	for key, record := range source.data {
+		cloned.data[key] = cloneRecord(record)
+	}
+	return cloned
+}
+
+func commitInMemoryIdempotencyRepo(destination, source *inMemoryIdempotencyRepo) {
+	source.mu.Lock()
+	committedNextID := source.nextID
+	committedData := make(map[string]*IdempotencyRecord, len(source.data))
+	for key, record := range source.data {
+		committedData[key] = cloneRecord(record)
+	}
+	source.mu.Unlock()
+
+	destination.mu.Lock()
+	destination.nextID = committedNextID
+	destination.data = committedData
+	destination.mu.Unlock()
 }
 
 func newInMemoryIdempotencyRepo() *inMemoryIdempotencyRepo {
@@ -80,7 +124,7 @@ func (r *inMemoryIdempotencyRepo) GetByScopeAndKeyHash(_ context.Context, scope,
 	return cloneRecord(r.data[r.key(scope, keyHash)]), nil
 }
 
-func (r *inMemoryIdempotencyRepo) TryReclaim(_ context.Context, id int64, fromStatus string, now, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+func (r *inMemoryIdempotencyRepo) TryReclaim(_ context.Context, id int64, fromStatus, newRequestFingerprint string, now, newLockedUntil, newExpiresAt time.Time) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
@@ -94,6 +138,7 @@ func (r *inMemoryIdempotencyRepo) TryReclaim(_ context.Context, id int64, fromSt
 			return false, nil
 		}
 		rec.Status = IdempotencyStatusProcessing
+		rec.RequestFingerprint = newRequestFingerprint
 		rec.LockedUntil = &newLockedUntil
 		rec.ExpiresAt = newExpiresAt
 		rec.ErrorReason = nil
@@ -103,7 +148,7 @@ func (r *inMemoryIdempotencyRepo) TryReclaim(_ context.Context, id int64, fromSt
 	return false, nil
 }
 
-func (r *inMemoryIdempotencyRepo) ExtendProcessingLock(_ context.Context, id int64, requestFingerprint string, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+func (r *inMemoryIdempotencyRepo) ExtendProcessingLock(_ context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -111,7 +156,7 @@ func (r *inMemoryIdempotencyRepo) ExtendProcessingLock(_ context.Context, id int
 		if rec.ID != id {
 			continue
 		}
-		if rec.Status != IdempotencyStatusProcessing || rec.RequestFingerprint != requestFingerprint {
+		if rec.Status != IdempotencyStatusProcessing || rec.RequestFingerprint != requestFingerprint || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
 			return false, nil
 		}
 		rec.LockedUntil = &newLockedUntil
@@ -122,12 +167,15 @@ func (r *inMemoryIdempotencyRepo) ExtendProcessingLock(_ context.Context, id int
 	return false, nil
 }
 
-func (r *inMemoryIdempotencyRepo) MarkSucceeded(_ context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *inMemoryIdempotencyRepo) MarkSucceeded(_ context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
 		if rec.ID != id {
 			continue
+		}
+		if rec.Status != IdempotencyStatusProcessing || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
+			return errors.New("record is not processing")
 		}
 		rec.Status = IdempotencyStatusSucceeded
 		rec.LockedUntil = nil
@@ -141,12 +189,15 @@ func (r *inMemoryIdempotencyRepo) MarkSucceeded(_ context.Context, id int64, res
 	return errors.New("record not found")
 }
 
-func (r *inMemoryIdempotencyRepo) MarkFailedRetryable(_ context.Context, id int64, errorReason string, lockedUntil, expiresAt time.Time) error {
+func (r *inMemoryIdempotencyRepo) MarkFailedRetryable(_ context.Context, id int64, expectedLockedUntil time.Time, errorReason string, lockedUntil, expiresAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
 		if rec.ID != id {
 			continue
+		}
+		if rec.Status != IdempotencyStatusProcessing || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
+			return errors.New("record is not processing")
 		}
 		rec.Status = IdempotencyStatusFailedRetryable
 		rec.LockedUntil = &lockedUntil
@@ -439,16 +490,16 @@ func (failingIdempotencyRepo) CreateProcessing(context.Context, *IdempotencyReco
 func (failingIdempotencyRepo) GetByScopeAndKeyHash(context.Context, string, string) (*IdempotencyRecord, error) {
 	return nil, errors.New("store unavailable")
 }
-func (failingIdempotencyRepo) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (failingIdempotencyRepo) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, errors.New("store unavailable")
 }
-func (failingIdempotencyRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (failingIdempotencyRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, errors.New("store unavailable")
 }
-func (failingIdempotencyRepo) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+func (failingIdempotencyRepo) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
 	return errors.New("store unavailable")
 }
-func (failingIdempotencyRepo) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (failingIdempotencyRepo) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return errors.New("store unavailable")
 }
 func (failingIdempotencyRepo) DeleteExpired(context.Context, time.Time, int) (int64, error) {
@@ -483,11 +534,11 @@ func newUTF8RejectingIdempotencyRepo() *utf8RejectingIdempotencyRepo {
 	return &utf8RejectingIdempotencyRepo{inMemoryIdempotencyRepo: *newInMemoryIdempotencyRepo()}
 }
 
-func (r *utf8RejectingIdempotencyRepo) MarkSucceeded(ctx context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *utf8RejectingIdempotencyRepo) MarkSucceeded(ctx context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
 	if !utf8.ValidString(responseBody) {
 		return errors.New(`pq: invalid byte sequence for encoding "UTF8": 0xe8 0xb4 0x2e`)
 	}
-	return r.inMemoryIdempotencyRepo.MarkSucceeded(ctx, id, responseStatus, responseBody, expiresAt)
+	return r.inMemoryIdempotencyRepo.MarkSucceeded(ctx, id, expectedLockedUntil, responseStatus, responseBody, expiresAt)
 }
 
 func TestIdempotencyCoordinator_TruncatedStoredResponseRemainsUTF8(t *testing.T) {
@@ -616,14 +667,16 @@ func (noIDOwnerRepo) CreateProcessing(context.Context, *IdempotencyRecord) (bool
 func (noIDOwnerRepo) GetByScopeAndKeyHash(context.Context, string, string) (*IdempotencyRecord, error) {
 	return nil, nil
 }
-func (noIDOwnerRepo) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (noIDOwnerRepo) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, nil
 }
-func (noIDOwnerRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (noIDOwnerRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, nil
 }
-func (noIDOwnerRepo) MarkSucceeded(context.Context, int64, int, string, time.Time) error { return nil }
-func (noIDOwnerRepo) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (noIDOwnerRepo) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
+	return nil
+}
+func (noIDOwnerRepo) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return nil
 }
 func (noIDOwnerRepo) DeleteExpired(context.Context, time.Time, int) (int64, error) { return 0, nil }
@@ -676,19 +729,19 @@ func (r *conflictBranchRepo) CreateProcessing(context.Context, *IdempotencyRecor
 func (r *conflictBranchRepo) GetByScopeAndKeyHash(context.Context, string, string) (*IdempotencyRecord, error) {
 	return cloneRecord(r.existing), nil
 }
-func (r *conflictBranchRepo) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (r *conflictBranchRepo) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	if r.tryReclaimErr != nil {
 		return false, r.tryReclaimErr
 	}
 	return r.tryReclaimOK, nil
 }
-func (r *conflictBranchRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (r *conflictBranchRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, nil
 }
-func (r *conflictBranchRepo) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+func (r *conflictBranchRepo) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
 	return nil
 }
-func (r *conflictBranchRepo) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (r *conflictBranchRepo) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return nil
 }
 func (r *conflictBranchRepo) DeleteExpired(context.Context, time.Time, int) (int64, error) {
@@ -787,22 +840,171 @@ func TestIdempotencyCoordinator_ConflictBranchesAndDecodeError(t *testing.T) {
 
 type markBehaviorRepo struct {
 	inMemoryIdempotencyRepo
-	failMarkSucceeded bool
-	failMarkFailed    bool
+	failMarkSucceeded        bool
+	failMarkFailed           bool
+	markSucceededCtx         error
+	markSucceededDeadline    time.Time
+	markSucceededHasDeadline bool
+	markFailedCtx            error
+	markFailedDeadline       time.Time
+	markFailedHasDeadline    bool
 }
 
-func (r *markBehaviorRepo) MarkSucceeded(ctx context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *markBehaviorRepo) MarkSucceeded(ctx context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
+	r.markSucceededCtx = ctx.Err()
+	r.markSucceededDeadline, r.markSucceededHasDeadline = ctx.Deadline()
+	if r.markSucceededCtx != nil {
+		return errors.New("mark succeeded received canceled context")
+	}
 	if r.failMarkSucceeded {
 		return errors.New("mark succeeded failed")
 	}
-	return r.inMemoryIdempotencyRepo.MarkSucceeded(ctx, id, responseStatus, responseBody, expiresAt)
+	return r.inMemoryIdempotencyRepo.MarkSucceeded(ctx, id, expectedLockedUntil, responseStatus, responseBody, expiresAt)
 }
 
-func (r *markBehaviorRepo) MarkFailedRetryable(ctx context.Context, id int64, errorReason string, lockedUntil, expiresAt time.Time) error {
+func (r *markBehaviorRepo) MarkFailedRetryable(ctx context.Context, id int64, expectedLockedUntil time.Time, errorReason string, lockedUntil, expiresAt time.Time) error {
+	r.markFailedCtx = ctx.Err()
+	r.markFailedDeadline, r.markFailedHasDeadline = ctx.Deadline()
+	if r.markFailedCtx != nil {
+		return errors.New("mark failed retryable received canceled context")
+	}
 	if r.failMarkFailed {
 		return errors.New("mark failed retryable failed")
 	}
-	return r.inMemoryIdempotencyRepo.MarkFailedRetryable(ctx, id, errorReason, lockedUntil, expiresAt)
+	return r.inMemoryIdempotencyRepo.MarkFailedRetryable(ctx, id, expectedLockedUntil, errorReason, lockedUntil, expiresAt)
+}
+
+func requireIdempotencyTerminalWriteDeadline(
+	t *testing.T,
+	deadline time.Time,
+	hasDeadline bool,
+	executeStartedAt time.Time,
+	executeFinishedAt time.Time,
+) {
+	t.Helper()
+	require.True(t, hasDeadline)
+	require.False(t, deadline.Before(executeStartedAt.Add(idempotencyTerminalWriteTimeout)))
+	require.False(t, deadline.After(executeFinishedAt.Add(idempotencyTerminalWriteTimeout)))
+}
+
+func TestIdempotencyCoordinator_PersistsSuccessAfterRequestCancellation(t *testing.T) {
+	repo := &markBehaviorRepo{inMemoryIdempotencyRepo: *newInMemoryIdempotencyRepo()}
+	config := DefaultIdempotencyConfig()
+	config.ObserveOnly = false
+	coordinator := NewIdempotencyCoordinator(repo, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	executions := 0
+	opts := IdempotencyExecuteOptions{
+		Scope:          "scope-canceled-success",
+		IdempotencyKey: "stable-key",
+		Method:         "POST",
+		Route:          "/admin/write",
+		ActorScope:     "admin:1",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+
+	executeStartedAt := time.Now()
+	result, err := coordinator.Execute(ctx, opts, func(context.Context) (any, error) {
+		executions++
+		cancel()
+		return map[string]any{"updated": 1}, nil
+	})
+	executeFinishedAt := time.Now()
+	require.NoError(t, err)
+	require.False(t, result.Replayed)
+	require.NoError(t, repo.markSucceededCtx)
+	requireIdempotencyTerminalWriteDeadline(
+		t,
+		repo.markSucceededDeadline,
+		repo.markSucceededHasDeadline,
+		executeStartedAt,
+		executeFinishedAt,
+	)
+
+	replayed, err := coordinator.Execute(context.Background(), opts, func(context.Context) (any, error) {
+		executions++
+		return nil, errors.New("must not execute during replay")
+	})
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	require.Equal(t, 1, executions)
+}
+
+func TestIdempotencyCoordinator_PersistsRetryableFailureAfterRequestCancellation(t *testing.T) {
+	repo := &markBehaviorRepo{inMemoryIdempotencyRepo: *newInMemoryIdempotencyRepo()}
+	config := DefaultIdempotencyConfig()
+	config.ObserveOnly = false
+	config.FailedRetryBackoff = time.Minute
+	coordinator := NewIdempotencyCoordinator(repo, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	executions := 0
+	opts := IdempotencyExecuteOptions{
+		Scope:          "scope-canceled-failure",
+		IdempotencyKey: "stable-failure-key",
+		Method:         "POST",
+		Route:          "/admin/write",
+		ActorScope:     "admin:1",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+	sentinelErr := errors.New("sentinel execution failure")
+
+	executeStartedAt := time.Now()
+	result, err := coordinator.Execute(ctx, opts, func(context.Context) (any, error) {
+		executions++
+		cancel()
+		return nil, sentinelErr
+	})
+	executeFinishedAt := time.Now()
+	require.Nil(t, result)
+	require.ErrorIs(t, err, sentinelErr)
+	require.Equal(t, 1, executions)
+	require.NoError(t, repo.markFailedCtx)
+	requireIdempotencyTerminalWriteDeadline(
+		t,
+		repo.markFailedDeadline,
+		repo.markFailedHasDeadline,
+		executeStartedAt,
+		executeFinishedAt,
+	)
+
+	keyHash := HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey)
+	stored, err := repo.GetByScopeAndKeyHash(context.Background(), opts.Scope, keyHash)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, IdempotencyStatusFailedRetryable, stored.Status)
+	require.NotNil(t, stored.LockedUntil)
+	require.True(t, stored.LockedUntil.After(time.Now()))
+
+	result, err = coordinator.Execute(context.Background(), opts, func(context.Context) (any, error) {
+		executions++
+		return map[string]any{"updated": 1}, nil
+	})
+	require.Nil(t, result)
+	require.Error(t, err)
+	require.Equal(t, infraerrors.Code(ErrIdempotencyRetryBackoff), infraerrors.Code(err))
+	require.Greater(t, RetryAfterSecondsFromError(err), 0)
+	require.Equal(t, 1, executions)
+
+	past := time.Now().Add(-time.Second)
+	repo.mu.Lock()
+	repo.data[repo.key(opts.Scope, keyHash)].LockedUntil = &past
+	repo.mu.Unlock()
+
+	result, err = coordinator.Execute(context.Background(), opts, func(context.Context) (any, error) {
+		executions++
+		return map[string]any{"updated": executions}, nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Replayed)
+	require.Equal(t, 2, executions)
+
+	stored, err = repo.GetByScopeAndKeyHash(context.Background(), opts.Scope, keyHash)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, IdempotencyStatusSucceeded, stored.Status)
 }
 
 func TestIdempotencyCoordinator_MarkAndMarshalBranches(t *testing.T) {
@@ -881,4 +1083,364 @@ func TestIdempotencyCoordinator_HelperBranches(t *testing.T) {
 	invalid := "{invalid"
 	_, err = c.decodeStoredResponse(&invalid)
 	require.Error(t, err)
+}
+
+func TestIdempotencyCoordinatorExecuteTransactionalRequiresKeyAndCapability(t *testing.T) {
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = true
+	coordinator := NewIdempotencyCoordinator(newInMemoryIdempotencyRepo(), cfg)
+	var calls int
+
+	_, err := coordinator.ExecuteTransactional(context.Background(), IdempotencyExecuteOptions{
+		Scope:      "transactional-require-key",
+		ActorScope: "admin:1",
+		Method:     "POST",
+		Route:      "/transactional",
+		Payload:    map[string]any{"value": 1},
+		RequireKey: true,
+	}, func(context.Context) (any, error) {
+		calls++
+		return map[string]any{"ok": true}, nil
+	})
+	require.ErrorIs(t, err, ErrIdempotencyKeyRequired)
+	require.Zero(t, calls)
+
+	coordinator = NewIdempotencyCoordinator(failingIdempotencyRepo{}, cfg)
+	_, err = coordinator.ExecuteTransactional(context.Background(), IdempotencyExecuteOptions{
+		Scope:          "transactional-capability",
+		ActorScope:     "admin:1",
+		Method:         "POST",
+		Route:          "/transactional",
+		IdempotencyKey: "capability-key",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}, func(context.Context) (any, error) {
+		calls++
+		return map[string]any{"ok": true}, nil
+	})
+	require.Equal(t, infraerrors.Code(ErrIdempotencyStoreUnavail), infraerrors.Code(err))
+	require.Zero(t, calls)
+}
+
+func TestIdempotencyCoordinatorExecuteTransactionalCommitsAndReplays(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	opts := IdempotencyExecuteOptions{
+		Scope:          "transactional-success",
+		ActorScope:     "admin:7",
+		Method:         "POST",
+		Route:          "/transactional",
+		IdempotencyKey: "success-key",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+	var calls int
+	execute := func(context.Context) (any, error) {
+		calls++
+		return map[string]any{"updated": 2}, nil
+	}
+
+	first, err := coordinator.ExecuteTransactional(context.Background(), opts, execute)
+	require.NoError(t, err)
+	require.False(t, first.Replayed)
+	require.Equal(t, 1, calls)
+
+	replayed, err := coordinator.ExecuteTransactional(context.Background(), opts, execute)
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	require.Equal(t, 1, calls)
+
+	record, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		opts.Scope,
+		HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey),
+	)
+	require.NoError(t, err)
+	require.Equal(t, IdempotencyStatusSucceeded, record.Status)
+}
+
+func TestIdempotencyCoordinatorExecuteTransactionalRollsBackTerminalStateOnExecutorFailure(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	cfg.FailedRetryBackoff = time.Second
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	opts := IdempotencyExecuteOptions{
+		Scope:          "transactional-failure",
+		ActorScope:     "admin:8",
+		Method:         "POST",
+		Route:          "/transactional",
+		IdempotencyKey: "failure-key",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+	executorErr := errors.New("synthetic transactional executor failure")
+
+	_, err := coordinator.ExecuteTransactional(context.Background(), opts, func(context.Context) (any, error) {
+		return nil, executorErr
+	})
+	require.ErrorIs(t, err, executorErr)
+
+	record, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		opts.Scope,
+		HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey),
+	)
+	require.NoError(t, err)
+	require.Equal(t, IdempotencyStatusFailedRetryable, record.Status)
+	require.Nil(t, record.ResponseBody)
+}
+
+func TestIdempotencyCoordinatorRetryAfterHintControlsTransactionalBackoff(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	cfg.FailedRetryBackoff = 5 * time.Second
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	opts := IdempotencyExecuteOptions{
+		Scope:          "transactional-busy-backoff",
+		ActorScope:     "admin:one-click-notes",
+		Method:         "POST",
+		Route:          "/transactional-busy-backoff",
+		IdempotencyKey: "busy-key",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+	busyErr := infraerrors.TooManyRequests(
+		"ACCOUNT_NOTE_IMPORT_BUSY",
+		"account note import is busy",
+	).WithMetadata(map[string]string{"retry_after": "1"})
+
+	_, err := coordinator.ExecuteTransactional(context.Background(), opts, func(context.Context) (any, error) {
+		return nil, busyErr
+	})
+	require.ErrorIs(t, err, busyErr)
+	require.Equal(t, 1, RetryAfterSecondsFromError(err))
+
+	record, err := repo.GetByScopeAndKeyHash(
+		context.Background(),
+		opts.Scope,
+		HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, IdempotencyStatusFailedRetryable, record.Status)
+	require.NotNil(t, record.LockedUntil)
+	remaining := time.Until(*record.LockedUntil)
+	require.Greater(t, remaining, 0*time.Second)
+	require.Less(t, remaining, 2*time.Second, "persisted backoff must honor Retry-After instead of the five-second default")
+}
+
+func TestIdempotencyCoordinatorProcessingLeaseReclaimIsTransactionalOnly(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	ctx := context.Background()
+
+	makeProcessingRecord := func(scope, key string) IdempotencyExecuteOptions {
+		opts := IdempotencyExecuteOptions{
+			Scope:          scope,
+			ActorScope:     "admin:9",
+			Method:         "POST",
+			Route:          "/transactional",
+			IdempotencyKey: key,
+			Payload:        map[string]any{"value": scope},
+			RequireKey:     true,
+		}
+		fingerprint, err := BuildIdempotencyFingerprint(opts.Method, opts.Route, opts.ActorScope, opts.Payload)
+		require.NoError(t, err)
+		past := time.Now().Add(-time.Second)
+		created, err := repo.CreateProcessing(ctx, &IdempotencyRecord{
+			Scope:              opts.Scope,
+			IdempotencyKeyHash: HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey),
+			RequestFingerprint: fingerprint,
+			Status:             IdempotencyStatusProcessing,
+			LockedUntil:        &past,
+			ExpiresAt:          time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+		require.True(t, created)
+		return opts
+	}
+
+	genericOpts := makeProcessingRecord("generic-processing", "generic-key")
+	var genericCalls int
+	_, err := coordinator.Execute(ctx, genericOpts, func(context.Context) (any, error) {
+		genericCalls++
+		return map[string]any{"ok": true}, nil
+	})
+	require.Equal(t, infraerrors.Code(ErrIdempotencyInProgress), infraerrors.Code(err))
+	require.Zero(t, genericCalls)
+
+	transactionalOpts := makeProcessingRecord("transactional-processing", "transactional-key")
+	var transactionalCalls int
+	result, err := coordinator.ExecuteTransactional(ctx, transactionalOpts, func(context.Context) (any, error) {
+		transactionalCalls++
+		return map[string]any{"ok": true}, nil
+	})
+	require.NoError(t, err)
+	require.False(t, result.Replayed)
+	require.Equal(t, 1, transactionalCalls)
+}
+
+var errSyntheticAmbiguousCommit = errors.New("synthetic ambiguous transaction commit")
+
+type ambiguousCommitIdempotencyRepo struct {
+	*inMemoryIdempotencyRepo
+	commitBeforeError  bool
+	failReadAfterError bool
+	attempts           atomic.Int32
+	readUnavailable    atomic.Bool
+}
+
+func (r *ambiguousCommitIdempotencyRepo) WithinTransaction(
+	ctx context.Context,
+	execute func(context.Context, IdempotencyRepository) error,
+) error {
+	if r.attempts.Add(1) != 1 {
+		return r.inMemoryIdempotencyRepo.WithinTransaction(ctx, execute)
+	}
+
+	if r.commitBeforeError {
+		if err := r.inMemoryIdempotencyRepo.WithinTransaction(ctx, execute); err != nil {
+			return err
+		}
+	} else {
+		txRepo := cloneInMemoryIdempotencyRepo(r.inMemoryIdempotencyRepo)
+		if err := execute(ctx, txRepo); err != nil {
+			return err
+		}
+	}
+	if r.failReadAfterError {
+		r.readUnavailable.Store(true)
+	}
+	return errSyntheticAmbiguousCommit
+}
+
+func (r *ambiguousCommitIdempotencyRepo) GetByScopeAndKeyHash(
+	ctx context.Context,
+	scope string,
+	keyHash string,
+) (*IdempotencyRecord, error) {
+	if r.readUnavailable.Load() {
+		return nil, errors.New("synthetic idempotency read outage")
+	}
+	return r.inMemoryIdempotencyRepo.GetByScopeAndKeyHash(ctx, scope, keyHash)
+}
+
+func TestIdempotencyCoordinatorTransactionalCommitRecovery(t *testing.T) {
+	tests := []struct {
+		name              string
+		commitBeforeError bool
+		wantReplay        bool
+		wantStatus        string
+		wantErrorCode     int
+	}{
+		{
+			name:              "commit completed before transport error",
+			commitBeforeError: true,
+			wantReplay:        true,
+			wantStatus:        IdempotencyStatusSucceeded,
+		},
+		{
+			name:              "transaction rolled back before commit error",
+			commitBeforeError: false,
+			wantStatus:        IdempotencyStatusFailedRetryable,
+			wantErrorCode:     infraerrors.Code(ErrIdempotencyStoreUnavail),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := newInMemoryIdempotencyRepo()
+			repo := &ambiguousCommitIdempotencyRepo{
+				inMemoryIdempotencyRepo: base,
+				commitBeforeError:       test.commitBeforeError,
+			}
+			cfg := DefaultIdempotencyConfig()
+			cfg.ObserveOnly = false
+			coordinator := NewIdempotencyCoordinator(repo, cfg)
+			opts := IdempotencyExecuteOptions{
+				Scope:          "ambiguous-commit-" + test.name,
+				ActorScope:     "admin:10",
+				Method:         "POST",
+				Route:          "/transactional",
+				IdempotencyKey: "ambiguous-key",
+				Payload:        map[string]any{"value": 1},
+				RequireKey:     true,
+			}
+			var calls int
+			result, err := coordinator.ExecuteTransactional(context.Background(), opts, func(context.Context) (any, error) {
+				calls++
+				return map[string]any{"ok": true}, nil
+			})
+
+			if test.wantErrorCode == 0 {
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.Equal(t, test.wantReplay, result.Replayed)
+			} else {
+				require.Equal(t, test.wantErrorCode, infraerrors.Code(err))
+				require.Nil(t, result)
+			}
+			require.Equal(t, 1, calls)
+
+			record, readErr := base.GetByScopeAndKeyHash(
+				context.Background(),
+				opts.Scope,
+				HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey),
+			)
+			require.NoError(t, readErr)
+			require.Equal(t, test.wantStatus, record.Status)
+		})
+	}
+}
+
+func TestIdempotencyCoordinatorTransactionalCommitReadOutageCanReclaimExpiredLease(t *testing.T) {
+	base := newInMemoryIdempotencyRepo()
+	repo := &ambiguousCommitIdempotencyRepo{
+		inMemoryIdempotencyRepo: base,
+		commitBeforeError:       false,
+		failReadAfterError:      true,
+	}
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	opts := IdempotencyExecuteOptions{
+		Scope:          "ambiguous-read-outage",
+		ActorScope:     "admin:11",
+		Method:         "POST",
+		Route:          "/transactional",
+		IdempotencyKey: "read-outage-key",
+		Payload:        map[string]any{"value": 1},
+		RequireKey:     true,
+	}
+	var calls int
+	execute := func(context.Context) (any, error) {
+		calls++
+		return map[string]any{"ok": true}, nil
+	}
+
+	result, err := coordinator.ExecuteTransactional(context.Background(), opts, execute)
+	require.Nil(t, result)
+	require.Equal(t, infraerrors.Code(ErrIdempotencyStoreUnavail), infraerrors.Code(err))
+	require.Equal(t, 1, calls)
+
+	repo.readUnavailable.Store(false)
+	keyHash := HashActorScopedIdempotencyKey(opts.ActorScope, opts.IdempotencyKey)
+	base.mu.Lock()
+	record := base.data[base.key(opts.Scope, keyHash)]
+	require.NotNil(t, record)
+	past := time.Now().Add(-time.Second)
+	record.LockedUntil = &past
+	base.mu.Unlock()
+
+	result, err = coordinator.ExecuteTransactional(context.Background(), opts, execute)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Replayed)
+	require.Equal(t, 2, calls)
 }

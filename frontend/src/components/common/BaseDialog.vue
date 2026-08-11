@@ -11,7 +11,13 @@
         @click.self="handleClose"
       >
         <!-- Modal panel -->
-        <div ref="dialogRef" :class="['modal-content', widthClasses]" @click.stop>
+        <div
+          ref="dialogRef"
+          :class="['modal-content', widthClasses]"
+          :tabindex="trapFocus ? -1 : undefined"
+          @click.stop
+          @keydown.tab="handleTab"
+        >
           <!-- Header -->
           <div class="modal-header">
             <h3 :id="dialogId" class="modal-title">
@@ -63,6 +69,7 @@ interface Props {
   closeOnEscape?: boolean
   closeOnClickOutside?: boolean
   showCloseButton?: boolean
+  trapFocus?: boolean
   zIndex?: number
 }
 
@@ -75,6 +82,7 @@ const props = withDefaults(defineProps<Props>(), {
   closeOnEscape: true,
   closeOnClickOutside: false,
   showCloseButton: true,
+  trapFocus: false,
   zIndex: 50
 })
 
@@ -111,6 +119,47 @@ const handleEscape = (event: KeyboardEvent) => {
   }
 }
 
+const focusableSelector = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(', ')
+
+const getFocusableElements = (): HTMLElement[] => {
+  if (!dialogRef.value) return []
+  return Array.from(dialogRef.value.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+    element => !element.hasAttribute('disabled') && element.getAttribute('aria-hidden') !== 'true'
+  )
+}
+
+const handleTab = (event: KeyboardEvent) => {
+  if (!props.trapFocus || !dialogRef.value) return
+
+  const focusableElements = getFocusableElements()
+  if (focusableElements.length === 0) {
+    event.preventDefault()
+    dialogRef.value.focus()
+    return
+  }
+
+  const firstFocusable = focusableElements[0]
+  const lastFocusable = focusableElements[focusableElements.length - 1]
+  const activeElement = document.activeElement
+
+  if (event.shiftKey && (activeElement === firstFocusable || activeElement === dialogRef.value)) {
+    event.preventDefault()
+    lastFocusable?.focus()
+    return
+  }
+  if (!event.shiftKey && (activeElement === lastFocusable || activeElement === dialogRef.value)) {
+    event.preventDefault()
+    firstFocusable?.focus()
+  }
+}
+
 // Prevent body scroll when modal is open and manage focus
 watch(
   () => props.show,
@@ -124,10 +173,12 @@ watch(
       // 等待DOM更新后设置焦点到对话框
       await nextTick()
       if (dialogRef.value) {
-        const firstFocusable = dialogRef.value.querySelector<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-        )
-        firstFocusable?.focus()
+        const firstFocusable = getFocusableElements()[0]
+        if (firstFocusable) {
+          firstFocusable.focus()
+        } else if (props.trapFocus) {
+          dialogRef.value.focus()
+        }
       }
     } else {
       document.body.classList.remove('modal-open')

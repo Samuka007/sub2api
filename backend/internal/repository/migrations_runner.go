@@ -61,6 +61,8 @@ const emailAliasDedupIndexMigration = "190_add_users_email_alias_dedup_index_not
 const emailAliasDedupIndex = "idx_users_email_dot_stripped"
 const usageLogsUpstreamModelMismatchIndexMigration = "195_add_usage_log_upstream_model_mismatch_index_notx.sql"
 const usageLogsUpstreamModelMismatchIndex = "idx_usage_logs_upstream_model_mismatch_created_at"
+const accountNameLookupIndexMigration = "196_add_account_name_lookup_index_notx.sql"
+const accountNameLookupIndex = "idx_accounts_lower_name_id_active"
 
 type migrationChecksumCompatibilityRule struct {
 	fileChecksum       string
@@ -292,6 +294,8 @@ func prepareNonTransactionalMigration(ctx context.Context, db migrationConnectio
 		return dropInvalidIndexIfPresent(ctx, db, emailAliasDedupIndex)
 	case usageLogsUpstreamModelMismatchIndexMigration:
 		return dropInvalidIndexIfPresent(ctx, db, usageLogsUpstreamModelMismatchIndex)
+	case accountNameLookupIndexMigration:
+		return dropInvalidIndexIfPresent(ctx, db, accountNameLookupIndex)
 	default:
 		return nil
 	}

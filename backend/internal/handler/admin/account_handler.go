@@ -48,23 +48,25 @@ func NewOAuthHandler(oauthService *service.OAuthService) *OAuthHandler {
 
 // AccountHandler handles admin account management
 type AccountHandler struct {
-	adminService            service.AdminService
-	oauthService            *service.OAuthService
-	openaiOAuthService      *service.OpenAIOAuthService
-	geminiOAuthService      *service.GeminiOAuthService
-	antigravityOAuthService *service.AntigravityOAuthService
-	grokOAuthService        service.GrokOAuthTokenService
-	rateLimitService        *service.RateLimitService
-	accountUsageService     *service.AccountUsageService
-	accountTestService      *service.AccountTestService
-	concurrencyService      *service.ConcurrencyService
-	crsSyncService          *service.CRSSyncService
-	sessionLimitCache       service.SessionLimitCache
-	rpmCache                service.RPMCache
-	tokenCacheInvalidator   service.TokenCacheInvalidator
-	grokImportProber        grokImportProber
-	upstreamBillingProbe    *service.UpstreamBillingProbeService
-	ollamaCloudUsage        *service.OllamaCloudUsageService
+	adminService                      service.AdminService
+	oauthService                      *service.OAuthService
+	openaiOAuthService                *service.OpenAIOAuthService
+	geminiOAuthService                *service.GeminiOAuthService
+	antigravityOAuthService           *service.AntigravityOAuthService
+	grokOAuthService                  service.GrokOAuthTokenService
+	rateLimitService                  *service.RateLimitService
+	accountUsageService               *service.AccountUsageService
+	accountTestService                *service.AccountTestService
+	concurrencyService                *service.ConcurrencyService
+	crsSyncService                    *service.CRSSyncService
+	sessionLimitCache                 service.SessionLimitCache
+	rpmCache                          service.RPMCache
+	tokenCacheInvalidator             service.TokenCacheInvalidator
+	grokImportProber                  grokImportProber
+	upstreamBillingProbe              *service.UpstreamBillingProbeService
+	ollamaCloudUsage                  *service.OllamaCloudUsageService
+	oneClickAccountNotesSlots         chan struct{}
+	oneClickAccountNotesUploadTimeout time.Duration
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -94,20 +96,22 @@ func NewAccountHandler(
 	tokenCacheInvalidator service.TokenCacheInvalidator,
 ) *AccountHandler {
 	return &AccountHandler{
-		adminService:            adminService,
-		oauthService:            oauthService,
-		openaiOAuthService:      openaiOAuthService,
-		geminiOAuthService:      geminiOAuthService,
-		antigravityOAuthService: antigravityOAuthService,
-		grokOAuthService:        grokOAuthService,
-		rateLimitService:        rateLimitService,
-		accountUsageService:     accountUsageService,
-		accountTestService:      accountTestService,
-		concurrencyService:      concurrencyService,
-		crsSyncService:          crsSyncService,
-		sessionLimitCache:       sessionLimitCache,
-		rpmCache:                rpmCache,
-		tokenCacheInvalidator:   tokenCacheInvalidator,
+		adminService:                      adminService,
+		oauthService:                      oauthService,
+		openaiOAuthService:                openaiOAuthService,
+		geminiOAuthService:                geminiOAuthService,
+		antigravityOAuthService:           antigravityOAuthService,
+		grokOAuthService:                  grokOAuthService,
+		rateLimitService:                  rateLimitService,
+		accountUsageService:               accountUsageService,
+		accountTestService:                accountTestService,
+		concurrencyService:                concurrencyService,
+		crsSyncService:                    crsSyncService,
+		sessionLimitCache:                 sessionLimitCache,
+		rpmCache:                          rpmCache,
+		tokenCacheInvalidator:             tokenCacheInvalidator,
+		oneClickAccountNotesSlots:         make(chan struct{}, oneClickAccountNotesMaxConcurrentRequests),
+		oneClickAccountNotesUploadTimeout: oneClickAccountNotesUploadTimeout,
 	}
 }
 

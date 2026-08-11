@@ -541,6 +541,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/one-click-account-notes',
+    name: 'AdminOneClickAccountNotes',
+    component: () => import('@/views/admin/OneClickAccountNotesView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'One-click Account Notes',
+      titleKey: 'admin.oneClickAccountNotes.title',
+      descriptionKey: 'admin.oneClickAccountNotes.description'
+    }
+  },
+  {
     path: '/admin/account-health-detector',
     name: 'AdminAccountHealthDetector',
     component: () => import('@/views/admin/AccountHealthDetectorView.vue'),

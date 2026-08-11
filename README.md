@@ -222,6 +222,26 @@ request ID；Spark 维度不会消费父账号的 reset credit。
 - [`frontend/src/views/admin/__tests__/AccountHealthDetectorView.spec.ts`](frontend/src/views/admin/__tests__/AccountHealthDetectorView.spec.ts)
 - [`backend/internal/service/account_health_detector.go`](backend/internal/service/account_health_detector.go)
 
+### 8. 一键备注
+
+管理员可以在「管理后台 -> 一键备注」上传单个 UTF-8 TXT 文件。系统从每个非空行提取首个合法邮箱，
+按忽略 ASCII 大小写的完整账号名匹配全部未删除账号；同名账号会全部纳入结果，子串、前后空白或
+邮箱别名不会被归一化为同一账号。写入的备注严格保留对应原始行，只移除文件 BOM 和行结束符。
+
+上传后只显示脱敏邮箱、行状态和账号数量，必须经过预览与明确确认才会写入。未匹配行只报告，
+无效行或同一邮箱的不同内容会跳过对应行/邮箱组，但仍可应用其余确定匹配；若没有任何可更新账号则不可应用。
+完全相同的重复行按确定规则折叠。文件限制为 1 MiB、
+5000 个非空行和每行 64 KiB。应用接口要求幂等键，并通过预览摘要、目标状态校验和单事务批量更新
+拒绝预览后发生的账号新增、改名、删除或备注变化。服务端只查询文件中的候选账号，并对匹配账号数、
+目标备注总量、写入投影和并发导入设置硬上限，超限时在写入前拒绝。上传原文不会进入审计请求体。
+
+核心文件：
+
+- [`backend/internal/service/admin_account_one_click_notes.go`](backend/internal/service/admin_account_one_click_notes.go)
+- [`backend/internal/repository/account_repo_one_click_notes.go`](backend/internal/repository/account_repo_one_click_notes.go)
+- [`backend/internal/handler/admin/account_one_click_notes.go`](backend/internal/handler/admin/account_one_click_notes.go)
+- [`frontend/src/views/admin/OneClickAccountNotesView.vue`](frontend/src/views/admin/OneClickAccountNotesView.vue)
+
 ## 系统总体架构
 
 ```mermaid
@@ -287,7 +307,7 @@ Wire 的依赖声明位于各个 `wire.go` 文件。修改 Provider 或构造函
 | 组件 | `frontend/src/components` | 可复用的界面与交互组件 |
 | API 模块 | `frontend/src/api` | 类型化请求和响应数据结构 |
 | 状态管理 | `frontend/src/stores` | Pinia 公共状态和客户端缓存 |
-| 国际化 | `frontend/src/i18n` | 中文、英文和日文界面文本 |
+| 国际化 | `frontend/src/i18n` | 中文和英文界面文本 |
 | 工具 | `frontend/src/utils` | 格式化和可复用纯函数 |
 
 View 可以组合完整业务流程，但应通过 API 模块调用后端。可复用的展示逻辑应放到组件或工具函数中。

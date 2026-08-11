@@ -316,6 +316,66 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
+  it('omits notes when the editor did not change them', async () => {
+    const account = buildAccount()
+    account.notes = '  imported raw note  '
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('notes')
+  })
+
+  it('includes notes when the editor explicitly changes them', async () => {
+    const account = buildAccount()
+    account.notes = 'existing note'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('textarea').setValue('replacement note')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.notes).toBe('replacement note')
+  })
+
+  it('includes an empty notes value when the editor clears existing notes', async () => {
+    const account = buildAccount()
+    account.notes = 'existing note'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('textarea').setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]).toHaveProperty('notes', '')
+  })
+
+  it('omits notes when the editor restores the original value before submitting', async () => {
+    const account = buildAccount()
+    account.notes = 'existing note'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('textarea').setValue('replacement note')
+    await wrapper.get('textarea').setValue('existing note')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('notes')
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

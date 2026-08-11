@@ -354,6 +354,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.GET("", h.Admin.Account.List)
 		accounts.GET("/account-health-candidates", h.Admin.Account.ListAccountHealthCandidates)
 		accounts.POST("/export-notes", h.Admin.Account.ExportNotes)
+		accounts.POST("/one-click-notes/preview", h.Admin.Account.PreviewOneClickAccountNotes)
+		accounts.POST("/one-click-notes/apply", h.Admin.Account.ApplyOneClickAccountNotes)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
 		accounts.PUT("/upstream-billing-probe/settings", h.Admin.Account.UpdateUpstreamBillingProbeSettings)
 		accounts.POST("/upstream-billing-probe/batch", h.Admin.Account.ProbeUpstreamBillingBatch)

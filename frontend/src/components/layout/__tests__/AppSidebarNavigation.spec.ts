@@ -48,6 +48,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
         'nav.channelStatus': '渠道状态',
         'nav.channelMonitor': '渠道监控',
         'nav.myAccount': '我的账户',
+        'nav.oneClickAccountNotes': '一键备注',
       })[key] ?? key,
     }),
   }
@@ -137,5 +138,18 @@ describe('AppSidebar channel monitor navigation', () => {
     })
 
     expect(wrapper.find('[data-to="/admin/model-radar"]').exists()).toBe(false)
+  })
+
+  it('renders the one-click account notes link for administrators', () => {
+    mocks.authStore.isAdmin = true
+
+    const wrapper = shallowMount(AppSidebar, {
+      props: { variant: 'admin' },
+      global: { stubs: { RouterLink: RouterLinkStub, VersionBadge: true } },
+    })
+
+    const link = wrapper.find('[data-to="/admin/one-click-account-notes"]')
+    expect(link.exists()).toBe(true)
+    expect(link.text()).toContain('一键备注')
   })
 })

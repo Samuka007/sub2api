@@ -845,22 +845,24 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		// Unit tests and narrow internal callers may construct adminServiceImpl
 		// directly; production wiring requires this capability through
 		// AdminAccountRepository.
-		updater, _ = s.accountRepo.(AccountBillingSettingsRepository)
+		updater, _ = s.accountRepo.(AccountBillingSettingsWithNotesIntentRepository)
 	}
 	if updater != nil {
-		if err := updater.UpdateWithAccountBillingSettings(
+		updateErr := updater.UpdateWithAccountBillingSettingsAndNotesIntent(
 			ctx,
 			account,
 			requestedProbeEnabledUpdate,
 			requestedRateSyncEnabledUpdate,
 			input.RateMultiplier,
-		); err != nil {
-			return nil, err
+			input.Notes != nil,
+		)
+		if updateErr != nil {
+			return nil, updateErr
 		}
 		billingSettingsAppliedAtomically = true
 	}
 	if !billingSettingsAppliedAtomically {
-		if err := s.accountRepo.Update(ctx, account); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, account, input.Notes != nil); err != nil {
 			return nil, err
 		}
 		if (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) &&
@@ -1434,7 +1436,7 @@ type sparkShadowAtomicCreator interface {
 
 // propagateProxyToShadows syncs proxyID to all spark shadow accounts of parentID.
 // It is called synchronously so that proxy changes are immediately consistent;
-// accountRepo.Update triggers the scheduler outbox + cache propagation internally.
+// The notes-intent update triggers the scheduler outbox + cache propagation internally.
 // Calling this for a non-parent account is a harmless no-op.
 func (s *adminServiceImpl) propagateProxyToShadows(ctx context.Context, parentID int64, proxyID *int64) error {
 	return propagateAccountProxyToShadows(ctx, s.accountRepo, parentID, proxyID)
@@ -1450,7 +1452,7 @@ func propagateAccountProxyToShadows(ctx context.Context, repo AccountRepository,
 	}
 	for _, shadow := range shadows {
 		shadow.ProxyID = proxyID
-		if err := repo.Update(ctx, shadow); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, repo, shadow, false); err != nil {
 			return fmt.Errorf("update spark shadow %d proxy: %w", shadow.ID, err)
 		}
 	}

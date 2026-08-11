@@ -5,6 +5,7 @@ import enAdminChannels from '../locales/en/admin/channels'
 import enAdminOps from '../locales/en/admin/ops'
 import enAdminOverview from '../locales/en/admin/overview'
 import enAdminPlusQuotaAutomation from '../locales/en/admin/plusQuotaAutomation'
+import enAdminOneClickAccountNotes from '../locales/en/admin/oneClickAccountNotes'
 import enAdminResources from '../locales/en/admin/resources'
 import enAdminSettings from '../locales/en/admin/settings'
 import enCommon from '../locales/en/common'
@@ -16,6 +17,7 @@ import zhAdminChannels from '../locales/zh/admin/channels'
 import zhAdminOps from '../locales/zh/admin/ops'
 import zhAdminOverview from '../locales/zh/admin/overview'
 import zhAdminPlusQuotaAutomation from '../locales/zh/admin/plusQuotaAutomation'
+import zhAdminOneClickAccountNotes from '../locales/zh/admin/oneClickAccountNotes'
 import zhAdminResources from '../locales/zh/admin/resources'
 import zhAdminSettings from '../locales/zh/admin/settings'
 import zhCommon from '../locales/zh/common'
@@ -54,6 +56,7 @@ const admins: Record<string, Modules> = {
     channels: zhAdminChannels,
     accounts: zhAdminAccounts,
     plusQuotaAutomation: zhAdminPlusQuotaAutomation,
+    oneClickAccountNotes: zhAdminOneClickAccountNotes,
     resources: zhAdminResources,
     ops: zhAdminOps,
     settings: zhAdminSettings
@@ -63,11 +66,48 @@ const admins: Record<string, Modules> = {
     channels: enAdminChannels,
     accounts: enAdminAccounts,
     plusQuotaAutomation: enAdminPlusQuotaAutomation,
+    oneClickAccountNotes: enAdminOneClickAccountNotes,
     resources: enAdminResources,
     ops: enAdminOps,
     settings: enAdminSettings
   }
 }
+
+const oneClickAccountNotesReasonCodes = [
+  'ACCOUNT_NOTE_IMPORT_BUSY',
+  'ACCOUNT_NOTE_IMPORT_FILE_EMPTY',
+  'ACCOUNT_NOTE_IMPORT_FILE_INVALID',
+  'ACCOUNT_NOTE_IMPORT_FILE_REQUIRED',
+  'ACCOUNT_NOTE_IMPORT_FILE_TOO_LARGE',
+  'ACCOUNT_NOTE_IMPORT_FILE_TYPE_INVALID',
+  'ACCOUNT_NOTE_IMPORT_INVALID_BOM',
+  'ACCOUNT_NOTE_IMPORT_INVALID_LINE_ENDING',
+  'ACCOUNT_NOTE_IMPORT_INVALID_UTF8',
+  'ACCOUNT_NOTE_IMPORT_LINE_TOO_LONG',
+  'ACCOUNT_NOTE_IMPORT_MULTIPART_INVALID',
+  'ACCOUNT_NOTE_IMPORT_MULTIPART_REQUIRED',
+  'ACCOUNT_NOTE_IMPORT_NO_RECORDS',
+  'ACCOUNT_NOTE_IMPORT_NOT_APPLICABLE',
+  'ACCOUNT_NOTE_IMPORT_NUL_BYTE',
+  'ACCOUNT_NOTE_IMPORT_PLAN_INVALID',
+  'ACCOUNT_NOTE_IMPORT_PLAN_TOO_LARGE',
+  'ACCOUNT_NOTE_IMPORT_PREVIEW_DIGEST_INVALID',
+  'ACCOUNT_NOTE_IMPORT_PREVIEW_DIGEST_REQUIRED',
+  'ACCOUNT_NOTE_IMPORT_PREVIEW_STALE',
+  'ACCOUNT_NOTE_IMPORT_REQUEST_TOO_LARGE',
+  'ACCOUNT_NOTE_IMPORT_TOO_MANY_LINES',
+  'ACCOUNT_NOTE_IMPORT_UNAVAILABLE',
+  'ACCOUNT_NOTE_IMPORT_UPLOAD_TIMEOUT',
+  'IDEMPOTENCY_EXECUTOR_NIL',
+  'IDEMPOTENCY_IN_PROGRESS',
+  'IDEMPOTENCY_KEY_CONFLICT',
+  'IDEMPOTENCY_KEY_INVALID',
+  'IDEMPOTENCY_KEY_REQUIRED',
+  'IDEMPOTENCY_PAYLOAD_INVALID',
+  'IDEMPOTENCY_RETRY_BACKOFF',
+  'IDEMPOTENCY_SCOPE_REQUIRED',
+  'IDEMPOTENCY_STORE_UNAVAILABLE'
+] as const
 
 describe.each(Object.keys(roots))('locale %s spread assembly', (locale) => {
   it('root modules have no overlapping top-level keys', () => {
@@ -82,5 +122,13 @@ describe.each(Object.keys(roots))('locale %s spread assembly', (locale) => {
 
   it('admin modules have no overlapping top-level keys', () => {
     expect(collisions(admins[locale])).toEqual([])
+  })
+
+  it('maps every stable one-click account notes backend reason code', () => {
+    const feature = admins[locale].oneClickAccountNotes.oneClickAccountNotes as Record<string, unknown>
+    const errors = feature.errors as Record<string, unknown>
+    for (const code of oneClickAccountNotesReasonCodes) {
+      expect(errors[code], `${locale} is missing ${code}`).toEqual(expect.any(String))
+    }
   })
 })

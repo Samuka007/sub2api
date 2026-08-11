@@ -21,6 +21,7 @@ type accountBillingSettingsAdminRepo struct {
 	*upstreamBillingProbeAccountRepo
 	concurrentRate   *float64
 	lastExplicitRate *float64
+	lastUpdateNotes  bool
 	updateCalls      int
 }
 
@@ -31,6 +32,39 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
 ) error {
+	return r.updateWithAccountBillingSettings(
+		account,
+		probeEnabled,
+		rateSyncEnabled,
+		rateMultiplier,
+		true,
+	)
+}
+
+func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettingsAndNotesIntent(
+	_ context.Context,
+	account *Account,
+	probeEnabled *bool,
+	rateSyncEnabled *bool,
+	rateMultiplier *float64,
+	updateNotes bool,
+) error {
+	return r.updateWithAccountBillingSettings(
+		account,
+		probeEnabled,
+		rateSyncEnabled,
+		rateMultiplier,
+		updateNotes,
+	)
+}
+
+func (r *accountBillingSettingsAdminRepo) updateWithAccountBillingSettings(
+	account *Account,
+	probeEnabled *bool,
+	rateSyncEnabled *bool,
+	rateMultiplier *float64,
+	updateNotes bool,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -39,6 +73,9 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 		return ErrAccountNotFound
 	}
 	updated := *account
+	if !updateNotes {
+		updated.Notes = cloneAccountValuePointer(current.Notes)
+	}
 	updated.Credentials = mergeMap(nil, account.Credentials)
 	updated.Extra = mergeMap(nil, account.Extra)
 	if updated.Extra == nil {
@@ -64,6 +101,7 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 		r.lastExplicitRate = nil
 	}
 	r.accounts[account.ID] = &updated
+	r.lastUpdateNotes = updateNotes
 	r.updateCalls++
 	return nil
 }
@@ -72,11 +110,13 @@ func TestUpdateAccountRoutesRateIntentThroughAtomicBillingUpdater(t *testing.T) 
 	accountID := int64(109)
 	initialRate := 0.1
 	concurrentRate := 0.2
+	initialNotes := "existing notes"
 	repo := &accountBillingSettingsAdminRepo{
 		upstreamBillingProbeAccountRepo: &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
 			accountID: {
 				ID:             accountID,
 				Name:           "before",
+				Notes:          &initialNotes,
 				Platform:       PlatformOpenAI,
 				Type:           AccountTypeAPIKey,
 				Status:         StatusActive,
@@ -95,6 +135,8 @@ func TestUpdateAccountRoutesRateIntentThroughAtomicBillingUpdater(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.updateCalls)
 	require.Nil(t, repo.lastExplicitRate)
+	require.False(t, repo.lastUpdateNotes)
+	require.Equal(t, initialNotes, *updated.Notes)
 	require.Equal(t, concurrentRate, *updated.RateMultiplier)
 
 	// 手工倍率只有在同步不再开启时才被接受，所以同一请求先关闭同步再设值
@@ -110,6 +152,13 @@ func TestUpdateAccountRoutesRateIntentThroughAtomicBillingUpdater(t *testing.T) 
 	require.NotNil(t, repo.lastExplicitRate)
 	require.Zero(t, *repo.lastExplicitRate)
 	require.Zero(t, *updated.RateMultiplier)
+
+	replacementNotes := "explicitly updated notes"
+	updated, err = svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{Notes: &replacementNotes})
+	require.NoError(t, err)
+	require.Equal(t, 3, repo.updateCalls)
+	require.True(t, repo.lastUpdateNotes)
+	require.Equal(t, replacementNotes, *updated.Notes)
 }
 
 func TestCreateAccountDropsManagedUpstreamBillingProbeState(t *testing.T) {

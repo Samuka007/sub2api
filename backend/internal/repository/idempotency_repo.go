@@ -11,11 +11,42 @@ import (
 )
 
 type idempotencyRepository struct {
-	sql sqlExecutor
+	client *dbent.Client
+	sql    sqlExecutor
 }
 
-func NewIdempotencyRepository(_ *dbent.Client, sqlDB *sql.DB) service.IdempotencyRepository {
-	return &idempotencyRepository{sql: sqlDB}
+func NewIdempotencyRepository(client *dbent.Client, sqlDB *sql.DB) service.IdempotencyRepository {
+	return &idempotencyRepository{client: client, sql: sqlDB}
+}
+
+func (r *idempotencyRepository) WithinTransaction(
+	ctx context.Context,
+	execute func(context.Context, service.IdempotencyRepository) error,
+) error {
+	if execute == nil {
+		return errors.New("idempotency transaction executor is nil")
+	}
+	if existing := dbent.TxFromContext(ctx); existing != nil {
+		txClient := existing.Client()
+		return execute(ctx, &idempotencyRepository{client: txClient, sql: txClient})
+	}
+	if r == nil || r.client == nil {
+		return errors.New("idempotency transaction client is unavailable")
+	}
+
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txCtx := dbent.NewTxContext(ctx, tx)
+	txClient := tx.Client()
+	txRepo := &idempotencyRepository{client: txClient, sql: txClient}
+	if err := execute(txCtx, txRepo); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *idempotencyRepository) CreateProcessing(ctx context.Context, record *service.IdempotencyRecord) (bool, error) {
@@ -27,8 +58,9 @@ func (r *idempotencyRepository) CreateProcessing(ctx context.Context, record *se
 			scope, idempotency_key_hash, request_fingerprint, status, locked_until, expires_at
 		) VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (scope, idempotency_key_hash) DO NOTHING
-		RETURNING id, created_at, updated_at
+		RETURNING id, locked_until, created_at, updated_at
 	`
+	var lockedUntil sql.NullTime
 	var createdAt time.Time
 	var updatedAt time.Time
 	err := scanSingleRow(ctx, r.sql, query, []any{
@@ -38,7 +70,7 @@ func (r *idempotencyRepository) CreateProcessing(ctx context.Context, record *se
 		record.Status,
 		record.LockedUntil,
 		record.ExpiresAt,
-	}, &record.ID, &createdAt, &updatedAt)
+	}, &record.ID, &lockedUntil, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -47,6 +79,12 @@ func (r *idempotencyRepository) CreateProcessing(ctx context.Context, record *se
 	}
 	record.CreatedAt = createdAt
 	record.UpdatedAt = updatedAt
+	if lockedUntil.Valid {
+		v := lockedUntil.Time
+		record.LockedUntil = &v
+	} else {
+		record.LockedUntil = nil
+	}
 	return true, nil
 }
 
@@ -106,22 +144,25 @@ func (r *idempotencyRepository) TryReclaim(
 	ctx context.Context,
 	id int64,
 	fromStatus string,
+	newRequestFingerprint string,
 	now, newLockedUntil, newExpiresAt time.Time,
 ) (bool, error) {
 	query := `
 		UPDATE idempotency_records
 		SET status = $2,
-			locked_until = $3,
+			request_fingerprint = $3,
+			locked_until = $4,
 			error_reason = NULL,
 			updated_at = NOW(),
-			expires_at = $4
+			expires_at = $5
 		WHERE id = $1
-			AND status = $5
-			AND (locked_until IS NULL OR locked_until <= $6)
+			AND status = $6
+			AND (locked_until IS NULL OR locked_until <= $7)
 	`
 	res, err := r.sql.ExecContext(ctx, query,
 		id,
 		service.IdempotencyStatusProcessing,
+		newRequestFingerprint,
 		newLockedUntil,
 		newExpiresAt,
 		fromStatus,
@@ -141,6 +182,7 @@ func (r *idempotencyRepository) ExtendProcessingLock(
 	ctx context.Context,
 	id int64,
 	requestFingerprint string,
+	expectedLockedUntil,
 	newLockedUntil,
 	newExpiresAt time.Time,
 ) (bool, error) {
@@ -152,6 +194,7 @@ func (r *idempotencyRepository) ExtendProcessingLock(
 		WHERE id = $1
 			AND status = $4
 			AND request_fingerprint = $5
+			AND locked_until = $6
 	`
 	res, err := r.sql.ExecContext(
 		ctx,
@@ -161,6 +204,7 @@ func (r *idempotencyRepository) ExtendProcessingLock(
 		newExpiresAt,
 		service.IdempotencyStatusProcessing,
 		requestFingerprint,
+		expectedLockedUntil,
 	)
 	if err != nil {
 		return false, err
@@ -172,7 +216,7 @@ func (r *idempotencyRepository) ExtendProcessingLock(
 	return affected > 0, nil
 }
 
-func (r *idempotencyRepository) MarkSucceeded(ctx context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *idempotencyRepository) MarkSucceeded(ctx context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
 	query := `
 		UPDATE idempotency_records
 		SET status = $2,
@@ -183,18 +227,32 @@ func (r *idempotencyRepository) MarkSucceeded(ctx context.Context, id int64, res
 			expires_at = $5,
 			updated_at = NOW()
 		WHERE id = $1
+			AND status = $6
+			AND locked_until = $7
 	`
-	_, err := r.sql.ExecContext(ctx, query,
+	result, err := r.sql.ExecContext(ctx, query,
 		id,
 		service.IdempotencyStatusSucceeded,
 		responseStatus,
 		responseBody,
 		expiresAt,
+		service.IdempotencyStatusProcessing,
+		expectedLockedUntil,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return errors.New("idempotency succeeded transition was not applied")
+	}
+	return nil
 }
 
-func (r *idempotencyRepository) MarkFailedRetryable(ctx context.Context, id int64, errorReason string, lockedUntil, expiresAt time.Time) error {
+func (r *idempotencyRepository) MarkFailedRetryable(ctx context.Context, id int64, expectedLockedUntil time.Time, errorReason string, lockedUntil, expiresAt time.Time) error {
 	query := `
 		UPDATE idempotency_records
 		SET status = $2,
@@ -203,15 +261,29 @@ func (r *idempotencyRepository) MarkFailedRetryable(ctx context.Context, id int6
 			expires_at = $5,
 			updated_at = NOW()
 		WHERE id = $1
+			AND status = $6
+			AND locked_until = $7
 	`
-	_, err := r.sql.ExecContext(ctx, query,
+	result, err := r.sql.ExecContext(ctx, query,
 		id,
 		service.IdempotencyStatusFailedRetryable,
 		errorReason,
 		lockedUntil,
 		expiresAt,
+		service.IdempotencyStatusProcessing,
+		expectedLockedUntil,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return errors.New("idempotency failed_retryable transition was not applied")
+	}
+	return nil
 }
 
 func (r *idempotencyRepository) DeleteExpired(ctx context.Context, now time.Time, limit int) (int64, error) {

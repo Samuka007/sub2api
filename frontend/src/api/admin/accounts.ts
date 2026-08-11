@@ -51,6 +51,49 @@ export interface AccountNotesExport {
   filename: string | null
 }
 
+export type OneClickAccountNotesEntryStatus =
+  | 'matched'
+  | 'unmatched'
+  | 'invalid'
+  | 'duplicate'
+  | 'conflict'
+
+export interface OneClickAccountNotesEntry {
+  line_number: number
+  email?: string
+  status: OneClickAccountNotesEntryStatus
+  matched_accounts: number
+  will_update_accounts: number
+  duplicate_of_line?: number
+  reason?: string
+}
+
+export interface OneClickAccountNotesPreview {
+  preview_digest: string
+  total_lines: number
+  valid_lines: number
+  invalid_lines: number
+  duplicate_lines: number
+  conflict_lines: number
+  matched_lines: number
+  unmatched_lines: number
+  matched_accounts: number
+  will_update_accounts: number
+  unchanged_accounts: number
+  can_apply: boolean
+  entries: OneClickAccountNotesEntry[]
+}
+
+export interface OneClickAccountNotesApplyResult {
+  matched_lines: number
+  matched_accounts: number
+  updated_accounts: number
+  unchanged_accounts: number
+  unmatched_lines: number
+  invalid_lines: number
+  conflict_lines: number
+}
+
 /**
  * List all accounts with pagination
  * @param page - Page number (default: 1)
@@ -297,6 +340,48 @@ export async function exportAccountNotes(
     count: Number.isFinite(count) && count > 0 ? count : 0,
     filename: filenameMatch?.[1] || null
   }
+}
+
+/** Preview a TXT note import without changing any accounts. */
+export async function previewOneClickAccountNotes(
+  file: File,
+  options?: { signal?: AbortSignal }
+): Promise<OneClickAccountNotesPreview> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const { data } = await apiClient.post<OneClickAccountNotesPreview>(
+    '/admin/accounts/one-click-notes/preview',
+    formData,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      signal: options?.signal
+    }
+  )
+  return data
+}
+
+/** Apply a previously previewed TXT note import. */
+export async function applyOneClickAccountNotes(
+  file: File,
+  previewDigest: string,
+  idempotencyKey: string,
+  options?: { signal?: AbortSignal }
+): Promise<OneClickAccountNotesApplyResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('preview_digest', previewDigest)
+  const { data } = await apiClient.post<OneClickAccountNotesApplyResult>(
+    '/admin/accounts/one-click-notes/apply',
+    formData,
+    {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+        'Idempotency-Key': idempotencyKey
+      },
+      signal: options?.signal
+    }
+  )
+  return data
 }
 
 /**
@@ -1064,6 +1149,8 @@ export const accountsAPI = {
   listAccountHealthCandidates,
   detectAccountHealth,
   exportAccountNotes,
+  previewOneClickAccountNotes,
+  applyOneClickAccountNotes,
   toggleStatus,
   testAccount,
   refreshCredentials,

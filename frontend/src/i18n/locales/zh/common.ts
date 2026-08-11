@@ -173,6 +173,7 @@ export default {
     modelPlaza: '模型广场',
     subscriptions: '订阅管理',
     accounts: '账号管理',
+    oneClickAccountNotes: '一键备注',
     accountHealthDetector: '账号健康检测',
     plusQuotaAutomation: 'Plus 用量刷新',
     proxies: 'IP管理',

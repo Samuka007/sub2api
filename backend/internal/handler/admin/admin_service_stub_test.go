@@ -773,6 +773,14 @@ func (s *stubAdminService) ResetAccountQuota(ctx context.Context, id int64) erro
 	return nil
 }
 
+func (s *stubAdminService) PreviewOneClickAccountNotes(ctx context.Context, content []byte) (*service.OneClickAccountNotesPreview, error) {
+	return &service.OneClickAccountNotesPreview{}, nil
+}
+
+func (s *stubAdminService) ApplyOneClickAccountNotes(ctx context.Context, content []byte, previewDigest string) (*service.OneClickAccountNotesApplyResult, error) {
+	return &service.OneClickAccountNotesApplyResult{}, nil
+}
+
 func (s *stubAdminService) EnsureOpenAIPrivacy(ctx context.Context, account *service.Account) string {
 	return ""
 }

@@ -165,12 +165,42 @@ type AccountBillingSettingsRepository interface {
 	) error
 }
 
+// AccountBillingSettingsWithNotesIntentRepository preserves the current
+// database note when an admin request did not explicitly include the notes
+// field, while retaining the atomic billing-settings merge.
+type AccountBillingSettingsWithNotesIntentRepository interface {
+	UpdateWithAccountBillingSettingsAndNotesIntent(
+		ctx context.Context,
+		account *Account,
+		probeEnabled *bool,
+		rateSyncEnabled *bool,
+		rateMultiplier *float64,
+		updateNotes bool,
+	) error
+}
+
+type accountNotesIntentUpdater interface {
+	UpdateWithNotesIntent(ctx context.Context, account *Account, updateNotes bool) error
+}
+
+func updateAccountWithNotesIntent(
+	ctx context.Context,
+	repo AccountRepository,
+	account *Account,
+	updateNotes bool,
+) error {
+	if updater, ok := any(repo).(accountNotesIntentUpdater); ok {
+		return updater.UpdateWithNotesIntent(ctx, account, updateNotes)
+	}
+	return repo.Update(ctx, account)
+}
+
 // AdminAccountRepository keeps admin-only write capabilities out of the shared
 // account interface so read-only gateway test doubles do not need to implement them.
 type AdminAccountRepository interface {
 	AccountRepository
 	AccountDuplicateRepository
-	AccountBillingSettingsRepository
+	AccountBillingSettingsWithNotesIntentRepository
 	// CreateSparkShadowWithGroups locks and revalidates the parent before
 	// atomically creating the Spark shadow, group bindings, and outbox event.
 	CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *Account, groups []AccountGroup) error
@@ -394,7 +424,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	// 执行更新
-	if err := s.accountRepo.Update(ctx, account); err != nil {
+	if err := updateAccountWithNotesIntent(ctx, s.accountRepo, account, req.Notes != nil); err != nil {
 		return nil, fmt.Errorf("update account: %w", err)
 	}
 
@@ -488,7 +518,7 @@ func (s *AccountService) UpdateStatus(ctx context.Context, id int64, status stri
 	account.Status = status
 	account.ErrorMessage = errorMessage
 
-	if err := s.accountRepo.Update(ctx, account); err != nil {
+	if err := updateAccountWithNotesIntent(ctx, s.accountRepo, account, false); err != nil {
 		return fmt.Errorf("update account: %w", err)
 	}
 

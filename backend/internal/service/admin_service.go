@@ -105,6 +105,8 @@ type AdminService interface {
 	ForceAntigravityPrivacy(ctx context.Context, account *Account) string
 	SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error)
 	BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error)
+	PreviewOneClickAccountNotes(ctx context.Context, content []byte) (*OneClickAccountNotesPreview, error)
+	ApplyOneClickAccountNotes(ctx context.Context, content []byte, previewDigest string) (*OneClickAccountNotesApplyResult, error)
 	CheckMixedChannelRisk(ctx context.Context, currentAccountID int64, currentAccountPlatform string, groupIDs []int64) error
 	// RevertAccountProxyFallback 将账号的 proxy_id 切回 proxy_fallback_origin_id，并清空 origin 字段。
 	// 若账号不存在返回 ErrAccountNotFound；若账号存在但不在 fallback 状态，返回 ErrAccountNotInFallback。
@@ -647,7 +649,8 @@ type adminServiceImpl struct {
 	accountRepo           AccountRepository
 	adminAccountRepo      AdminAccountRepository
 	accountDuplicateRepo  AccountDuplicateRepository
-	accountBillingRepo    AccountBillingSettingsRepository
+	accountBillingRepo    AccountBillingSettingsWithNotesIntentRepository
+	accountNoteRepo       OneClickAccountNotesRepository
 	proxyRepo             ProxyRepository
 	apiKeyRepo            APIKeyRepository
 	redeemCodeRepo        RedeemCodeRepository
@@ -701,6 +704,7 @@ func NewAdminService(
 	compositeRouteRepo CompositeModelRouteRepository,
 	compositeResolver *CompositeRouteResolver,
 ) AdminService {
+	accountNoteRepo, _ := accountRepo.(OneClickAccountNotesRepository)
 	return &adminServiceImpl{
 		userRepo:              userRepo,
 		groupRepo:             groupRepo,
@@ -709,6 +713,7 @@ func NewAdminService(
 		adminAccountRepo:      accountRepo,
 		accountDuplicateRepo:  accountRepo,
 		accountBillingRepo:    accountRepo,
+		accountNoteRepo:       accountNoteRepo,
 		proxyRepo:             proxyRepo,
 		apiKeyRepo:            apiKeyRepo,
 		redeemCodeRepo:        redeemCodeRepo,

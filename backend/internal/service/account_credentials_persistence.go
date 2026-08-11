@@ -27,7 +27,7 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
 		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)
 	}
-	return repo.Update(ctx, account)
+	return updateAccountWithNotesIntent(ctx, repo, account, false)
 }
 
 // sparkShadowAllowedCredentialKeys 是 spark 影子账号唯一可写的凭据键集合(仅模型映射)。

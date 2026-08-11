@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -143,6 +144,78 @@ func TestPromptAuditMutationAuditRoutesHaveStableActionsAndOmitBodies(t *testing
 		require.Equal(t, action, auditActionOverrides[route])
 		_, omitted := auditBodyOmittedRoutes[route]
 		require.Truef(t, omitted, "%s must not persist its credential or confirmation-bearing body", route)
+	}
+}
+
+func TestOneClickAccountNotesAuditUsesStableActionsAndOmitsUploadedBodies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 77})
+		c.Set(string(ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	router.POST("/api/v1/admin/accounts/one-click-notes/preview", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	router.POST("/api/v1/admin/accounts/one-click-notes/apply", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	canary := "user@example.com---https://mail.example.test/inbox?password=audit-canary-secret"
+	for _, test := range []struct {
+		path        string
+		applyDigest string
+	}{
+		{path: "/api/v1/admin/accounts/one-click-notes/preview"},
+		{path: "/api/v1/admin/accounts/one-click-notes/apply", applyDigest: "preview-digest"},
+	} {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		file, err := writer.CreateFormFile("file", "notes.txt")
+		require.NoError(t, err)
+		_, err = file.Write([]byte(canary))
+		require.NoError(t, err)
+		if test.applyDigest != "" {
+			require.NoError(t, writer.WriteField("preview_digest", test.applyDigest))
+		}
+		require.NoError(t, writer.Close())
+
+		request := httptest.NewRequest(http.MethodPost, test.path, &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code)
+	}
+	auditService.Stop()
+
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 2)
+
+	byAction := make(map[string]*service.AuditLog, len(logs))
+	for _, entry := range logs {
+		byAction[entry.Action] = entry
+		require.Equal(t, "<credential-bearing body omitted>", entry.RequestBody)
+		require.NotContains(t, entry.RequestBody, "audit-canary-secret")
+		require.NotContains(t, entry.RequestBody, canary)
+	}
+	require.NotNil(t, byAction["admin.accounts.one_click_notes.preview"])
+	require.NotNil(t, byAction["admin.accounts.one_click_notes.apply"])
+
+	expected := map[string]string{
+		"POST /api/v1/admin/accounts/one-click-notes/preview": "admin.accounts.one_click_notes.preview",
+		"POST /api/v1/admin/accounts/one-click-notes/apply":   "admin.accounts.one_click_notes.apply",
+	}
+	for route, action := range expected {
+		require.Equal(t, action, auditActionOverrides[route])
+		require.Contains(t, auditBodyOmittedRoutes, route)
 	}
 }
 

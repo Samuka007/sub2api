@@ -485,7 +485,18 @@ func (r *accountRepository) ListCRSAccountIDs(ctx context.Context) (map[string]i
 // UpdateWithAccountBillingSettings path so stale snapshots cannot overwrite a
 // concurrently probe-synchronized multiplier.
 func (r *accountRepository) Update(ctx context.Context, account *service.Account) error {
-	return r.updateAccount(ctx, account, nil, nil, nil)
+	return r.updateAccount(ctx, account, nil, nil, nil, true)
+}
+
+// UpdateWithNotesIntent preserves the database note for updates whose request
+// did not explicitly edit notes. This prevents a stale full account snapshot
+// from overwriting a note committed while the caller was preparing its edit.
+func (r *accountRepository) UpdateWithNotesIntent(
+	ctx context.Context,
+	account *service.Account,
+	updateNotes bool,
+) error {
+	return r.updateAccount(ctx, account, nil, nil, nil, updateNotes)
 }
 
 // UpdateWithAccountBillingSettings applies an admin account edit while
@@ -498,7 +509,20 @@ func (r *accountRepository) UpdateWithAccountBillingSettings(
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
 ) error {
-	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier)
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, true)
+}
+
+// UpdateWithAccountBillingSettingsAndNotesIntent combines the atomic billing
+// settings merge with field-presence semantics for notes.
+func (r *accountRepository) UpdateWithAccountBillingSettingsAndNotesIntent(
+	ctx context.Context,
+	account *service.Account,
+	probeEnabled *bool,
+	rateSyncEnabled *bool,
+	rateMultiplier *float64,
+	updateNotes bool,
+) error {
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, updateNotes)
 }
 
 func (r *accountRepository) updateAccount(
@@ -507,6 +531,7 @@ func (r *accountRepository) updateAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	updateNotes bool,
 ) error {
 	if account == nil {
 		return nil
@@ -538,6 +563,7 @@ func (r *accountRepository) updateAccount(
 		explicitProbeEnabled,
 		explicitRateSyncEnabled,
 		explicitRateMultiplier,
+		updateNotes,
 	)
 	if err != nil {
 		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
@@ -567,6 +593,7 @@ func (r *accountRepository) updateLockedAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	updateNotes bool,
 ) (*dbent.Account, error) {
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
@@ -581,7 +608,6 @@ func (r *accountRepository) updateLockedAccount(
 
 	builder := client.Account.UpdateOneID(account.ID).
 		SetName(account.Name).
-		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
@@ -647,8 +673,11 @@ func (r *accountRepository) updateLockedAccount(
 	} else {
 		builder.ClearSessionWindowStatus()
 	}
-	if account.Notes == nil {
-		builder.ClearNotes()
+	if updateNotes {
+		builder.SetNillableNotes(account.Notes)
+		if account.Notes == nil {
+			builder.ClearNotes()
+		}
 	}
 
 	builder.SetQuotaDimension(dbaccount.QuotaDimension(account.QuotaDimensionOrDefault()))

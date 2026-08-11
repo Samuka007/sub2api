@@ -173,6 +173,7 @@ export default {
     modelPlaza: 'Model Plaza',
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
+    oneClickAccountNotes: 'One-click Notes',
     accountHealthDetector: 'Account Health',
     plusQuotaAutomation: 'Plus Usage Reset',
     proxies: 'Proxies',
