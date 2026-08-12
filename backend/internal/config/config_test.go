@@ -615,6 +615,18 @@ func TestLoadCodexIdentityRollbackSwitchesIndependently(t *testing.T) {
 	require.True(t, cfg.Gateway.DisableCodexOriginatorNormalization)
 	require.False(t, cfg.Gateway.DisableCodexIdentityEnforcement)
 }
+func TestLoadDefaultGrokFreeQuotaSoftGate(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.Gateway.Grok.PasswordAuthEnabled)
+	require.True(t, cfg.Gateway.Grok.FreeQuotaSoftGateEnabled)
+	require.Equal(t, int64(500_000), cfg.Gateway.Grok.FreeQuotaTokenLimit)
+	require.Equal(t, 95, cfg.Gateway.Grok.FreeQuotaSoftGatePercent)
+	require.Equal(t, 24, cfg.Gateway.Grok.FreeQuotaWindowHours)
+	require.Equal(t, 60, cfg.Gateway.Grok.FreeQuotaStatsCacheSeconds)
+}
 
 func TestLoadDefaultOpenAIHTTP2Enabled(t *testing.T) {
 	resetViperWithJWTSecret(t)

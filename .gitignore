@@ -174,3 +174,6 @@ exports/
 /frontend/history/
 /.pnpm-store/
 /.vite/
+
+# Vitest / Vite cache at repo root
+.vite/

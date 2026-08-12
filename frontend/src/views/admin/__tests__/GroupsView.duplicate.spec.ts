@@ -33,6 +33,7 @@ vi.mock('@/api/admin', () => ({
       getModelsListCandidates,
       getUsageSummary,
       getCapacitySummary,
+      getLiveCapability,
       getAll: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
