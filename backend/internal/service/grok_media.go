@@ -952,7 +952,7 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		result.VideoResolution = billed.VideoResolution
 		result.VideoDurationSeconds = billed.VideoDurationSeconds
 	}
-	return result, nil
+	return &GrokMediaForwardResult{OpenAIForwardResult: result}, nil
 }
 
 func grokMediaSignedVideoContentURL(body []byte, requestID string) (string, error) {

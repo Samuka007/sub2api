@@ -29,12 +29,7 @@ type openaiStreamingResult struct {
 	imageCount         int
 	imageOutputSizes   []string
 	clientDisconnected bool
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
-	searchCount      int
+	searchCount        int
 }
 
 type openaiNonStreamingResult struct {
