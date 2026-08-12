@@ -53,7 +53,6 @@ func (e GrokMediaEndpoint) IsGenerationRequest() bool {
 	}
 }
 
-
 type GrokMediaRequestInfo struct {
 	Model           string
 	Prompt          string
