@@ -409,6 +409,22 @@ func (c *grokMediaBindingCache) DeleteSessionAccountID(_ context.Context, _ int6
 	return nil
 }
 
+func (c *grokMediaBindingCache) SetGrokVideoPendingBilling(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) GetGrokVideoPendingBilling(context.Context, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *grokMediaBindingCache) ClaimGrokVideoBilled(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (c *grokMediaBindingCache) ReleaseGrokVideoBilled(context.Context, string) error {
+	return nil
+}
+
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	var requestBody []byte
 	if req.Body != nil {

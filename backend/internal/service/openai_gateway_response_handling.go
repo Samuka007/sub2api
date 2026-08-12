@@ -317,7 +317,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			imageCount:         imageCounter.Count(),
 			imageOutputSizes:   imageCounter.Sizes(),
 			clientDisconnected: clientDisconnected,
-			searchCount:      searchCounter,
+			searchCount:     searchCounter,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
