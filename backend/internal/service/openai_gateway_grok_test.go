@@ -1285,9 +1285,6 @@ func TestForwardGrokMediaVideoGenerationReturnsUsageAndResponseID(t *testing.T) 
 
 	result, err := svc.ForwardGrokMedia(context.Background(), c, account, GrokMediaEndpointVideosGenerations, "", body, "application/json")
 	require.NoError(t, err)
-	require.False(t, c.Writer.Written())
-	require.Empty(t, recorder.Body.String())
-	require.NoError(t, result.CommitResponse(c))
 	require.Equal(t, http.StatusAccepted, recorder.Code)
 	require.JSONEq(t, `{"request_id":"video-request-123","usage":{"prompt_tokens":3,"completion_tokens":4}}`, recorder.Body.String())
 	require.Equal(t, "https://xai.test/v1/videos/generations", upstream.lastReq.URL.String())
@@ -1512,8 +1509,6 @@ func TestForwardGrokMediaVideoMutationEndpoints(t *testing.T) {
 
 			result, err := svc.ForwardGrokMedia(context.Background(), c, account, tt.endpoint, "", body, "application/json")
 			require.NoError(t, err)
-			require.False(t, c.Writer.Written())
-			require.NoError(t, result.CommitResponse(c))
 			require.Equal(t, http.StatusOK, recorder.Code)
 			require.JSONEq(t, `{"request_id":"video-mutation-123"}`, recorder.Body.String())
 			require.Equal(t, "https://xai.test/v1"+tt.path, upstream.lastReq.URL.String())

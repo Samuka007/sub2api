@@ -319,7 +319,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
 		writerSizeBeforeForward := c.Writer.Size()
-		result, err := func() (*service.GrokMediaForwardResult, error) {
+		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
@@ -410,53 +410,16 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			return
 		}
 
-		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result.OpenAIForwardResult), true, nil)
-		recordUsage := func() {
-			// Fork failure paths (missing response id, bind failure, commit
-			// failure) always bill the already-consumed upstream work: a video
-			// request that failed to persist its binding must not silently
-			// become unbilled, since status polling can no longer attribute it
-			// to an account. The successful create path keeps the upstream
-			// deferred-billing gate below (status/content polling bills).
-			if endpoint.IsGenerationRequest() && strings.TrimSpace(requestModel) != "" {
-				billResult := result.OpenAIForwardResult
-				// Upstream v0.1.173 defers video billing to status polling and
-				// leaves create-time VideoCount at 0; the fork's failure path
-				// bills one video unit immediately so failed persistence does
-				// not silently drop the charge.
-				if isGrokVideoCreateEndpoint(endpoint) && billResult != nil && billResult.VideoCount <= 0 {
-					billResult.VideoCount = 1
-				}
-				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, requestModel, body, requestID)
-			}
-		}
-		if endpoint.DefersSuccessResponse() {
-			responseID := strings.TrimSpace(result.ResponseID)
-			if responseID == "" {
-				reqLog.Warn("grok_media.video_response_id_missing", zap.Int64("account_id", account.ID))
-				recordUsage()
-				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Failed to persist video task")
-				return
-			}
+		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result), true, nil)
+		if isGrokVideoCreateEndpoint(endpoint) && strings.TrimSpace(result.ResponseID) != "" {
 			if err := h.gatewayService.BindGrokMediaVideoRequestAccount(
-				requestCtx, apiKey.GroupID, responseID, subject.UserID, apiKey.ID, account.ID,
+				requestCtx, apiKey.GroupID, result.ResponseID, subject.UserID, apiKey.ID, account.ID,
 			); err != nil {
 				reqLog.Warn("grok_media.bind_video_request_account_failed",
 					zap.Int64("account_id", account.ID),
-					zap.String("request_id", responseID),
+					zap.String("request_id", result.ResponseID),
 					zap.Error(err),
 				)
-				recordUsage()
-				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Failed to persist video task")
-				return
-			}
-			if err := result.CommitResponse(c); err != nil {
-				reqLog.Error("grok_media.commit_deferred_response_failed", zap.Error(err))
-				recordUsage()
-				if !c.Writer.Written() {
-					h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
-				}
-				return
 			}
 			// Defer billing until status polling observes video.url. Persist create-time
 			// model/duration/resolution so status can still price if upstream omits them.
@@ -492,11 +455,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		// Both paths share the same claim key so the customer is charged once.
 		if endpoint == service.GrokMediaEndpointVideoStatus || endpoint == service.GrokMediaEndpointVideoContent {
 			taskID := strings.TrimSpace(requestID)
-			if billResult := prepareGrokVideoCompletionBilling(requestCtx, h, reqLog, apiKey, subject, taskID, result.OpenAIForwardResult); billResult != nil {
+			if billResult := prepareGrokVideoCompletionBilling(requestCtx, h, reqLog, apiKey, subject, taskID, result); billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, taskID)
 			}
-		} else if shouldRecordGrokMediaUsage(endpoint, requestModel, result.OpenAIForwardResult) {
-			recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result.OpenAIForwardResult, requestModel, body, requestID)
+		} else if shouldRecordGrokMediaUsage(endpoint, requestModel, result) {
+			recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result, requestModel, body, requestID)
 		}
 		reqLog.Debug("grok_media.request_completed",
 			zap.Int64("account_id", account.ID),
