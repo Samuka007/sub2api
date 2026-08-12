@@ -16,7 +16,6 @@ const {
   showSuccess,
   isCurrentStep,
   nextStep,
-  getLiveCapability,
 } = vi.hoisted(() => ({
   listGroups: vi.fn(),
   getAllGroups: vi.fn(),
@@ -29,7 +28,6 @@ const {
   showSuccess: vi.fn(),
   isCurrentStep: vi.fn(),
   nextStep: vi.fn(),
-  getLiveCapability: vi.fn(),
 }))
 
 const messages: Record<string, string> = {
@@ -60,7 +58,6 @@ vi.mock('@/api/admin', () => ({
       update: vi.fn(),
       delete: vi.fn(),
       updateSortOrder: vi.fn(),
-      getLiveCapability,
     },
     accounts: {
       list: listAccounts,
@@ -253,7 +250,6 @@ describe('admin GroupsView column settings', () => {
     getCapacitySummary.mockResolvedValue([])
     getLiveCapability.mockResolvedValue({ supported: false })
     listAccounts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
-    getLiveCapability.mockResolvedValue({ supported: false })
     isCurrentStep.mockReturnValue(false)
   })
 
