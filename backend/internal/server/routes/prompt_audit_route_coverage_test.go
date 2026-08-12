@@ -54,10 +54,8 @@ func TestEveryGatewayPOSTRouteIsClassifiedForPromptAuditCoverage(t *testing.T) {
 		"/antigravity/v1/messages/count_tokens": "tokenization only; Antigravity rejects it without executing a model request",
 		"/messages/count_tokens":                "tokenization only; it does not execute a model request",
 		"/images/batches/:id/cancel":            "control-plane cancellation with no user prompt",
-		"/messages/count_tokens":     "tokenization only; it does not execute a model request",
-		"/images/batches/:id/cancel": "control-plane cancellation with no user prompt",
-		"/stt":                       "speech transcription is not a text-generation prompt",
-		"/custom-voices":             "voice profile management has no model prompt",
+		"/stt":                                  "speech transcription is not a text-generation prompt",
+		"/custom-voices":                        "voice profile management has no model prompt",
 	}
 
 	unclassified := make([]string, 0)
