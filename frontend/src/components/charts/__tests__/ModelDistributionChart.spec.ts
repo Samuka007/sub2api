@@ -156,9 +156,10 @@ describe('ModelDistributionChart', () => {
         modelStats: [],
         enableRankingView: true,
         rankingItems: [
-          { user_id: 1, email: 'alpha@example.com', username: 'alpha', actual_cost: 12, requests: 10, tokens: 1000 },
-          { user_id: 2, email: 'beta@example.com', username: '   ', actual_cost: 8, requests: 6, tokens: 600 },
-          { user_id: 3, email: '   ', username: '', actual_cost: 0, requests: 0, tokens: 0 },
+          { user_id: 1, email: 'alpha@example.com', username: ' alpha ', notes: 'ignored note', actual_cost: 12, requests: 10, tokens: 1000 },
+          { user_id: 2, email: ' beta@example.com ', username: '   ', notes: ' beta note ', actual_cost: 8, requests: 6, tokens: 600 },
+          { user_id: 3, email: ' gamma@example.com ', username: ' ', notes: '   ', actual_cost: 0, requests: 0, tokens: 0 },
+          { user_id: 4, email: '   ', username: ' ', notes: '\t\n', actual_cost: 0, requests: 0, tokens: 0 },
         ],
         rankingTotalActualCost: 30,
         rankingTotalRequests: 20,
@@ -178,24 +179,27 @@ describe('ModelDistributionChart', () => {
     const chartData = JSON.parse(wrapper.find('.chart-data').text())
     expect(chartData.labels).toEqual([
       '#1 alpha',
-      '#2 beta@example.com',
-      '#3 User #3',
+      '#2 beta note',
+      '#3 gamma@example.com',
+      '#4 User #4',
       'Others',
     ])
-    expect(chartData.datasets[0].data).toEqual([12, 8, 0, 10])
+    expect(chartData.datasets[0].data).toEqual([12, 8, 0, 0, 10])
     expect(chartData.datasets[0].backgroundColor[0]).toBe('#3b82f6')
-    expect(chartData.datasets[0].backgroundColor[3]).toBe('#94a3b8')
-    expect(chartData.datasets[0].backgroundColor[3]).not.toBe(chartData.datasets[0].backgroundColor[0])
+    expect(chartData.datasets[0].backgroundColor[4]).toBe('#94a3b8')
+    expect(chartData.datasets[0].backgroundColor[4]).not.toBe(chartData.datasets[0].backgroundColor[0])
 
     const rows = wrapper.findAll('tbody tr')
-    expect(rows).toHaveLength(4)
+    expect(rows).toHaveLength(5)
     expect(rows[0].text()).toContain('alpha')
     expect(rows[0].text()).not.toContain('alpha@example.com')
-    expect(rows[1].text()).toContain('beta@example.com')
-    expect(rows[2].text()).toContain('User #3')
-    expect(rows[3].text()).toContain('Others')
-    expect(rows[3].text()).toContain('4')
-    expect(rows[3].text()).toContain('400')
-    expect(rows[3].text()).toContain('$10.00')
+    expect(rows[1].text()).toContain('beta note')
+    expect(rows[1].text()).not.toContain('beta@example.com')
+    expect(rows[2].text()).toContain('gamma@example.com')
+    expect(rows[3].text()).toContain('User #4')
+    expect(rows[4].text()).toContain('Others')
+    expect(rows[4].text()).toContain('4')
+    expect(rows[4].text()).toContain('400')
+    expect(rows[4].text()).toContain('$10.00')
   })
 })

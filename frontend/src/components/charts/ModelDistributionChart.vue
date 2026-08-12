@@ -423,6 +423,7 @@ const otherRankingItem = computed<RankingDisplayItem | null>(() => {
     user_id: 0,
     email: '',
     username: '',
+    notes: '',
     actual_cost: otherActualCost,
     requests: otherRequests,
     tokens: otherTokens,
@@ -497,6 +498,7 @@ const formatNumber = (value: number): string => {
 
 const getRankingUserLabel = (item: UserSpendingRankingItem): string => {
   if (item.username?.trim()) return item.username.trim()
+  if (item.notes?.trim()) return item.notes.trim()
   if (item.email?.trim()) return item.email.trim()
   return t('admin.redeem.userPrefix', { id: item.user_id })
 }

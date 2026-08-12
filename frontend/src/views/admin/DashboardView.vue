@@ -518,6 +518,11 @@ const userTrendChartData = computed(() => {
       return username
     }
 
+    const notes = point.notes?.trim()
+    if (notes) {
+      return notes
+    }
+
     const email = point.email?.trim()
     if (email) {
       return email

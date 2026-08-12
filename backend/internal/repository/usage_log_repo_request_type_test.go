@@ -717,10 +717,10 @@ func TestUsageLogRepositoryGetUserSpendingRanking(t *testing.T) {
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
 
-	rows := sqlmock.NewRows([]string{"user_id", "email", "username", "actual_cost", "requests", "tokens", "total_actual_cost", "total_requests", "total_tokens"}).
-		AddRow(int64(2), "beta@example.com", "beta", 12.5, int64(9), int64(900), 40.0, int64(30), int64(2600)).
-		AddRow(int64(1), "alpha@example.com", "alpha", 12.5, int64(8), int64(800), 40.0, int64(30), int64(2600)).
-		AddRow(int64(3), "gamma@example.com", "", 4.25, int64(5), int64(300), 40.0, int64(30), int64(2600))
+	rows := sqlmock.NewRows([]string{"user_id", "email", "username", "notes", "actual_cost", "requests", "tokens", "total_actual_cost", "total_requests", "total_tokens"}).
+		AddRow(int64(2), " beta@example.com ", " beta ", " beta note ", 12.5, int64(9), int64(900), 40.0, int64(30), int64(2600)).
+		AddRow(int64(1), "alpha@example.com", "alpha", "", 12.5, int64(8), int64(800), 40.0, int64(30), int64(2600)).
+		AddRow(int64(3), "gamma@example.com", "", "gamma note", 4.25, int64(5), int64(300), 40.0, int64(30), int64(2600))
 
 	mock.ExpectQuery("WITH user_spend AS \\(").
 		WithArgs(start, end, 12).
@@ -730,14 +730,38 @@ func TestUsageLogRepositoryGetUserSpendingRanking(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, &usagestats.UserSpendingRankingResponse{
 		Ranking: []usagestats.UserSpendingRankingItem{
-			{UserID: 2, Email: "beta@example.com", Username: "beta", ActualCost: 12.5, Requests: 9, Tokens: 900},
+			{UserID: 2, Email: " beta@example.com ", Username: " beta ", Notes: " beta note ", ActualCost: 12.5, Requests: 9, Tokens: 900},
 			{UserID: 1, Email: "alpha@example.com", Username: "alpha", ActualCost: 12.5, Requests: 8, Tokens: 800},
-			{UserID: 3, Email: "gamma@example.com", ActualCost: 4.25, Requests: 5, Tokens: 300},
+			{UserID: 3, Email: "gamma@example.com", Notes: "gamma note", ActualCost: 4.25, Requests: 5, Tokens: 300},
 		},
 		TotalActualCost: 40.0,
 		TotalRequests:   30,
 		TotalTokens:     2600,
 	}, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUsageLogRepositoryGetUserUsageTrendIncludesUserNotes(t *testing.T) {
+	db, mock := newSQLMock(t)
+	repo := &usageLogRepository{sql: db}
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	rows := sqlmock.NewRows([]string{
+		"date", "user_id", "email", "username", "notes",
+		"requests", "tokens", "cost", "actual_cost",
+	}).AddRow("2025-01-01", int64(7), "user@example.com", "user", "admin note", int64(2), int64(300), 3.5, 3.0)
+
+	mock.ExpectQuery("WITH top_users AS \\(").
+		WithArgs(start, end, 10, start, end).
+		WillReturnRows(rows)
+
+	got, err := repo.GetUserUsageTrend(context.Background(), start, end, "day", 10)
+	require.NoError(t, err)
+	require.Equal(t, []usagestats.UserUsageTrendPoint{{
+		Date: "2025-01-01", UserID: 7, Email: "user@example.com", Username: "user", Notes: "admin note",
+		Requests: 2, Tokens: 300, Cost: 3.5, ActualCost: 3.0,
+	}}, got)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
