@@ -303,6 +303,11 @@ type QuotaRecoveryConfig struct {
 	JitterSeconds   int  `mapstructure:"jitter_seconds"`
 }
 
+// minQuotaRecoveryTimeoutSeconds leaves enough time for the complete OpenAI
+// recovery chain, which can make up to five serial upstream requests. A lower
+// deadline can expire after a reset credit is consumed but before verification.
+const minQuotaRecoveryTimeoutSeconds = 75
+
 type BatchImageConfig struct {
 	Enabled                           bool   `mapstructure:"enabled"`
 	MaxItemsPerJobDefault             int    `mapstructure:"max_items_per_job_default"`
@@ -2358,7 +2363,7 @@ func setDefaults() {
 	viper.SetDefault("quota_recovery.interval_seconds", 86400)
 	viper.SetDefault("quota_recovery.batch_size", 50)
 	viper.SetDefault("quota_recovery.concurrency", 3)
-	viper.SetDefault("quota_recovery.timeout_seconds", 75)
+	viper.SetDefault("quota_recovery.timeout_seconds", minQuotaRecoveryTimeoutSeconds)
 	viper.SetDefault("quota_recovery.jitter_seconds", 10)
 
 	// Gateway
@@ -3275,8 +3280,12 @@ func (c *Config) Validate() error {
 		if c.QuotaRecovery.Concurrency <= 0 {
 			return fmt.Errorf("quota_recovery.concurrency must be positive")
 		}
-		if c.QuotaRecovery.TimeoutSeconds <= 0 {
-			return fmt.Errorf("quota_recovery.timeout_seconds must be positive")
+		if c.QuotaRecovery.TimeoutSeconds < minQuotaRecoveryTimeoutSeconds {
+			return fmt.Errorf(
+				"quota_recovery.timeout_seconds must be at least %d seconds when quota_recovery.enabled=true; update QUOTA_RECOVERY_TIMEOUT_SECONDS or quota_recovery.timeout_seconds to %d or higher before starting",
+				minQuotaRecoveryTimeoutSeconds,
+				minQuotaRecoveryTimeoutSeconds,
+			)
 		}
 		if c.QuotaRecovery.JitterSeconds < 0 {
 			return fmt.Errorf("quota_recovery.jitter_seconds must be non-negative")

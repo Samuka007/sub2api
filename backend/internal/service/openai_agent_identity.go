@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -250,6 +251,11 @@ func ensureAgentIdentityTaskForAccount(ctx context.Context, repo AccountReposito
 	if credAccount == nil || !credAccount.IsOpenAIAgentIdentity() {
 		return errors.New("agent identity credentials are unavailable")
 	}
+	quotaScoped := quotaRecoveryCredentialRefreshReceiptFromContext(ctx) != nil
+	if quotaScoped && (repo == nil || credAccount.ID <= 0) {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return ErrQuotaRecoveryCredentialCASUnavailable
+	}
 	currentTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
 	if currentTaskID != "" && (expectedTaskID == "" || currentTaskID != expectedTaskID) {
 		return nil
@@ -274,10 +280,23 @@ func ensureAgentIdentityTaskForAccount(ctx context.Context, repo AccountReposito
 	// would allow sequential duplicate registrations after the first writer
 	// has already persisted a new task.
 	if repo != nil && credAccount.ID > 0 {
-		if refreshed, refreshErr := repo.GetByID(ctx, credAccount.ID); refreshErr == nil && refreshed != nil {
+		refreshed, refreshErr := repo.GetByID(ctx, credAccount.ID)
+		if refreshErr != nil || refreshed == nil {
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				if refreshErr == nil {
+					refreshErr = errors.New("account not found")
+				}
+				return fmt.Errorf("%w: agent identity credential reread failed: %v", ErrQuotaRecoveryCredentialStateChanged, refreshErr)
+			}
+		} else {
 			if refreshed.IsShadow() {
-				if resolved, resolveErr := resolveCredentialAccount(ctx, repo, refreshed); resolveErr == nil && resolved != nil {
+				resolved, resolveErr := resolveCredentialAccount(ctx, repo, refreshed)
+				if resolveErr == nil && resolved != nil {
 					refreshed = resolved
+				} else if quotaScoped {
+					invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+					return fmt.Errorf("%w: agent identity credential owner resolve failed: %v", ErrQuotaRecoveryCredentialStateChanged, resolveErr)
 				}
 			}
 			if refreshed.IsOpenAIAgentIdentity() {
@@ -285,12 +304,22 @@ func ensureAgentIdentityTaskForAccount(ctx context.Context, repo AccountReposito
 				if !account.IsShadow() {
 					account.Credentials = shallowCopyMap(credAccount.Credentials)
 				}
+			} else if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return fmt.Errorf("%w: agent identity credential identity changed", ErrQuotaRecoveryCredentialStateChanged)
 			}
 		}
 	}
 	currentTaskID = strings.TrimSpace(credAccount.GetCredential("task_id"))
 	if currentTaskID != "" && (expectedTaskID == "" || currentTaskID != expectedTaskID) {
 		return nil
+	}
+	// Registering a task is an upstream side effect. A quota-scoped probe must
+	// prove that the lock-protected reread is still the exact credential owner
+	// generation bound to its receipt before that side effect can occur.
+	if err := validateQuotaRecoveryCredentialOwner(ctx, credAccount); err != nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return err
 	}
 	newTaskID, err := registerAgentIdentityTask(ctx, credAccount)
 	if err != nil {
@@ -301,14 +330,43 @@ func ensureAgentIdentityTaskForAccount(ctx context.Context, repo AccountReposito
 		credentials[key] = value
 	}
 	credentials["task_id"] = newTaskID
-	if err := persistAccountCredentials(ctx, repo, credAccount, credentials); err != nil {
-		return err
+	persistenceCtx := ctx
+	var persistenceCancel context.CancelFunc
+	if quotaScoped {
+		persistenceCtx, persistenceCancel = quotaRecoveryPostSideEffectContext(ctx)
+		defer persistenceCancel()
+		if ctx.Err() != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		}
+	}
+	persistErr := persistAccountCredentials(persistenceCtx, repo, credAccount, credentials)
+	if persistErr != nil {
+		if quotaScoped {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				slog.Error("agent_identity_task_post_cancel_persist_failed",
+					"account_id", credAccount.ID,
+					"error", persistErr,
+				)
+				return ctxErr
+			}
+		}
+		return persistErr
 	}
 	if !account.IsShadow() && account != credAccount {
 		account.Credentials = shallowCopyMap(credAccount.Credentials)
 	}
 	if wsInvalidator != nil {
 		wsInvalidator.InvalidateAgentIdentityWSConnections(credAccount.ID)
+	}
+	if quotaScoped {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return ctxErr
+		}
+	}
+	if err := validateQuotaRecoveryCredentialOwner(ctx, credAccount); err != nil {
+		return err
 	}
 	return nil
 }

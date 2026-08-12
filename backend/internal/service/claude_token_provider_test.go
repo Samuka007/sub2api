@@ -25,6 +25,7 @@ type claudeTokenCacheStub struct {
 	releaseLockErr   error
 	getCalled        int32
 	setCalled        int32
+	deleteCalled     int32
 	lockCalled       int32
 	unlockCalled     int32
 	simulateLockRace bool
@@ -59,6 +60,7 @@ func (s *claudeTokenCacheStub) SetAccessToken(ctx context.Context, cacheKey stri
 }
 
 func (s *claudeTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey string) error {
+	atomic.AddInt32(&s.deleteCalled, 1)
 	if s.deleteErr != nil {
 		return s.deleteErr
 	}

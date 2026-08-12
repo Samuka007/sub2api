@@ -189,6 +189,7 @@ func ProvideAccountUsageService(
 	openAIQuotaService *OpenAIQuotaService,
 	cache *UsageCache,
 	identityCache IdentityCache,
+	tokenCache GeminiTokenCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
 	openAIGatewayService *OpenAIGatewayService,
 ) *AccountUsageService {
@@ -205,12 +206,14 @@ func ProvideAccountUsageService(
 		identityCache,
 		tlsFPProfileService,
 	)
+	service.tokenCache = tokenCache
 	service.agentIdentityWS = openAIGatewayService
 	return service
 }
 
-// ProvideQuotaRecoveryChecker binds the concrete read-only quota services to
-// the provider-neutral Hermes checker interfaces.
+// ProvideQuotaRecoveryChecker binds the concrete quota services to the
+// provider-neutral Hermes checker interfaces. The OpenAI interface requires
+// strict reset-credit detail reads so automation fails closed on partial data.
 func ProvideQuotaRecoveryChecker(
 	openAIQuotaService *OpenAIQuotaService,
 	accountUsageService *AccountUsageService,

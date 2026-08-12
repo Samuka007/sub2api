@@ -139,11 +139,18 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
 		return "", errors.New("not an openai oauth account")
 	}
+	quotaScoped := quotaRecoveryCredentialRefreshReceiptFromContext(ctx) != nil
+	if quotaScoped {
+		if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return "", err
+		}
+	}
 
 	cacheKey := OpenAITokenCacheKey(account)
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !quotaScoped {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -160,6 +167,10 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if needsRefresh && strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" {
 		if expiresAt != nil && !time.Now().Before(*expiresAt) {
 			const reason = "openai access_token expired and refresh_token is missing"
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return "", errors.New(reason)
+			}
 			// 永久故障：缺失 refresh_token 时账号无法自愈，必须立即从调度池剔除，
 			// 否则会被反复选中、每次都在 token 阶段直接返回错误，对用户呈现持续 502。
 			p.disableAccountMissingRefreshToken(account, reason)
@@ -175,6 +186,10 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 		result, err := p.refreshAPI.RefreshIfNeeded(ctx, account, p.executor, openAITokenRefreshSkew)
 		if err != nil {
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return "", err
+			}
 			if p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
 				return "", err
 			}
@@ -182,6 +197,10 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			p.metrics.refreshFailure.Add(1)
 			refreshFailed = true
 		} else if result.LockHeld {
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return "", ErrQuotaRecoveryCredentialRefreshLockHeld
+			}
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache {
 				p.metrics.lockContention.Add(1)
 				p.metrics.touchNow()
@@ -202,6 +221,9 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			account = result.Account
 			expiresAt = account.GetCredentialAsTime("expires_at")
 		}
+	} else if needsRefresh && quotaScoped {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return "", errors.New("quota recovery OpenAI OAuth refresh is not configured")
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
 		p.metrics.refreshRequests.Add(1)
@@ -227,13 +249,22 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	}
 
+	if quotaScoped {
+		if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return "", err
+		}
+		if err := deleteQuotaRecoveryCachedAccessToken(ctx, p.tokenCache, cacheKey, account); err != nil {
+			return "", err
+		}
+	}
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
 		return "", errors.New("access_token not found in credentials")
 	}
 
 	// 3) Populate cache with TTL.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !quotaScoped {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
 			slog.Debug("openai_token_version_stale_use_latest", "account_id", account.ID)

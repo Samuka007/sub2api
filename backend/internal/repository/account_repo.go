@@ -52,6 +52,7 @@ type accountRepository struct {
 }
 
 var _ service.QuotaRecoveryAccountRepository = (*accountRepository)(nil)
+var _ service.AccountCredentialConditionalUpdateRepository = (*accountRepository)(nil)
 
 var schedulerNeutralExtraKeyPrefixes = []string{
 	"codex_primary_",
@@ -943,6 +944,113 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 		r.syncSchedulerAccountSnapshot(baseCtx, id)
 	}
 	return nil
+}
+
+// UpdateCredentialsIfUnchanged is the quota-probe credential persistence
+// boundary. It protects the exact credential document and credential identity,
+// while deliberately allowing unrelated row fields to advance after the
+// provider call. The scheduler outbox publication and credential update are one
+// statement, and both previous/new UpdatedAt values are returned.
+func (r *accountRepository) UpdateCredentialsIfUnchanged(
+	ctx context.Context,
+	expected service.AccountCredentialSnapshot,
+	credentials map[string]any,
+) (service.AccountCredentialConditionalUpdateResult, bool, error) {
+	if r == nil || r.sql == nil {
+		return service.AccountCredentialConditionalUpdateResult{}, false, errors.New("account repository SQL executor is not configured")
+	}
+	if expected.AccountID <= 0 || expected.UpdatedAt.IsZero() ||
+		expected.Platform == "" || expected.Type == "" || expected.QuotaDimension == "" {
+		return service.AccountCredentialConditionalUpdateResult{}, false, errors.New("invalid expected account credential snapshot")
+	}
+	expectedJSON, err := json.Marshal(normalizeJSONMap(expected.Credentials))
+	if err != nil {
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+	credentialsJSON, err := json.Marshal(normalizeJSONMap(credentials))
+	if err != nil {
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+
+	rows, err := r.sql.QueryContext(ctx, `
+		WITH locked AS MATERIALIZED (
+			SELECT a.id, a.updated_at
+			FROM accounts AS a
+			WHERE a.id = $2
+				AND a.deleted_at IS NULL
+				AND a.credentials = $3::jsonb
+				AND a.platform = $4
+				AND a.type = $5
+				AND a.parent_account_id IS NOT DISTINCT FROM $6
+				AND a.quota_dimension = $7
+			FOR UPDATE
+		), updated AS (
+			UPDATE accounts AS a
+			SET credentials = $1::jsonb,
+				updated_at = GREATEST(clock_timestamp(), locked.updated_at + interval '1 microsecond')
+			FROM locked
+			WHERE a.id = locked.id
+			RETURNING a.id, locked.updated_at AS previous_updated_at, a.updated_at
+		), published AS (
+			INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+			SELECT $8, updated.id, NULL, NULL FROM updated
+			RETURNING account_id
+		)
+		SELECT updated.previous_updated_at, updated.updated_at
+		FROM updated
+		JOIN published ON published.account_id = updated.id
+	`,
+		string(credentialsJSON),
+		expected.AccountID,
+		string(expectedJSON),
+		expected.Platform,
+		expected.Type,
+		expected.ParentAccountID,
+		expected.QuotaDimension,
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+
+	if !rows.Next() {
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return service.AccountCredentialConditionalUpdateResult{}, false, rowsErr
+		}
+		if closeErr != nil {
+			return service.AccountCredentialConditionalUpdateResult{}, false, closeErr
+		}
+		return service.AccountCredentialConditionalUpdateResult{}, false, nil
+	}
+	var result service.AccountCredentialConditionalUpdateResult
+	if err := rows.Scan(&result.PreviousUpdatedAt, &result.UpdatedAt); err != nil {
+		_ = rows.Close()
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+	if rows.Next() {
+		_ = rows.Close()
+		return service.AccountCredentialConditionalUpdateResult{}, false, errors.New("conditional credential update returned multiple rows")
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return service.AccountCredentialConditionalUpdateResult{}, false, err
+	}
+	if result.PreviousUpdatedAt.IsZero() || result.UpdatedAt.IsZero() {
+		return service.AccountCredentialConditionalUpdateResult{}, false, errors.New("conditional credential update returned zero updated_at")
+	}
+	if !result.UpdatedAt.After(result.PreviousUpdatedAt) {
+		return service.AccountCredentialConditionalUpdateResult{}, false, errors.New("conditional credential update returned non-monotonic updated_at")
+	}
+
+	r.syncSchedulerAccountSnapshot(ctx, expected.AccountID)
+	result.PreviousUpdatedAt = result.PreviousUpdatedAt.UTC()
+	result.UpdatedAt = result.UpdatedAt.UTC()
+	return result, true, nil
 }
 
 type deletedAccountState struct {
@@ -2388,49 +2496,51 @@ func (r *accountRepository) ClearRateLimitIfUnchanged(
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
+	credentialOwnerJSON, err := json.Marshal(normalizeJSONMap(observation.CredentialOwnerCredentials))
+	if err != nil {
+		return false, err
+	}
 	result, err := r.sql.ExecContext(ctx, `
 		WITH credential_owner AS MATERIALIZED (
-			SELECT owner.id
+			SELECT owner.id, owner.platform, owner.type, owner.parent_account_id
 			FROM accounts AS owner
 			WHERE owner.id = $5
-				AND owner.id <> $1
 				AND owner.deleted_at IS NULL
 				AND owner.updated_at = $6
-				AND owner.platform = 'openai'
-				AND owner.type = 'oauth'
-				AND owner.parent_account_id IS NULL
+				AND owner.credentials = $7::jsonb
+				AND owner.proxy_id IS NOT DISTINCT FROM $8
+				AND owner.proxy_fallback_origin_id IS NOT DISTINCT FROM $9
+				AND owner.platform = $10
+				AND owner.type = $11
+				AND owner.parent_account_id IS NOT DISTINCT FROM $12
+				AND owner.status = $13
+				AND owner.schedulable = $14
+				AND owner.quota_dimension = $15
 			FOR SHARE
-		),
-		recovery_target AS MATERIALIZED (
-			SELECT $1::bigint AS account_id, $5::bigint AS credential_owner_id
-			WHERE $5 = $1
-			UNION ALL
-			SELECT $1::bigint, credential_owner.id
-			FROM credential_owner
 		),
 		updated AS (
 			UPDATE accounts AS a
 			SET rate_limited_at = NULL,
 				rate_limit_reset_at = NULL,
-				updated_at = NOW()
-				FROM recovery_target AS target
-				WHERE a.id = target.account_id
+				updated_at = GREATEST(clock_timestamp(), a.updated_at + interval '1 microsecond')
+				FROM credential_owner AS owner
+				WHERE a.id = $1
 					AND a.deleted_at IS NULL
 					AND a.status = 'active'
 					AND a.schedulable = TRUE
-					AND a.type = 'oauth'
-					AND a.platform IN ('openai', 'anthropic')
+					AND a.type = owner.type
+					AND a.platform = owner.platform
 					AND a.rate_limited_at = $2
 					AND a.rate_limit_reset_at = $3
 					AND a.updated_at = $4
 					AND (
-						(target.credential_owner_id = a.id AND a.parent_account_id IS NULL)
-						OR a.parent_account_id = target.credential_owner_id
+						(owner.id = a.id AND a.parent_account_id IS NOT DISTINCT FROM owner.parent_account_id)
+						OR (owner.id <> a.id AND a.parent_account_id = owner.id)
 					)
 				RETURNING a.id
 			)
 			INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
-			SELECT $7, updated.id, NULL, NULL FROM updated
+			SELECT $16, updated.id, NULL, NULL FROM updated
 		`,
 		observation.AccountID,
 		observation.RateLimitedAt,
@@ -2438,6 +2548,15 @@ func (r *accountRepository) ClearRateLimitIfUnchanged(
 		observation.AccountUpdatedAt,
 		observation.CredentialOwnerID,
 		observation.CredentialOwnerUpdatedAt,
+		string(credentialOwnerJSON),
+		observation.CredentialOwnerProxyID,
+		observation.CredentialOwnerProxyFallbackOriginID,
+		observation.CredentialOwnerPlatform,
+		observation.CredentialOwnerType,
+		observation.CredentialOwnerParentAccountID,
+		observation.CredentialOwnerStatus,
+		observation.CredentialOwnerSchedulable,
+		observation.CredentialOwnerQuotaDimension,
 		service.SchedulerOutboxEventAccountChanged,
 	)
 	if err != nil {

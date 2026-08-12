@@ -38,6 +38,7 @@ const (
 	defaultRefreshLockTTL                   = 60 * time.Second
 	defaultRefreshLockReleaseTimeout        = 2 * time.Second
 	defaultRefreshPostPersistCleanupTimeout = 2 * time.Second
+	quotaRecoveryRefreshLockSafetyMargin    = time.Second
 )
 
 var (
@@ -146,6 +147,27 @@ func NewOAuthRefreshAPI(accountRepo AccountRepository, tokenCache GeminiTokenCac
 }
 
 // getLocalLock 返回指定 cacheKey 的进程内互斥锁
+func (api *OAuthRefreshAPI) refreshLockTTL(ctx context.Context, quotaScoped bool) (time.Duration, error) {
+	ttl := api.lockTTL
+	if !quotaScoped {
+		return ttl, nil
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, fmt.Errorf("%w: quota recovery refresh context has no deadline", ErrQuotaRecoveryCredentialRefreshLockUnavailable)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, fmt.Errorf("%w: %v", ErrQuotaRecoveryCredentialRefreshLockUnavailable, context.DeadlineExceeded)
+	}
+	required := remaining + quotaRecoveryCredentialPersistTimeout + defaultRefreshPostPersistCleanupTimeout +
+		defaultRefreshLockReleaseTimeout + quotaRecoveryRefreshLockSafetyMargin
+	if required > ttl {
+		ttl = required
+	}
+	return ttl, nil
+}
+
 func (api *OAuthRefreshAPI) getLocalLock(cacheKey string) *contextMutex {
 	actual, _ := api.localLocks.LoadOrStore(cacheKey, newContextMutex())
 	mu, ok := actual.(*contextMutex)
@@ -181,6 +203,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 		return nil, errors.New("oauth refresh executor is nil")
 	}
 	requestPath := isOAuthRefreshRequestPath(ctx)
+	quotaReceipt := quotaRecoveryCredentialRefreshReceiptFromContext(ctx)
 	cacheKey := executor.CacheKey(account)
 
 	// 0. 获取进程内互斥锁（防止同一进程内的并发刷新竞争）
@@ -189,11 +212,24 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 		return nil, fmt.Errorf("oauth refresh local lock: %w", err)
 	}
 	defer localMu.Unlock()
+	if quotaReceipt != nil && api.tokenCache == nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return nil, fmt.Errorf("%w: distributed token cache is not configured", ErrQuotaRecoveryCredentialRefreshLockUnavailable)
+	}
 
 	// 1. 获取分布式锁
 	if api.tokenCache != nil {
-		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
+		lockTTL, ttlErr := api.refreshLockTTL(ctx, quotaReceipt != nil)
+		if ttlErr != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return nil, ttlErr
+		}
+		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, lockTTL)
 		if lockErr != nil {
+			if quotaReceipt != nil {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return nil, fmt.Errorf("%w: %v", ErrQuotaRecoveryCredentialRefreshLockUnavailable, lockErr)
+			}
 			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
 			slog.Warn("oauth_refresh_lock_failed_degraded",
 				"account_id", account.ID,
@@ -231,6 +267,13 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 		}
 		return &OAuthRefreshResult{Account: freshAccount}, nil
 	}
+	// A quota probe may begin with a rate-limit generation whose credential
+	// owner is later edited by an administrator. Validate the exact owner
+	// snapshot after the lock-protected reread and before invoking a provider
+	// refresh, because the upstream call may rotate and consume refresh_token.
+	if err := validateQuotaRecoveryCredentialOwner(ctx, freshAccount); err != nil {
+		return nil, err
+	}
 	if requestPath && freshAccount.Platform == PlatformGrok {
 		if eligibilityErr := grokOAuthRequestAccountEligibilityError(freshAccount); eligibilityErr != nil {
 			return nil, withGrokCredentialFailureSnapshot(eligibilityErr, freshAccount)
@@ -256,12 +299,28 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	// 4. 执行平台特定刷新逻辑
 	attemptedAccount := snapshotOAuthRefreshAccount(freshAccount)
 	newCredentials, refreshErr := executor.Refresh(ctx, freshAccount)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		// A provider implementation may ignore cancellation and return late
-		// credentials. Never persist them after the attempt/cycle boundary.
+	persistenceCtx := ctx
+	var persistenceCancel context.CancelFunc
+	if quotaReceipt != nil && refreshErr == nil && newCredentials != nil {
+		// A successful rotation may already have consumed refresh_token. Finish
+		// its exact-credential CAS on a detached context that preserves the
+		// original probe deadline plus bounded grace, so cancellation cannot
+		// strand the durable row on the revoked generation.
+		persistenceCtx, persistenceCancel = quotaRecoveryPostSideEffectContext(ctx)
+		defer persistenceCancel()
+		if ctx.Err() != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		}
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		// Preserve the existing cancellation boundary outside the scoped quota
+		// receipt path, and for attempts that produced no durable credentials.
 		return nil, ctxErr
 	}
 	if refreshErr != nil {
+		if quotaReceipt != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return &OAuthRefreshResult{Account: attemptedAccount}, refreshErr
+		}
 		// 竞争恢复：invalid_grant 可能是另一个 worker 已消费了旧 refresh_token
 		// 重新读取 DB，如果 refresh_token 已更新则说明是竞争，返回成功
 		if isInvalidGrantError(refreshErr) {
@@ -301,13 +360,22 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 				}
 			}
 			applied, updateErr := conditionalRepo.UpdateGrokOAuthCredentialsIfUnchanged(
-				ctx,
+				persistenceCtx,
 				freshAccount.ID,
 				attemptedAccount.Credentials,
 				attemptedAccount.ProxyID,
 				newCredentials,
 			)
 			if updateErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil && quotaReceipt != nil {
+					invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+					slog.Error("oauth_refresh_post_cancel_persist_failed",
+						"account_id", freshAccount.ID,
+						"platform", freshAccount.Platform,
+						"error", updateErr,
+					)
+					return nil, ctxErr
+				}
 				slog.Error("oauth_refresh_update_failed",
 					"account_id", freshAccount.ID,
 					"platform", freshAccount.Platform,
@@ -350,13 +418,37 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			// while the provider call was in flight. Return the durable row so
 			// post-refresh cache publication cannot restore that stale snapshot.
 			freshAccount = durableAccount
-		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
+		} else if updateErr := persistAccountCredentials(persistenceCtx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil && quotaReceipt != nil {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				slog.Error("oauth_refresh_post_cancel_persist_failed",
+					"account_id", freshAccount.ID,
+					"platform", freshAccount.Platform,
+					"error", updateErr,
+				)
+				return nil, ctxErr
+			}
 			slog.Error("oauth_refresh_update_failed",
 				"account_id", freshAccount.ID,
 				"error", updateErr,
 			)
 			return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, updateErr)
 		}
+		if quotaReceipt != nil {
+			if cacheDeleteErr := deleteQuotaRecoveryCachedAccessToken(ctx, api.tokenCache, cacheKey, freshAccount); cacheDeleteErr != nil {
+				return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, cacheDeleteErr)
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if receiptErr := validateQuotaRecoveryCredentialOwner(ctx, freshAccount); receiptErr != nil {
+				return nil, receiptErr
+			}
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil && quotaReceipt != nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return nil, ctxErr
 	}
 
 	if requestPath && freshAccount.Platform == PlatformGrok {

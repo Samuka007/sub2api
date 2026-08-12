@@ -45,10 +45,12 @@ type QuotaRecoveryCheckResult struct {
 	Reason        string
 }
 
-// OpenAIQuotaUsageReader is the read-only dependency used for OpenAI OAuth
-// quota checks. *OpenAIQuotaService satisfies this interface.
+// OpenAIQuotaUsageReader is the strict read-only dependency used for OpenAI
+// OAuth quota checks. Hermes must fail closed when either the usage snapshot or
+// reset-credit details cannot be fetched; the best-effort QueryUsage path is
+// reserved for interactive UI reads.
 type OpenAIQuotaUsageReader interface {
-	QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error)
+	QueryUsageStrict(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error)
 }
 
 // OpenAIQuotaRecoveryClient adds the idempotent reset operation used when an
@@ -117,7 +119,7 @@ func (c *QuotaRecoveryChecker) checkOpenAI(ctx context.Context, account *Account
 
 	queryCtx, cancel := context.WithTimeout(ctx, quotaRecoveryCheckTimeout)
 	defer cancel()
-	usage, err := c.openAI.QueryUsage(queryCtx, account.ID)
+	usage, err := c.openAI.QueryUsageStrict(queryCtx, account.ID)
 	if queryCtx.Err() != nil {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "context_done")
 	}
@@ -164,7 +166,7 @@ func (c *QuotaRecoveryChecker) recoverOpenAIWithResetCredit(
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "reset_credit_failed")
 	}
 
-	postResetUsage, err := client.QueryUsage(ctx, account.ID)
+	postResetUsage, err := client.QueryUsageStrict(ctx, account.ID)
 	if ctx.Err() != nil {
 		return unknownQuotaRecovery(QuotaRecoverySourceOpenAI, "context_done")
 	}
@@ -492,6 +494,20 @@ func (s *AccountUsageService) QueryAnthropicOAuthUsage(ctx context.Context, acco
 	}
 	if account == nil || account.Platform != PlatformAnthropic || account.Type != AccountTypeOAuth {
 		return nil, fmt.Errorf("account is not an Anthropic OAuth account")
+	}
+	if account.IsShadow() {
+		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Anthropic credential account: %w", err)
+		}
+		account = resolved
+	}
+	if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return nil, err
+	}
+	if err := deleteQuotaRecoveryCachedAccessToken(ctx, s.tokenCache, ClaudeTokenCacheKey(account), account); err != nil {
+		return nil, err
 	}
 	if account.IsTLSFingerprintEnabled() && s.tlsFPProfileService == nil {
 		return nil, fmt.Errorf("TLS fingerprint profile service is not configured")

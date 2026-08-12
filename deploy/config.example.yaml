@@ -926,15 +926,17 @@ quota_recovery:
   # database-wide PostgreSQL advisory lock for the lifetime of this runner.
   # Connect directly to PostgreSQL or use PgBouncer session pooling. Transaction
   # and statement pooling are incompatible with this session advisory lock.
-  # If the pinned lock connection is lost, Hermes stops fail-closed and logs
-  # restart_required=true; restart this service after PostgreSQL recovers.
+  # If the pinned lock connection is lost, Hermes cancels the current scan,
+  # releases the old lease, then automatically reacquires with bounded backoff.
   enabled: false
   # Each cycle scans every currently rate-limited active/schedulable account.
   interval_seconds: 86400
   # Database page size; this is not a per-cycle account limit.
   batch_size: 50
   concurrency: 3
-  # Allows query -> reset-credit consume -> post-reset query for one account.
+  # Normal per-account probe deadline (minimum 75s). If OAuth token rotation or
+  # Agent task registration already caused an irreversible upstream side effect,
+  # credential-consistency finalization may use up to 8s grace beyond this deadline.
   timeout_seconds: 75
   # Random per-account delay to avoid synchronized upstream requests.
   jitter_seconds: 10

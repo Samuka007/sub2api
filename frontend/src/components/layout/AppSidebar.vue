@@ -802,6 +802,7 @@ const adminNavItems = computed((): NavItem[] => {
   const baseItems: NavItem[] = [
     { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon },
     { path: '/admin/ops', label: t('nav.ops'), icon: ChartIcon, featureFlag: flagOpsMonitoring },
+    { path: '/admin/ops/hermes', label: t('nav.hermesStatus'), icon: ShieldIcon, featureFlag: flagOpsMonitoring },
     { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, hideInSimpleMode: true },
     { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon, hideInSimpleMode: true },
     {
@@ -921,6 +922,9 @@ function handleMenuItemClick(itemPath: string) {
 }
 
 function isActive(path: string): boolean {
+  // Keep the Ops dashboard item from appearing active while its Hermes
+  // detail page is open; both entries share the /admin/ops prefix.
+  if (path === '/admin/ops' && route.path !== path) return false
   return route.path === path || route.path.startsWith(path + '/')
 }
 

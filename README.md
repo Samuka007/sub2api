@@ -413,6 +413,18 @@ quota_recovery:
 进程部署，并确保数据库连接池至少允许两个连接。完整环境变量示例见
 [`deploy/.env.example`](deploy/.env.example)，YAML 示例见 [`deploy/config.example.yaml`](deploy/config.example.yaml)。
 
+`timeout_seconds` 是常规单账号 probe deadline，必须至少为 `75` 秒，以覆盖最多五个串行上游请求
+（首次额度与 credit 查询、消费 reset credit、再次查询额度与 credit）。Hermes 启用时，低于该下限的
+旧配置会阻止服务启动，不会被静默改写；升级前请将 `QUOTA_RECOVERY_TIMEOUT_SECONDS` 或
+`quota_recovery.timeout_seconds` 调整为 `75` 或更高，也可以删除旧覆盖值以采用默认值 `75`。若 OAuth
+token rotation 或 Agent task registration 已产生不可逆的上游副作用，凭据一致性收尾可在原 deadline
+后额外使用最多 `8` 秒 grace。
+
+管理员可以在「管理后台 → 运维监控 → Hermes 巡检」查看 Hermes 的只读运行快照。页面显示当前是否启用、
+单实例租约、生命周期、下一轮计划时间以及最近一轮的汇总计数，并支持手动刷新和短周期自动刷新。快照只
+保留当前进程自启动以来的运行记录；服务重启后若尚未完成首轮，会明确显示“暂无运行记录”，不会把这种情况
+误报为故障。接口不会返回账号标识、凭据、锁连接细节或上游响应内容。
+
 ## 源码目录
 
 ```text

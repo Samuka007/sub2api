@@ -17,6 +17,10 @@ const (
 	quotaRecoverySingletonLockKey        = "sub2api:quota-recovery:single-instance"
 	quotaRecoverySingletonHealthInterval = 5 * time.Second
 	quotaRecoverySingletonHealthTimeout  = 2 * time.Second
+	quotaRecoverySingletonAcquireTimeout = 5 * time.Second
+	quotaRecoveryReacquireMinBackoff     = time.Second
+	quotaRecoveryReacquireMaxBackoff     = 30 * time.Second
+	quotaRecoveryReacquireLogInterval    = time.Minute
 	quotaRecoveryFreshnessSkew           = 5 * time.Second
 
 	defaultQuotaRecoveryInterval    = 24 * time.Hour
@@ -73,6 +77,57 @@ type QuotaRecoveryRunResult struct {
 	Errors    int
 }
 
+// QuotaRecoveryStatusConfig describes the effective Hermes scheduler
+// configuration. Values are resolved through the same helpers used by the
+// worker, so the status endpoint never reports zero values for omitted config.
+type QuotaRecoveryStatusConfig struct {
+	IntervalSeconds int `json:"interval_seconds"`
+	BatchSize       int `json:"batch_size"`
+	Concurrency     int `json:"concurrency"`
+	TimeoutSeconds  int `json:"timeout_seconds"`
+	JitterSeconds   int `json:"jitter_seconds"`
+}
+
+// QuotaRecoveryRunStatus is a redacted summary of one Hermes reconciliation
+// cycle. It deliberately contains no account identifiers or provider payloads.
+type QuotaRecoveryRunStatus struct {
+	Trigger     string     `json:"trigger"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	DurationMS  int64      `json:"duration_ms"`
+	Listed      int        `json:"listed"`
+	Checked     int        `json:"checked"`
+	Recovered   int        `json:"recovered"`
+	Exhausted   int        `json:"exhausted"`
+	Unknown     int        `json:"unknown"`
+	Skipped     int        `json:"skipped"`
+	CASMisses   int        `json:"cas_misses"`
+	Errors      int        `json:"errors"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
+// QuotaRecoveryStatus is the read-only operational snapshot exposed to admin
+// tooling. Runtime history is intentionally process-local; a nil current/last
+// run means that this process has not observed a completed cycle yet.
+type QuotaRecoveryStatus struct {
+	Enabled             bool                      `json:"enabled"`
+	Status              string                    `json:"status"`
+	Healthy             bool                      `json:"healthy"`
+	HealthReason        string                    `json:"health_reason,omitempty"`
+	LifecycleState      string                    `json:"lifecycle_state"`
+	LeaseHeld           bool                      `json:"lease_held"`
+	LeaseHealthy        bool                      `json:"lease_healthy"`
+	StartedAt           *time.Time                `json:"started_at,omitempty"`
+	ObservedAt          time.Time                 `json:"observed_at"`
+	LastLeaseAcquiredAt *time.Time                `json:"last_lease_acquired_at,omitempty"`
+	LastLeaseLostAt     *time.Time                `json:"last_lease_lost_at,omitempty"`
+	LastReacquiredAt    *time.Time                `json:"last_reacquired_at,omitempty"`
+	NextRunAt           *time.Time                `json:"next_run_at,omitempty"`
+	CurrentRun          *QuotaRecoveryRunStatus   `json:"current_run"`
+	LastRun             *QuotaRecoveryRunStatus   `json:"last_run"`
+	Config              QuotaRecoveryStatusConfig `json:"config"`
+}
+
 // QuotaRecoveryService reconciles account-level rate-limit timestamps against
 // authoritative provider quota APIs. Normal reset_at expiry remains the primary
 // recovery path; this service only permits evidence-backed early recovery.
@@ -86,12 +141,27 @@ type QuotaRecoveryService struct {
 	now                 func() time.Time
 	jitterFor           func(time.Duration) time.Duration
 	leaseHealthInterval time.Duration
+	reacquireDelayFor   func(int) time.Duration
+	logger              *slog.Logger
 
 	cycleGate chan struct{}
 	mu        sync.Mutex
 	state     quotaRecoveryLifecycleState
 	cancel    context.CancelFunc
 	done      chan struct{}
+
+	statusMu            sync.RWMutex
+	statusLifecycle     string
+	statusStartedAt     *time.Time
+	statusLeaseHeld     bool
+	statusLeaseHealthy  bool
+	statusLeaseAcquired *time.Time
+	statusLeaseLost     *time.Time
+	statusReacquired    *time.Time
+	statusNextRunAt     *time.Time
+	statusCurrentRun    *QuotaRecoveryRunStatus
+	statusLastRun       *QuotaRecoveryRunStatus
+	statusObservedAt    time.Time
 }
 
 func NewQuotaRecoveryService(
@@ -109,6 +179,7 @@ func newQuotaRecoveryService(
 	runtimeBlocker AccountRuntimeBlocker,
 	cfg *config.Config,
 ) *QuotaRecoveryService {
+	createdAt := time.Now().UTC()
 	return &QuotaRecoveryService{
 		accountRepo:         accountRepo,
 		checker:             checker,
@@ -117,12 +188,20 @@ func newQuotaRecoveryService(
 		now:                 time.Now,
 		leaseHealthInterval: quotaRecoverySingletonHealthInterval,
 		cycleGate:           make(chan struct{}, 1),
+		statusLifecycle:     "stopped",
+		statusStartedAt:     nil,
+		statusNextRunAt:     nil,
+		statusCurrentRun:    nil,
 		jitterFor: func(max time.Duration) time.Duration {
 			if max <= 0 {
 				return 0
 			}
 			return time.Duration(rand.Int64N(int64(max) + 1))
 		},
+		// Keep the creation timestamp separate from started_at: a disabled
+		// instance can still report an observed snapshot without implying that
+		// Hermes ever acquired a lease.
+		statusObservedAt: createdAt,
 	}
 }
 
@@ -162,6 +241,7 @@ func (s *QuotaRecoveryService) Start() error {
 			continue
 		}
 		if s.state == quotaRecoveryRunning {
+			s.touchStatus(s.currentTime().UTC())
 			s.mu.Unlock()
 			return nil
 		}
@@ -169,7 +249,10 @@ func (s *QuotaRecoveryService) Start() error {
 			s.mu.Unlock()
 			return ErrQuotaRecoveryDatabaseUnavailable
 		}
-		lockCtx, lockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s.lifecycleLogger().Info("quota_recovery_start",
+			"lock_id", hashAdvisoryLockID(quotaRecoverySingletonLockKey),
+		)
+		lockCtx, lockCancel := context.WithTimeout(context.Background(), quotaRecoverySingletonAcquireTimeout)
 		lease, acquired, err := tryAcquireDBAdvisoryLockLease(
 			lockCtx,
 			s.db,
@@ -189,7 +272,11 @@ func (s *QuotaRecoveryService) Start() error {
 		s.state = quotaRecoveryRunning
 		s.cancel = cancel
 		s.done = done
-		go s.runWithSingletonLease(ctx, cancel, done, lease)
+		s.markLeaseAcquired(s.currentTime().UTC())
+		s.lifecycleLogger().Info("quota_recovery_singleton_acquired",
+			"lock_id", hashAdvisoryLockID(quotaRecoverySingletonLockKey),
+		)
+		go s.runSingletonSupervisor(ctx, done, lease)
 		s.mu.Unlock()
 		return nil
 	}
@@ -207,6 +294,7 @@ func (s *QuotaRecoveryService) Stop() {
 	done := s.done
 	if s.state == quotaRecoveryRunning {
 		s.state = quotaRecoveryStopping
+		s.markStatusLifecycle("stopping", s.currentTime().UTC())
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -217,82 +305,197 @@ func (s *QuotaRecoveryService) Stop() {
 	}
 }
 
-func (s *QuotaRecoveryService) runWithSingletonLease(
+func (s *QuotaRecoveryService) runSingletonSupervisor(
 	ctx context.Context,
-	cancel context.CancelFunc,
 	done chan struct{},
 	lease *dbAdvisoryLockLease,
 ) {
-	monitorDone := make(chan struct{})
-	go func() {
-		defer close(monitorDone)
-		s.monitorSingletonLease(ctx, cancel, done, lease)
-	}()
+	defer s.finishSingletonSupervisor(done)
 
-	s.runLoop(ctx)
-	cancel()
-	<-monitorDone
-	if err := lease.Release(); err != nil {
-		slog.Warn("quota_recovery_singleton_release_failed", "error", err)
-	}
-
-	s.mu.Lock()
-	if s.done == done {
-		s.state = quotaRecoveryStopped
-		s.cancel = nil
-		s.done = nil
-	}
-	close(done)
-	s.mu.Unlock()
-}
-
-func (s *QuotaRecoveryService) monitorSingletonLease(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	done chan struct{},
-	lease *dbAdvisoryLockLease,
-) {
-	interval := s.leaseHealthInterval
-	if interval <= 0 {
-		interval = quotaRecoverySingletonHealthInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		lostAt, leaseErr := s.runWithSingletonLease(ctx, lease)
+		if err := lease.Release(); err != nil {
+			s.lifecycleLogger().Warn("quota_recovery_singleton_release_failed", "error", err)
+		}
+		if ctx.Err() != nil {
 			return
-		case <-ticker.C:
-			pingCtx, pingCancel := context.WithTimeout(ctx, quotaRecoverySingletonHealthTimeout)
-			err := lease.Ping(pingCtx)
-			pingCancel()
-			if err == nil {
-				continue
-			}
-			if ctx.Err() == nil {
-				s.mu.Lock()
-				shouldStop := s.done == done && s.state == quotaRecoveryRunning
-				if shouldStop {
-					s.state = quotaRecoveryStopping
-				}
-				s.mu.Unlock()
-				if shouldStop {
-					slog.Error("quota_recovery_singleton_connection_lost",
-						"error", err,
-						"restart_required", true,
-					)
-					cancel()
-				}
-			}
+		}
+		if leaseErr == nil {
+			return
+		}
+
+		var ok bool
+		lease, ok = s.reacquireSingletonLease(ctx, lostAt)
+		if !ok {
 			return
 		}
 	}
 }
 
+func (s *QuotaRecoveryService) finishSingletonSupervisor(done chan struct{}) {
+	s.mu.Lock()
+	if s.done == done {
+		s.state = quotaRecoveryStopped
+		s.cancel = nil
+		s.done = nil
+		s.markStopped(s.currentTime().UTC())
+	}
+	close(done)
+	s.mu.Unlock()
+}
+
+func (s *QuotaRecoveryService) runWithSingletonLease(
+	ctx context.Context,
+	lease *dbAdvisoryLockLease,
+) (time.Time, error) {
+	leaseCtx, cancel := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		s.runLoop(leaseCtx)
+	}()
+
+	leaseErr := s.monitorSingletonLease(leaseCtx, lease)
+	var lostAt time.Time
+	if leaseErr != nil {
+		lostAt = s.currentTime().UTC()
+		s.markLeaseLost(lostAt.UTC())
+		s.lifecycleLogger().Error("quota_recovery_singleton_lease_lost",
+			"error", leaseErr,
+			"automatic_recovery", true,
+		)
+	}
+	cancel()
+	<-runDone
+	return lostAt, leaseErr
+}
+
+func (s *QuotaRecoveryService) monitorSingletonLease(
+	ctx context.Context,
+	lease *dbAdvisoryLockLease,
+) error {
+	interval := s.singletonHealthInterval()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			pingCtx, pingCancel := context.WithTimeout(ctx, quotaRecoverySingletonHealthTimeout)
+			err := lease.Ping(pingCtx)
+			pingCancel()
+			if err == nil {
+				s.touchStatus(s.currentTime().UTC())
+				continue
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func (s *QuotaRecoveryService) reacquireSingletonLease(
+	ctx context.Context,
+	lostAt time.Time,
+) (*dbAdvisoryLockLease, bool) {
+	var failureLogs quotaRecoveryLogLimiter
+	var retryIn time.Duration
+	for attempt := 1; ; attempt++ {
+		if !waitForQuotaRecoveryRetry(ctx, retryIn) {
+			return nil, false
+		}
+
+		db := s.singletonDatabase()
+		if db == nil {
+			retryIn = s.singletonReacquireDelay(attempt)
+			if failureLogs.Allow(time.Now()) {
+				s.lifecycleLogger().Warn("quota_recovery_singleton_reacquire_failed",
+					"attempt", attempt,
+					"reason", "database_unavailable",
+					"retry_in", retryIn,
+				)
+			}
+			continue
+		}
+
+		lockCtx, lockCancel := context.WithTimeout(ctx, quotaRecoverySingletonAcquireTimeout)
+		lease, acquired, err := tryAcquireDBAdvisoryLockLease(
+			lockCtx,
+			db,
+			hashAdvisoryLockID(quotaRecoverySingletonLockKey),
+		)
+		lockCancel()
+		if ctx.Err() != nil {
+			if lease != nil {
+				_ = lease.Release()
+			}
+			return nil, false
+		}
+		if err == nil && acquired {
+			s.markLeaseReacquired(s.currentTime().UTC())
+			s.lifecycleLogger().Info("quota_recovery_singleton_reacquired",
+				"lock_id", hashAdvisoryLockID(quotaRecoverySingletonLockKey),
+				"attempts", attempt,
+				"downtime", time.Since(lostAt),
+			)
+			return lease, true
+		}
+
+		retryIn = s.singletonReacquireDelay(attempt)
+		if failureLogs.Allow(time.Now()) {
+			reason := "lock_held"
+			attrs := []any{
+				"attempt", attempt,
+				"reason", reason,
+				"retry_in", retryIn,
+			}
+			if err != nil {
+				attrs[3] = "acquire_error"
+				attrs = append(attrs, "error", err)
+			}
+			s.lifecycleLogger().Warn("quota_recovery_singleton_reacquire_failed", attrs...)
+		}
+	}
+}
+
+type quotaRecoveryLogLimiter struct {
+	last time.Time
+}
+
+func (l *quotaRecoveryLogLimiter) Allow(now time.Time) bool {
+	if l.last.IsZero() || !now.Before(l.last.Add(quotaRecoveryReacquireLogInterval)) {
+		l.last = now
+		return true
+	}
+	return false
+}
+
+func waitForQuotaRecoveryRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (s *QuotaRecoveryService) runLoop(ctx context.Context) {
 	for {
-		cycleStartedAt := time.Now()
-		result, err := s.RunOnce(ctx)
+		cycleStartedAt := s.currentTime().UTC()
+		result, err := s.runOnce(ctx, "scheduled", true)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("quota_recovery_run_failed", "error", err)
 		} else if err == nil {
@@ -307,6 +510,7 @@ func (s *QuotaRecoveryService) runLoop(ctx context.Context) {
 			)
 		}
 		untilNextCycle := time.Until(cycleStartedAt.Add(s.interval()))
+		s.setNextRunAt(cycleStartedAt.Add(s.interval()))
 		if untilNextCycle < 0 {
 			untilNextCycle = 0
 		}
@@ -326,26 +530,39 @@ func (s *QuotaRecoveryService) runLoop(ctx context.Context) {
 // exported so local validation and operational tooling can exercise the exact
 // scheduled path without waiting for the interval timer.
 func (s *QuotaRecoveryService) RunOnce(ctx context.Context) (QuotaRecoveryRunResult, error) {
-	result := QuotaRecoveryRunResult{}
+	return s.runOnce(ctx, "manual", false)
+}
+
+func (s *QuotaRecoveryService) runOnce(
+	ctx context.Context,
+	trigger string,
+	scheduled bool,
+) (result QuotaRecoveryRunResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if s == nil || !s.enabled() {
 		return result, nil
 	}
+	// Acquire the same cycle gate before publishing a current-run snapshot.
+	// Concurrent manual callers may wait here; publishing before the gate would
+	// let a waiter overwrite the status of the cycle that is actually running.
+	select {
+	case s.cycleGate <- struct{}{}:
+		defer func() { <-s.cycleGate }()
+	case <-ctx.Done():
+		return result, ctx.Err()
+	}
+	s.beginRunStatus(trigger, s.currentTime().UTC(), scheduled)
+	defer func() {
+		s.finishRunStatus(result, err)
+	}()
 	repo, ok := s.accountRepo.(QuotaRecoveryAccountRepository)
 	if !ok || repo == nil {
 		return result, ErrQuotaRecoveryRepositoryUnavailable
 	}
 	if s.checker == nil {
 		return result, fmt.Errorf("quota recovery checker is unavailable")
-	}
-
-	select {
-	case s.cycleGate <- struct{}{}:
-		defer func() { <-s.cycleGate }()
-	case <-ctx.Done():
-		return result, ctx.Err()
 	}
 
 	now := s.currentTime().UTC()
@@ -492,21 +709,42 @@ func (s *QuotaRecoveryService) reconcileAccount(
 		return outcome
 	}
 
-	observation, err := s.quotaRecoveryObservation(ctx, account)
+	observation, credentialOwner, err := s.quotaRecoveryObservation(ctx, account)
 	if err != nil {
 		outcome.err = err
 		return outcome
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, s.timeout())
+	checkTimeoutCtx, cancel := context.WithTimeout(ctx, s.timeout())
+	checkCtx, credentialReceipt, err := withQuotaRecoveryCredentialRefreshReceipt(
+		checkTimeoutCtx,
+		account,
+		credentialOwner,
+	)
+	if err != nil {
+		cancel()
+		outcome.err = fmt.Errorf("start quota recovery credential receipt: %w", err)
+		return outcome
+	}
+	if err := credentialReceipt.applyToObservation(&observation); err != nil {
+		cancel()
+		outcome.err = fmt.Errorf("bind quota recovery credential receipt: %w", err)
+		return outcome
+	}
 	checkResult := s.checker.Check(checkCtx, account)
 	checkErr := checkCtx.Err()
+	receiptErr := credentialReceipt.applyToObservation(&observation)
 	cancel()
 	outcome.checked = true
 	outcome.verdict = checkResult.Verdict
 	if checkErr != nil {
 		outcome.verdict = QuotaRecoveryUnknown
 		outcome.err = checkErr
+		return outcome
+	}
+	if receiptErr != nil {
+		outcome.verdict = QuotaRecoveryUnknown
+		outcome.err = fmt.Errorf("finalize quota recovery credential receipt: %w", receiptErr)
 		return outcome
 	}
 
@@ -586,17 +824,17 @@ func (s *QuotaRecoveryService) clearRateLimitIfUnchanged(
 	return cleared, nil
 }
 
-func (s *QuotaRecoveryService) quotaRecoveryObservation(ctx context.Context, account *Account) (QuotaRecoveryObservation, error) {
+func (s *QuotaRecoveryService) quotaRecoveryObservation(ctx context.Context, account *Account) (QuotaRecoveryObservation, *Account, error) {
 	observation := QuotaRecoveryObservation{
-		AccountID:                account.ID,
-		RateLimitedAt:            account.RateLimitedAt.UTC(),
-		RateLimitResetAt:         account.RateLimitResetAt.UTC(),
-		AccountUpdatedAt:         account.UpdatedAt.UTC(),
-		CredentialOwnerID:        account.ID,
-		CredentialOwnerUpdatedAt: account.UpdatedAt.UTC(),
+		AccountID:        account.ID,
+		RateLimitedAt:    account.RateLimitedAt.UTC(),
+		RateLimitResetAt: account.RateLimitResetAt.UTC(),
+		AccountUpdatedAt: account.UpdatedAt.UTC(),
 	}
+	credentialOwner := account
 	if !account.IsShadow() {
-		return observation, nil
+		applyCredentialSnapshotToObservation(&observation, accountCredentialSnapshot(credentialOwner), account.ID)
+		return observation, credentialOwner, nil
 	}
 	ownerCtx, ownerCancel := context.WithTimeout(ctx, s.timeout())
 	credentialOwner, err := resolveCredentialAccount(ownerCtx, s.accountRepo, account)
@@ -605,14 +843,13 @@ func (s *QuotaRecoveryService) quotaRecoveryObservation(ctx context.Context, acc
 	}
 	ownerCancel()
 	if err != nil {
-		return QuotaRecoveryObservation{}, fmt.Errorf("resolve quota recovery credential owner: %w", err)
+		return QuotaRecoveryObservation{}, nil, fmt.Errorf("resolve quota recovery credential owner: %w", err)
 	}
 	if credentialOwner == nil || credentialOwner.ID <= 0 {
-		return QuotaRecoveryObservation{}, fmt.Errorf("resolve quota recovery credential owner: invalid account")
+		return QuotaRecoveryObservation{}, nil, fmt.Errorf("resolve quota recovery credential owner: invalid account")
 	}
-	observation.CredentialOwnerID = credentialOwner.ID
-	observation.CredentialOwnerUpdatedAt = credentialOwner.UpdatedAt.UTC()
-	return observation, nil
+	applyCredentialSnapshotToObservation(&observation, accountCredentialSnapshot(credentialOwner), account.ID)
+	return observation, credentialOwner, nil
 }
 
 func isQuotaRecoveryCandidate(account *Account, now time.Time) bool {
@@ -681,6 +918,382 @@ func (s *QuotaRecoveryService) randomJitter() time.Duration {
 		return 0
 	}
 	return s.jitterFor(s.maxJitter())
+}
+
+func (s *QuotaRecoveryService) singletonDatabase() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db
+}
+
+func (s *QuotaRecoveryService) singletonHealthInterval() time.Duration {
+	if s == nil {
+		return quotaRecoverySingletonHealthInterval
+	}
+	s.mu.Lock()
+	interval := s.leaseHealthInterval
+	s.mu.Unlock()
+	if interval <= 0 {
+		return quotaRecoverySingletonHealthInterval
+	}
+	return interval
+}
+
+func (s *QuotaRecoveryService) singletonReacquireDelay(attempt int) time.Duration {
+	if s != nil {
+		s.mu.Lock()
+		delayFor := s.reacquireDelayFor
+		s.mu.Unlock()
+		if delayFor != nil {
+			return delayFor(attempt)
+		}
+	}
+
+	backoff := quotaRecoveryReacquireMinBackoff
+	for step := 1; step < attempt && backoff < quotaRecoveryReacquireMaxBackoff; step++ {
+		if backoff >= quotaRecoveryReacquireMaxBackoff/2 {
+			backoff = quotaRecoveryReacquireMaxBackoff
+			break
+		}
+		backoff *= 2
+	}
+	if backoff > quotaRecoveryReacquireMaxBackoff {
+		backoff = quotaRecoveryReacquireMaxBackoff
+	}
+
+	// Equal jitter preserves a meaningful lower bound while avoiding a thundering
+	// herd when multiple processes notice the same database interruption.
+	half := backoff / 2
+	return half + time.Duration(rand.Int64N(int64(backoff-half)+1))
+}
+
+// GetStatus returns a process-local, redacted Hermes status snapshot. It is a
+// read-only operation: it never acquires a lease, queries the account
+// repository, or starts a reconciliation cycle.
+func (s *QuotaRecoveryService) GetStatus() QuotaRecoveryStatus {
+	if s == nil {
+		return QuotaRecoveryStatus{
+			Status:         "disabled",
+			LifecycleState: "stopped",
+			HealthReason:   "service_unavailable",
+			Config: QuotaRecoveryStatusConfig{
+				IntervalSeconds: int(defaultQuotaRecoveryInterval / time.Second),
+				BatchSize:       defaultQuotaRecoveryBatchSize,
+				Concurrency:     defaultQuotaRecoveryConcurrency,
+				TimeoutSeconds:  int(defaultQuotaRecoveryTimeout / time.Second),
+			},
+		}
+	}
+
+	enabled := s.enabled()
+	configSnapshot := QuotaRecoveryStatusConfig{
+		IntervalSeconds: int(s.interval() / time.Second),
+		BatchSize:       s.batchSize(),
+		Concurrency:     s.concurrency(),
+		TimeoutSeconds:  int(s.timeout() / time.Second),
+		JitterSeconds:   int(s.maxJitter() / time.Second),
+	}
+
+	s.statusMu.RLock()
+	lifecycle := s.statusLifecycle
+	startedAt := cloneQuotaRecoveryTime(s.statusStartedAt)
+	leaseHeld := s.statusLeaseHeld
+	leaseHealthy := s.statusLeaseHealthy
+	leaseAcquiredAt := cloneQuotaRecoveryTime(s.statusLeaseAcquired)
+	leaseLostAt := cloneQuotaRecoveryTime(s.statusLeaseLost)
+	reacquiredAt := cloneQuotaRecoveryTime(s.statusReacquired)
+	nextRunAt := cloneQuotaRecoveryTime(s.statusNextRunAt)
+	currentRun := cloneQuotaRecoveryRunStatus(s.statusCurrentRun)
+	lastRun := cloneQuotaRecoveryRunStatus(s.statusLastRun)
+	observedAt := s.statusObservedAt
+	s.statusMu.RUnlock()
+
+	if lifecycle == "" {
+		s.mu.Lock()
+		lifecycle = quotaRecoveryLifecycleName(s.state)
+		s.mu.Unlock()
+	}
+	if observedAt.IsZero() {
+		observedAt = s.currentTime().UTC()
+	}
+	status, healthy, healthReason := quotaRecoveryStatusHealth(
+		enabled,
+		lifecycle,
+		leaseHeld,
+		leaseHealthy,
+		lastRun,
+	)
+	return QuotaRecoveryStatus{
+		Enabled:             enabled,
+		Status:              status,
+		Healthy:             healthy,
+		HealthReason:        healthReason,
+		LifecycleState:      lifecycle,
+		LeaseHeld:           leaseHeld,
+		LeaseHealthy:        leaseHealthy,
+		StartedAt:           startedAt,
+		ObservedAt:          observedAt.UTC(),
+		LastLeaseAcquiredAt: leaseAcquiredAt,
+		LastLeaseLostAt:     leaseLostAt,
+		LastReacquiredAt:    reacquiredAt,
+		NextRunAt:           nextRunAt,
+		CurrentRun:          currentRun,
+		LastRun:             lastRun,
+		Config:              configSnapshot,
+	}
+}
+
+func quotaRecoveryLifecycleName(state quotaRecoveryLifecycleState) string {
+	switch state {
+	case quotaRecoveryRunning:
+		return "running"
+	case quotaRecoveryStopping:
+		return "stopping"
+	default:
+		return "stopped"
+	}
+}
+
+func quotaRecoveryStatusHealth(
+	enabled bool,
+	lifecycle string,
+	leaseHeld bool,
+	leaseHealthy bool,
+	lastRun *QuotaRecoveryRunStatus,
+) (status string, healthy bool, reason string) {
+	if !enabled {
+		return "disabled", false, "disabled_by_configuration"
+	}
+	if lifecycle == "reacquiring" {
+		return "error", false, "singleton_lease_reacquiring"
+	}
+	if lifecycle == "stopping" {
+		return "unknown", false, "stopping"
+	}
+	if lifecycle != "running" {
+		return "unknown", false, "not_running"
+	}
+	if !leaseHeld || !leaseHealthy {
+		return "error", false, "singleton_lease_unhealthy"
+	}
+	if lastRun == nil {
+		// A healthy worker is allowed to report unknown history while it waits
+		// for its first cycle; this is not treated as a runtime failure.
+		return "unknown", true, "awaiting_first_run"
+	}
+	if lastRun.LastError != "" {
+		return "warning", true, "last_run_failed"
+	}
+	if lastRun.Errors > 0 {
+		return "warning", true, "last_run_account_errors"
+	}
+	return "healthy", true, "running"
+}
+
+func cloneQuotaRecoveryTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := value.UTC()
+	return &cloned
+}
+
+func cloneQuotaRecoveryRunStatus(value *QuotaRecoveryRunStatus) *QuotaRecoveryRunStatus {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.CompletedAt = cloneQuotaRecoveryTime(value.CompletedAt)
+	return &cloned
+}
+
+func quotaRecoveryStatusTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Now().UTC()
+	}
+	return value.UTC()
+}
+
+func (s *QuotaRecoveryService) touchStatusLocked(at time.Time) {
+	s.statusObservedAt = quotaRecoveryStatusTime(at)
+}
+
+func (s *QuotaRecoveryService) touchStatus(at time.Time) {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) markStatusLifecycle(lifecycle string, at time.Time) {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	s.statusLifecycle = lifecycle
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) markLeaseAcquired(at time.Time) {
+	if s == nil {
+		return
+	}
+	at = quotaRecoveryStatusTime(at)
+	s.statusMu.Lock()
+	s.statusLifecycle = "running"
+	s.statusLeaseHeld = true
+	s.statusLeaseHealthy = true
+	s.statusLeaseAcquired = cloneQuotaRecoveryTime(&at)
+	if s.statusStartedAt == nil {
+		s.statusStartedAt = cloneQuotaRecoveryTime(&at)
+	}
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) markLeaseLost(at time.Time) {
+	if s == nil {
+		return
+	}
+	at = quotaRecoveryStatusTime(at)
+	s.statusMu.Lock()
+	s.statusLifecycle = "reacquiring"
+	s.statusLeaseHeld = false
+	s.statusLeaseHealthy = false
+	s.statusLeaseLost = cloneQuotaRecoveryTime(&at)
+	// The previous schedule is no longer authoritative while the singleton
+	// lease is lost; it will be recomputed when the worker reacquires the lease.
+	s.statusNextRunAt = nil
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) markLeaseReacquired(at time.Time) {
+	if s == nil {
+		return
+	}
+	at = quotaRecoveryStatusTime(at)
+	s.statusMu.Lock()
+	s.statusLifecycle = "running"
+	s.statusLeaseHeld = true
+	s.statusLeaseHealthy = true
+	s.statusLeaseAcquired = cloneQuotaRecoveryTime(&at)
+	s.statusReacquired = cloneQuotaRecoveryTime(&at)
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) markStopped(at time.Time) {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	s.statusLifecycle = "stopped"
+	s.statusLeaseHeld = false
+	s.statusLeaseHealthy = false
+	s.statusNextRunAt = nil
+	s.touchStatusLocked(at)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) beginRunStatus(trigger string, startedAt time.Time, scheduled bool) {
+	if s == nil {
+		return
+	}
+	startedAt = quotaRecoveryStatusTime(startedAt)
+	run := &QuotaRecoveryRunStatus{Trigger: trigger, StartedAt: startedAt}
+	s.statusMu.Lock()
+	s.statusCurrentRun = run
+	if scheduled {
+		next := startedAt.Add(s.interval())
+		s.statusNextRunAt = cloneQuotaRecoveryTime(&next)
+	}
+	s.touchStatusLocked(startedAt)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) finishRunStatus(result QuotaRecoveryRunResult, runErr error) {
+	if s == nil {
+		return
+	}
+	completedAt := quotaRecoveryStatusTime(s.currentTime())
+	s.statusMu.Lock()
+	run := cloneQuotaRecoveryRunStatus(s.statusCurrentRun)
+	if errors.Is(runErr, context.Canceled) {
+		// A normal stop or singleton lease loss cancels the in-flight cycle.
+		// Keep the last fully observed cycle intact so the status page does not
+		// present partial counters as a completed run.
+		s.statusCurrentRun = nil
+		s.touchStatusLocked(completedAt)
+		s.statusMu.Unlock()
+		return
+	}
+	if run == nil {
+		run = &QuotaRecoveryRunStatus{Trigger: "unknown", StartedAt: completedAt}
+	}
+	run.CompletedAt = cloneQuotaRecoveryTime(&completedAt)
+	run.DurationMS = completedAt.Sub(run.StartedAt).Milliseconds()
+	if run.DurationMS < 0 {
+		run.DurationMS = 0
+	}
+	run.Listed = result.Listed
+	run.Checked = result.Checked
+	run.Recovered = result.Recovered
+	run.Exhausted = result.Exhausted
+	run.Unknown = result.Unknown
+	run.Skipped = result.Skipped
+	run.CASMisses = result.CASMisses
+	run.Errors = result.Errors
+	run.LastError = quotaRecoveryPublicRunError(runErr)
+	s.statusCurrentRun = nil
+	s.statusLastRun = run
+	s.touchStatusLocked(completedAt)
+	s.statusMu.Unlock()
+}
+
+func (s *QuotaRecoveryService) setNextRunAt(next time.Time) {
+	if s == nil {
+		return
+	}
+	next = quotaRecoveryStatusTime(next)
+	s.statusMu.Lock()
+	if s.statusLifecycle == "running" {
+		s.statusNextRunAt = cloneQuotaRecoveryTime(&next)
+		s.touchStatusLocked(s.currentTime().UTC())
+	}
+	s.statusMu.Unlock()
+}
+
+func quotaRecoveryPublicRunError(err error) string {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "run timed out"
+	}
+	if errors.Is(err, ErrQuotaRecoveryRepositoryUnavailable) {
+		return "repository unavailable"
+	}
+	if errors.Is(err, ErrQuotaRecoveryDatabaseUnavailable) {
+		return "database unavailable"
+	}
+	if errors.Is(err, ErrQuotaRecoveryAlreadyRunning) {
+		return "already running"
+	}
+	return "reconciliation failed"
+}
+
+func (s *QuotaRecoveryService) lifecycleLogger() *slog.Logger {
+	if s != nil && s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 func (s *QuotaRecoveryService) currentTime() time.Time {

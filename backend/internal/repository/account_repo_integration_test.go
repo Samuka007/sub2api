@@ -90,6 +90,14 @@ func (e *failAtomicSchedulerOutboxSQLExecutor) ExecContext(ctx context.Context, 
 	return e.sqlExecutor.ExecContext(ctx, query, args...)
 }
 
+func (e *failAtomicSchedulerOutboxSQLExecutor) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if strings.Contains(query, "updated AS (") && strings.Contains(query, "INSERT INTO scheduler_outbox") && len(args) > 0 {
+		args = append([]any(nil), args...)
+		args[len(args)-1] = nil // event_type is NOT NULL; the whole statement must roll back.
+	}
+	return e.sqlExecutor.QueryContext(ctx, query, args...)
+}
+
 type cancelAfterAtomicMutationSQLExecutor struct {
 	sqlExecutor
 	cancel context.CancelFunc

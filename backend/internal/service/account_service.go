@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,20 @@ var (
 	ErrAccountNotFound      = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
 	ErrAccountNilInput      = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
 	ErrAccountNotInFallback = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+
+	// ErrQuotaRecoveryCredentialStateChanged is returned when a quota probe can
+	// no longer prove that the credential owner is the exact generation it
+	// observed. Callers must treat this as a fail-closed, non-authoritative probe.
+	ErrQuotaRecoveryCredentialStateChanged = errors.New("quota recovery credential owner state changed")
+	// ErrQuotaRecoveryCredentialCASUnavailable prevents a quota-scoped write
+	// from silently falling back to an unconditional account update.
+	ErrQuotaRecoveryCredentialCASUnavailable = errors.New("quota recovery credential compare-and-swap is unavailable")
+	// ErrQuotaRecoveryCredentialRefreshLockHeld prevents a quota probe from
+	// trusting a token whose refresh is owned by another worker.
+	ErrQuotaRecoveryCredentialRefreshLockHeld = errors.New("quota recovery credential refresh lock is held by another worker")
+	// ErrQuotaRecoveryCredentialRefreshLockUnavailable prevents a quota probe
+	// from rotating credentials without a provable distributed lock lease.
+	ErrQuotaRecoveryCredentialRefreshLockUnavailable = errors.New("quota recovery credential refresh lock is unavailable")
 )
 
 const AccountListGroupUngrouped int64 = -1
@@ -125,15 +140,68 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// AccountCredentialSnapshot is the complete owner generation used by a quota
+// probe before a credential-bearing upstream call and by its final clear CAS.
+// The credential persistence CAS intentionally uses only Credentials plus the
+// credential identity fields (ID, platform, type, parent, quota dimension): a
+// provider-issued refresh token must not be lost because an unrelated account
+// field changed while the irreversible upstream rotation was in flight.
+type AccountCredentialSnapshot struct {
+	AccountID             int64
+	Credentials           map[string]any
+	UpdatedAt             time.Time
+	ProxyID               *int64
+	ProxyFallbackOriginID *int64
+	Platform              string
+	Type                  string
+	ParentAccountID       *int64
+	Status                string
+	Schedulable           bool
+	QuotaDimension        string
+}
+
+// AccountCredentialConditionalUpdateRepository atomically replaces a
+// credential document only when the complete expected credential document and
+// credential identity still match. A successful implementation must publish
+// scheduler invalidation in the same transaction and return both the locked
+// row generation and the durable UpdatedAt written by that transaction.
+type AccountCredentialConditionalUpdateRepository interface {
+	UpdateCredentialsIfUnchanged(
+		ctx context.Context,
+		expected AccountCredentialSnapshot,
+		credentials map[string]any,
+	) (result AccountCredentialConditionalUpdateResult, applied bool, err error)
+}
+
+// AccountCredentialConditionalUpdateResult reports the row generation that
+// existed when the credential CAS locked it and the generation written by the
+// transaction. A changed previous generation does not invalidate a successful
+// provider rotation, but it makes the surrounding quota probe non-authoritative.
+type AccountCredentialConditionalUpdateResult struct {
+	PreviousUpdatedAt time.Time
+	UpdatedAt         time.Time
+}
+
 // QuotaRecoveryObservation binds an upstream result to the account state and
-// credential-owning account version used for that request.
+// exact post-probe credential-owner generation used for that request. The
+// credential fields may advance during the probe only through the scoped
+// conditional persistence receipt.
 type QuotaRecoveryObservation struct {
-	AccountID                int64
-	RateLimitedAt            time.Time
-	RateLimitResetAt         time.Time
-	AccountUpdatedAt         time.Time
-	CredentialOwnerID        int64
-	CredentialOwnerUpdatedAt time.Time
+	AccountID                            int64
+	RateLimitedAt                        time.Time
+	RateLimitResetAt                     time.Time
+	AccountUpdatedAt                     time.Time
+	CredentialOwnerID                    int64
+	CredentialOwnerUpdatedAt             time.Time
+	CredentialOwnerCredentials           map[string]any
+	CredentialOwnerProxyID               *int64
+	CredentialOwnerProxyFallbackOriginID *int64
+	CredentialOwnerPlatform              string
+	CredentialOwnerType                  string
+	CredentialOwnerParentAccountID       *int64
+	CredentialOwnerStatus                string
+	CredentialOwnerSchedulable           bool
+	CredentialOwnerQuotaDimension        string
 }
 
 // QuotaRecoveryAccountRepository exposes the narrowly scoped persistence

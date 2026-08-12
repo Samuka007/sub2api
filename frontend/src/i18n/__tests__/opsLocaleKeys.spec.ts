@@ -29,6 +29,21 @@ describe('ops locale key completeness', () => {
       expect(enKeys).toContain(key)
     })
   }
+
+  const hermesKeys = [
+    'admin.ops.hermes.title',
+    'admin.ops.hermes.status.healthy',
+    'admin.ops.hermes.status.disabled',
+    'admin.ops.hermes.lastRun',
+    'admin.ops.hermes.skipped'
+  ]
+
+  for (const key of hermesKeys) {
+    it(`en and zh locales have ${key}`, () => {
+      expect(flattenKeys(en)).toContain(key)
+      expect(flattenKeys(zh)).toContain(key)
+    })
+  }
 })
 
 describe('groups locale key completeness', () => {

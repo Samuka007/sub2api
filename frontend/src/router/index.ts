@@ -442,6 +442,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/ops/hermes',
+    name: 'AdminHermesStatus',
+    component: () => import('@/views/admin/ops/HermesStatusView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Hermes Status',
+      titleKey: 'admin.ops.hermes.title',
+      descriptionKey: 'admin.ops.hermes.description'
+    }
+  },
+  {
     path: '/admin/audit-logs',
     name: 'AdminAuditLogs',
     component: () => import('@/views/admin/AuditLogView.vue'),

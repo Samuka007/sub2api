@@ -3,9 +3,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -891,13 +894,19 @@ func TestQuotaRecoveryServiceStartDuringStopRestartsAfterLeaseRelease(t *testing
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestQuotaRecoveryServiceStartDuringLeaseLossWaitsForCleanup(t *testing.T) {
+func TestQuotaRecoveryServiceAutomaticallyReacquiresLeaseAndResumes(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	restartDB, restartMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	contendedDB, contendedMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = restartDB.Close() })
+	t.Cleanup(func() { _ = contendedDB.Close() })
+	errorDB, errorMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = errorDB.Close() })
+	recoveredDB, recoveredMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = recoveredDB.Close() })
 
 	lockID := hashAdvisoryLockID(quotaRecoverySingletonLockKey)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
@@ -906,11 +915,17 @@ func TestQuotaRecoveryServiceStartDuringLeaseLossWaitsForCleanup(t *testing.T) {
 	mock.ExpectPing().WillReturnError(errors.New("singleton connection lost"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock($1)")).
 		WithArgs(lockID).
-		WillReturnError(errors.New("singleton connection lost"))
-	restartMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+	contendedMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
+		WithArgs(lockID).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(false))
+	errorMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
+		WithArgs(lockID).
+		WillReturnError(errors.New("database temporarily unavailable"))
+	recoveredMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
 		WithArgs(lockID).
 		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
-	restartMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock($1)")).
+	recoveredMock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock($1)")).
 		WithArgs(lockID).
 		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
 
@@ -918,16 +933,22 @@ func TestQuotaRecoveryServiceStartDuringLeaseLossWaitsForCleanup(t *testing.T) {
 	checkStarted := make(chan struct{})
 	checkCanceled := make(chan struct{})
 	allowCheckReturn := make(chan struct{})
+	resumed := make(chan struct{})
 	var checkCalls atomic.Int64
 	checker := &quotaRecoveryCheckerStub{checkFn: func(ctx context.Context, _ *Account) QuotaRecoveryCheckResult {
-		if checkCalls.Add(1) != 1 {
+		switch checkCalls.Add(1) {
+		case 1:
+			close(checkStarted)
+			<-ctx.Done()
+			close(checkCanceled)
+			<-allowCheckReturn
+			return QuotaRecoveryCheckResult{Verdict: QuotaRecoveryUnknown, CheckedAt: time.Now().UTC()}
+		case 2:
+			close(resumed)
+			return freshQuotaRecoveryResult(QuotaRecoveryExhausted)
+		default:
 			return freshQuotaRecoveryResult(QuotaRecoveryExhausted)
 		}
-		close(checkStarted)
-		<-ctx.Done()
-		close(checkCanceled)
-		<-allowCheckReturn
-		return QuotaRecoveryCheckResult{Verdict: QuotaRecoveryUnknown, CheckedAt: time.Now().UTC()}
 	}}
 	svc := newQuotaRecoveryService(
 		&quotaRecoveryRepoStub{candidates: []Account{account}},
@@ -937,32 +958,136 @@ func TestQuotaRecoveryServiceStartDuringLeaseLossWaitsForCleanup(t *testing.T) {
 	)
 	svc.db = db
 	svc.leaseHealthInterval = time.Millisecond
+	svc.reacquireDelayFor = func(attempt int) time.Duration {
+		svc.mu.Lock()
+		switch attempt {
+		case 1:
+			svc.db = errorDB
+		case 2:
+			svc.db = recoveredDB
+		}
+		svc.mu.Unlock()
+		return 0
+	}
 	svc.jitterFor = func(time.Duration) time.Duration { return 0 }
+	var lifecycleLogs bytes.Buffer
+	svc.logger = slog.New(slog.NewTextHandler(&lifecycleLogs, nil))
 	require.NoError(t, svc.Start())
 	<-checkStarted
 	<-checkCanceled
 
 	svc.mu.Lock()
-	require.Equal(t, quotaRecoveryStopping, svc.state)
-	svc.mu.Unlock()
-
-	startDone := make(chan error, 1)
-	go func() { startDone <- svc.Start() }()
-	select {
-	case err := <-startDone:
-		close(allowCheckReturn)
-		require.Failf(t, "Start returned before the lost lease was cleaned up", "error: %v", err)
-		return
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	svc.mu.Lock()
-	svc.db = restartDB
+	require.Equal(t, quotaRecoveryRunning, svc.state, "lease recovery remains inside the active service lifecycle")
+	svc.db = contendedDB
 	svc.leaseHealthInterval = time.Hour
 	svc.mu.Unlock()
 	close(allowCheckReturn)
-	require.NoError(t, <-startDone)
+
+	select {
+	case <-resumed:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "quota recovery did not resume after reacquiring the singleton lease")
+	}
 	svc.Stop()
+
 	require.NoError(t, mock.ExpectationsWereMet())
-	require.NoError(t, restartMock.ExpectationsWereMet())
+	require.NoError(t, contendedMock.ExpectationsWereMet())
+	require.NoError(t, errorMock.ExpectationsWereMet())
+	require.NoError(t, recoveredMock.ExpectationsWereMet())
+	logs := lifecycleLogs.String()
+	require.Equal(t, 1, strings.Count(logs, "msg=quota_recovery_start"))
+	require.Equal(t, 1, strings.Count(logs, "msg=quota_recovery_singleton_acquired"))
+	require.Equal(t, 1, strings.Count(logs, "msg=quota_recovery_singleton_lease_lost"))
+	require.Equal(t, 1, strings.Count(logs, "msg=quota_recovery_singleton_reacquire_failed"), "rapid failures must be rate-limited")
+	require.Equal(t, 1, strings.Count(logs, "msg=quota_recovery_singleton_reacquired"))
+	require.Contains(t, logs, "automatic_recovery=true")
+	require.Contains(t, logs, "attempts=3")
+}
+
+func TestQuotaRecoveryServiceConcurrentStartsDoNotDuplicateRecoveryAndStopCancelsBackoff(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	lockID := hashAdvisoryLockID(quotaRecoverySingletonLockKey)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
+		WithArgs(lockID).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	mock.ExpectPing().WillReturnError(errors.New("singleton connection lost"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock($1)")).
+		WithArgs(lockID).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).
+		WithArgs(lockID).
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(false))
+
+	backoffStarted := make(chan struct{})
+	var backoffOnce sync.Once
+	svc := newQuotaRecoveryService(&quotaRecoveryRepoStub{}, &quotaRecoveryCheckerStub{}, nil, quotaRecoveryTestConfig())
+	svc.db = db
+	svc.leaseHealthInterval = time.Millisecond
+	svc.reacquireDelayFor = func(int) time.Duration {
+		backoffOnce.Do(func() { close(backoffStarted) })
+		return time.Hour
+	}
+	require.NoError(t, svc.Start())
+	select {
+	case <-backoffStarted:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "quota recovery did not enter singleton reacquire backoff")
+	}
+
+	const callers = 16
+	startErrors := make(chan error, callers)
+	var starts sync.WaitGroup
+	starts.Add(callers)
+	for range callers {
+		go func() {
+			defer starts.Done()
+			startErrors <- svc.Start()
+		}()
+	}
+	starts.Wait()
+	close(startErrors)
+	for startErr := range startErrors {
+		require.NoError(t, startErr)
+	}
+
+	stopStartedAt := time.Now()
+	var stops sync.WaitGroup
+	stops.Add(callers)
+	for range callers {
+		go func() {
+			defer stops.Done()
+			svc.Stop()
+		}()
+	}
+	stops.Wait()
+	require.Less(t, time.Since(stopStartedAt), time.Second, "Stop must cancel reacquire backoff")
+	svc.Stop()
+
+	svc.mu.Lock()
+	require.Equal(t, quotaRecoveryStopped, svc.state)
+	svc.mu.Unlock()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestQuotaRecoveryServiceReacquireBackoffIsBoundedAndFailureLogsAreRateLimited(t *testing.T) {
+	svc := newQuotaRecoveryService(nil, nil, nil, quotaRecoveryTestConfig())
+
+	first := svc.singletonReacquireDelay(1)
+	require.GreaterOrEqual(t, first, quotaRecoveryReacquireMinBackoff/2)
+	require.LessOrEqual(t, first, quotaRecoveryReacquireMinBackoff)
+	second := svc.singletonReacquireDelay(2)
+	require.GreaterOrEqual(t, second, quotaRecoveryReacquireMinBackoff)
+	require.LessOrEqual(t, second, 2*quotaRecoveryReacquireMinBackoff)
+	capped := svc.singletonReacquireDelay(100)
+	require.GreaterOrEqual(t, capped, quotaRecoveryReacquireMaxBackoff/2)
+	require.LessOrEqual(t, capped, quotaRecoveryReacquireMaxBackoff)
+
+	base := time.Now()
+	var limiter quotaRecoveryLogLimiter
+	require.True(t, limiter.Allow(base))
+	require.False(t, limiter.Allow(base.Add(quotaRecoveryReacquireLogInterval-time.Nanosecond)))
+	require.True(t, limiter.Allow(base.Add(quotaRecoveryReacquireLogInterval)))
 }

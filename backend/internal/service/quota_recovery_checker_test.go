@@ -21,7 +21,7 @@ type quotaRecoveryOpenAIReaderStub struct {
 	accountID int64
 }
 
-func (s *quotaRecoveryOpenAIReaderStub) QueryUsage(_ context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+func (s *quotaRecoveryOpenAIReaderStub) QueryUsageStrict(_ context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
 	s.calls++
 	s.accountID = accountID
 	return s.usage, s.err
@@ -37,7 +37,7 @@ type quotaRecoveryOpenAIResetClientStub struct {
 	resetRequestIDs []string
 }
 
-func (s *quotaRecoveryOpenAIResetClientStub) QueryUsage(_ context.Context, _ int64) (*OpenAIQuotaUsage, error) {
+func (s *quotaRecoveryOpenAIResetClientStub) QueryUsageStrict(_ context.Context, _ int64) (*OpenAIQuotaUsage, error) {
 	call := s.queryCalls
 	s.queryCalls++
 	if call < len(s.queryErrors) && s.queryErrors[call] != nil {
@@ -50,6 +50,23 @@ func (s *quotaRecoveryOpenAIResetClientStub) QueryUsage(_ context.Context, _ int
 		call = len(s.usages) - 1
 	}
 	return s.usages[call], nil
+}
+
+type quotaRecoveryOpenAIQueryModeStub struct {
+	usage           *OpenAIQuotaUsage
+	strictErr       error
+	bestEffortCalls int
+	strictCalls     int
+}
+
+func (s *quotaRecoveryOpenAIQueryModeStub) QueryUsage(_ context.Context, _ int64) (*OpenAIQuotaUsage, error) {
+	s.bestEffortCalls++
+	return s.usage, nil
+}
+
+func (s *quotaRecoveryOpenAIQueryModeStub) QueryUsageStrict(_ context.Context, _ int64) (*OpenAIQuotaUsage, error) {
+	s.strictCalls++
+	return nil, s.strictErr
 }
 
 func (s *quotaRecoveryOpenAIResetClientStub) ResetCreditWithRequestID(
@@ -163,9 +180,34 @@ func TestQuotaRecoveryChecker_OpenAIGlobal(t *testing.T) {
 
 			assertQuotaRecoveryState(t, got, tt.want)
 			if reader.calls != 1 || reader.accountID != account.ID {
-				t.Fatalf("QueryUsage calls = %d, account ID = %d", reader.calls, reader.accountID)
+				t.Fatalf("QueryUsageStrict calls = %d, account ID = %d", reader.calls, reader.accountID)
 			}
 		})
+	}
+}
+
+func TestQuotaRecoveryChecker_OpenAIUsesStrictUsageQuery(t *testing.T) {
+	reader := &quotaRecoveryOpenAIQueryModeStub{
+		usage: &OpenAIQuotaUsage{
+			RateLimit: openAIRateLimitForRecovery(true, false, 0, nil),
+		},
+		strictErr: errors.New("reset-credit details unavailable"),
+	}
+	account := &Account{
+		ID:               43,
+		Platform:         PlatformOpenAI,
+		Type:             AccountTypeOAuth,
+		RateLimitResetAt: quotaRecoveryTime(quotaRecoveryTestFiveHourReset),
+	}
+
+	got := NewQuotaRecoveryChecker(reader, nil).Check(context.Background(), account)
+
+	assertQuotaRecoveryState(t, got, QuotaRecoveryUnknown)
+	if got.Reason != "query_failed" {
+		t.Fatalf("reason = %q, want query_failed", got.Reason)
+	}
+	if reader.strictCalls != 1 || reader.bestEffortCalls != 0 {
+		t.Fatalf("query calls: strict=%d best-effort=%d", reader.strictCalls, reader.bestEffortCalls)
 	}
 }
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -705,11 +707,19 @@ func TestQueryUsageStrictSurfacesResetCreditDetails401(t *testing.T) {
 	defer srv.Close()
 
 	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
 	usage, err := svc.QueryUsageStrict(ctx, 100)
 	require.Nil(t, usage)
 	require.Error(t, err)
 	require.Equal(t, http.StatusUnauthorized, infraerrors.Code(err))
 	require.Equal(t, "OPENAI_QUOTA_RESET_CREDITS_UPSTREAM_ERROR", infraerrors.Reason(err))
+	require.Contains(t, logs.String(), "openai_quota_reset_credit_details_failed")
+	require.Contains(t, logs.String(), "account_id=100")
+	require.Contains(t, logs.String(), "upstream returned 401")
 }
 
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：

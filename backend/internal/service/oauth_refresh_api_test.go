@@ -19,13 +19,24 @@ import (
 type refreshAPIAccountRepo struct {
 	mockAccountRepoForGemini
 	account                 *Account // returned by GetByID
+	getByIDAccounts         []*Account
 	getByIDErr              error
+	getByIDErrors           []error
 	getByIDCalls            int
 	getByIDErrAfterCall     int
 	getByIDErrAfterCallErr  error
 	updateErr               error
 	updateCalls             int
 	updateCredentialsCalls  int
+	conditionalCASCalls     int
+	conditionalContextErr   error
+	conditionalErrors       []error
+	conditionalErrorHook    func(*refreshAPIAccountRepo, map[string]any)
+	beforeConditionalCAS    func(context.Context, *refreshAPIAccountRepo, map[string]any)
+	conditionalCASMiss      bool
+	conditionalPreviousAt   time.Time
+	conditionalUpdatedAt    time.Time
+	lastCredentialSnapshot  AccountCredentialSnapshot
 	successCASCalls         int
 	beforeSuccessCAS        func(*refreshAPIAccountRepo)
 	lastExpectedCredentials map[string]any
@@ -34,11 +45,23 @@ type refreshAPIAccountRepo struct {
 
 func (r *refreshAPIAccountRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	r.getByIDCalls++
+	if len(r.getByIDErrors) > 0 {
+		err := r.getByIDErrors[0]
+		r.getByIDErrors = r.getByIDErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if r.getByIDErrAfterCall > 0 && r.getByIDCalls >= r.getByIDErrAfterCall {
 		return nil, r.getByIDErrAfterCallErr
 	}
 	if r.getByIDErr != nil {
 		return nil, r.getByIDErr
+	}
+	if len(r.getByIDAccounts) > 0 {
+		account := r.getByIDAccounts[0]
+		r.getByIDAccounts = r.getByIDAccounts[1:]
+		return activeRefreshAPITestAccount(account), nil
 	}
 	return activeRefreshAPITestAccount(r.account), nil
 }
@@ -68,6 +91,57 @@ func (r *refreshAPIAccountRepo) UpdateCredentials(_ context.Context, id int64, c
 	}
 	r.account.Credentials = shallowCopyMap(credentials)
 	return nil
+}
+
+func (r *refreshAPIAccountRepo) UpdateCredentialsIfUnchanged(
+	ctx context.Context,
+	expected AccountCredentialSnapshot,
+	credentials map[string]any,
+) (AccountCredentialConditionalUpdateResult, bool, error) {
+	r.conditionalCASCalls++
+	r.conditionalContextErr = ctx.Err()
+	r.lastCredentialSnapshot = cloneAccountCredentialSnapshot(expected)
+	if r.beforeConditionalCAS != nil {
+		r.beforeConditionalCAS(ctx, r, credentials)
+		r.conditionalContextErr = ctx.Err()
+	}
+	if len(r.conditionalErrors) > 0 {
+		err := r.conditionalErrors[0]
+		r.conditionalErrors = r.conditionalErrors[1:]
+		if err != nil {
+			if r.conditionalErrorHook != nil {
+				r.conditionalErrorHook(r, credentials)
+			}
+			return AccountCredentialConditionalUpdateResult{}, false, err
+		}
+	}
+	if r.updateErr != nil {
+		return AccountCredentialConditionalUpdateResult{}, false, r.updateErr
+	}
+	if r.conditionalCASMiss || r.account == nil ||
+		r.account.ID != expected.AccountID ||
+		!credentialDocumentsEqual(r.account.Credentials, expected.Credentials) ||
+		r.account.Platform != expected.Platform ||
+		r.account.Type != expected.Type ||
+		!equalInt64Pointers(r.account.ParentAccountID, expected.ParentAccountID) ||
+		r.account.QuotaDimensionOrDefault() != expected.QuotaDimension {
+		return AccountCredentialConditionalUpdateResult{}, false, nil
+	}
+	previousUpdatedAt := r.conditionalPreviousAt
+	if previousUpdatedAt.IsZero() {
+		previousUpdatedAt = r.account.UpdatedAt
+	}
+	updatedAt := r.conditionalUpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = previousUpdatedAt.Add(time.Second)
+	}
+	r.account.Credentials = shallowCopyMap(credentials)
+	r.account.UpdatedAt = updatedAt
+	r.updateCalls++
+	return AccountCredentialConditionalUpdateResult{
+		PreviousUpdatedAt: previousUpdatedAt,
+		UpdatedAt:         updatedAt,
+	}, true, nil
 }
 
 func (r *refreshAPIAccountRepo) UpdateGrokOAuthCredentialsIfUnchanged(
@@ -153,9 +227,11 @@ type refreshAPICacheStub struct {
 	lockErr       error
 	releaseCalls  int
 	releaseCtxErr error
+	lockTTL       time.Duration
 	deleteCalls   int
 	deleteKey     string
 	deleteCtxErr  error
+	deleteErr     error
 }
 
 func (c *refreshAPICacheStub) GetAccessToken(context.Context, string) (string, error) {
@@ -170,10 +246,11 @@ func (c *refreshAPICacheStub) DeleteAccessToken(ctx context.Context, key string)
 	c.deleteCalls++
 	c.deleteKey = key
 	c.deleteCtxErr = ctx.Err()
-	return nil
+	return c.deleteErr
 }
 
-func (c *refreshAPICacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+func (c *refreshAPICacheStub) AcquireRefreshLock(_ context.Context, _ string, ttl time.Duration) (bool, error) {
+	c.lockTTL = ttl
 	return c.lockResult, c.lockErr
 }
 

@@ -66,7 +66,7 @@ func TestQuotaRecoveryEnvironmentOverrides(t *testing.T) {
 	t.Setenv("QUOTA_RECOVERY_INTERVAL_SECONDS", "86400")
 	t.Setenv("QUOTA_RECOVERY_BATCH_SIZE", "25")
 	t.Setenv("QUOTA_RECOVERY_CONCURRENCY", "2")
-	t.Setenv("QUOTA_RECOVERY_TIMEOUT_SECONDS", "15")
+	t.Setenv("QUOTA_RECOVERY_TIMEOUT_SECONDS", "90")
 	t.Setenv("QUOTA_RECOVERY_JITTER_SECONDS", "5")
 
 	cfg, err := Load()
@@ -76,6 +76,35 @@ func TestQuotaRecoveryEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 86400, cfg.QuotaRecovery.IntervalSeconds)
 	require.Equal(t, 25, cfg.QuotaRecovery.BatchSize)
 	require.Equal(t, 2, cfg.QuotaRecovery.Concurrency)
-	require.Equal(t, 15, cfg.QuotaRecovery.TimeoutSeconds)
+	require.Equal(t, 90, cfg.QuotaRecovery.TimeoutSeconds)
 	require.Equal(t, 5, cfg.QuotaRecovery.JitterSeconds)
+}
+
+func TestQuotaRecoveryRejectsUnsafeTimeoutAtStartup(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("QUOTA_RECOVERY_ENABLED", "true")
+	t.Setenv("QUOTA_RECOVERY_TIMEOUT_SECONDS", "25")
+
+	_, err := Load()
+	require.EqualError(t, err, "validate config error: quota_recovery.timeout_seconds must be at least 75 seconds when quota_recovery.enabled=true; update QUOTA_RECOVERY_TIMEOUT_SECONDS or quota_recovery.timeout_seconds to 75 or higher before starting")
+}
+
+func TestQuotaRecoveryTimeoutMinimum(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	cfg.QuotaRecovery.Enabled = true
+	cfg.QuotaRecovery.TimeoutSeconds = 75
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestQuotaRecoveryUnsafeTimeoutIsIgnoredWhileDisabled(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	cfg.QuotaRecovery.Enabled = false
+	cfg.QuotaRecovery.TimeoutSeconds = 25
+
+	require.NoError(t, cfg.Validate())
 }

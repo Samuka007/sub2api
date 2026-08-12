@@ -11,6 +11,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func quotaRecoveryObservationFor(target, owner *service.Account) service.QuotaRecoveryObservation {
+	credentials := make(map[string]any, len(owner.Credentials))
+	for key, value := range owner.Credentials {
+		credentials[key] = value
+	}
+	cloneID := func(value *int64) *int64 {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		return &copy
+	}
+	return service.QuotaRecoveryObservation{
+		AccountID:                            target.ID,
+		RateLimitedAt:                        target.RateLimitedAt.UTC(),
+		RateLimitResetAt:                     target.RateLimitResetAt.UTC(),
+		AccountUpdatedAt:                     target.UpdatedAt.UTC(),
+		CredentialOwnerID:                    owner.ID,
+		CredentialOwnerUpdatedAt:             owner.UpdatedAt.UTC(),
+		CredentialOwnerCredentials:           credentials,
+		CredentialOwnerProxyID:               cloneID(owner.ProxyID),
+		CredentialOwnerProxyFallbackOriginID: cloneID(owner.ProxyFallbackOriginID),
+		CredentialOwnerPlatform:              owner.Platform,
+		CredentialOwnerType:                  owner.Type,
+		CredentialOwnerParentAccountID:       cloneID(owner.ParentAccountID),
+		CredentialOwnerStatus:                owner.Status,
+		CredentialOwnerSchedulable:           owner.Schedulable,
+		CredentialOwnerQuotaDimension:        owner.QuotaDimensionOrDefault(),
+	}
+}
+
+func accountCredentialSnapshotFor(account *service.Account) service.AccountCredentialSnapshot {
+	credentials := make(map[string]any, len(account.Credentials))
+	for key, value := range account.Credentials {
+		credentials[key] = value
+	}
+	cloneID := func(value *int64) *int64 {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		return &copy
+	}
+	return service.AccountCredentialSnapshot{
+		AccountID:             account.ID,
+		Credentials:           credentials,
+		UpdatedAt:             account.UpdatedAt.UTC(),
+		ProxyID:               cloneID(account.ProxyID),
+		ProxyFallbackOriginID: cloneID(account.ProxyFallbackOriginID),
+		Platform:              account.Platform,
+		Type:                  account.Type,
+		ParentAccountID:       cloneID(account.ParentAccountID),
+		Status:                account.Status,
+		Schedulable:           account.Schedulable,
+		QuotaDimension:        account.QuotaDimensionOrDefault(),
+	}
+}
+
 func (s *AccountRepoSuite) TestListQuotaRecoveryCandidatesFiltersAndPaginatesByID() {
 	now := time.Now().UTC().Truncate(time.Second)
 	limitedAt := now.Add(-10 * time.Minute)
@@ -126,6 +184,247 @@ func (s *AccountRepoSuite) TestListQuotaRecoveryCandidatesFiltersAndPaginatesByI
 	s.Require().Empty(empty)
 }
 
+func (s *AccountRepoSuite) TestUpdateCredentialsIfUnchangedReturnsGenerationsAndEmitsOutbox() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "quota-recovery-credential-receipt",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"access_token":  "old-access",
+			"refresh_token": "old-refresh",
+		},
+	})
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	newCredentials := map[string]any{
+		"access_token":   "new-access",
+		"refresh_token":  "new-refresh",
+		"_token_version": int64(42),
+	}
+
+	result, applied, err := s.repo.UpdateCredentialsIfUnchanged(
+		s.ctx,
+		accountCredentialSnapshotFor(observed),
+		newCredentials,
+	)
+	s.Require().NoError(err)
+	s.Require().True(applied)
+	s.Require().Equal(observed.UpdatedAt, result.PreviousUpdatedAt)
+	s.Require().False(result.UpdatedAt.IsZero())
+	s.Require().True(result.UpdatedAt.After(result.PreviousUpdatedAt))
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal("new-access", got.GetCredential("access_token"))
+	s.Require().Equal("new-refresh", got.GetCredential("refresh_token"))
+	s.Require().Equal(result.UpdatedAt, got.UpdatedAt)
+
+	var outboxCount int
+	s.Require().NoError(scanSingleRow(
+		s.ctx,
+		s.repo.sql,
+		"SELECT COUNT(*) FROM scheduler_outbox WHERE event_type = $1 AND account_id = $2",
+		[]any{service.SchedulerOutboxEventAccountChanged, account.ID},
+		&outboxCount,
+	))
+	s.Require().Equal(1, outboxCount)
+}
+
+func (s *AccountRepoSuite) TestUpdateCredentialsIfUnchangedAllowsUnrelatedGenerationChange() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "quota-recovery-credential-unrelated-change",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Schedulable: true,
+		Credentials: map[string]any{"refresh_token": "same-refresh"},
+	})
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	_, err = s.client.Account.UpdateOneID(account.ID).
+		SetStatus(service.StatusDisabled).
+		Save(s.ctx)
+	s.Require().NoError(err)
+	changed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().False(changed.UpdatedAt.Equal(observed.UpdatedAt))
+
+	result, applied, err := s.repo.UpdateCredentialsIfUnchanged(
+		s.ctx,
+		accountCredentialSnapshotFor(observed),
+		map[string]any{"refresh_token": "rotated-refresh"},
+	)
+	s.Require().NoError(err)
+	s.Require().True(applied)
+	s.Require().Equal(changed.UpdatedAt, result.PreviousUpdatedAt)
+	s.Require().True(result.UpdatedAt.After(result.PreviousUpdatedAt))
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusDisabled, got.Status)
+	s.Require().Equal("rotated-refresh", got.GetCredential("refresh_token"))
+}
+
+func TestUpdateCredentialsIfUnchangedStaysMonotonicAfterWaitingForRowLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := testEntClient(t)
+	repo := newAccountRepositoryWithSQL(client, integrationDB, nil)
+	account := mustCreateAccount(t, client, &service.Account{
+		Name:        "quota-recovery-credential-lock-generation",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Schedulable: true,
+		Credentials: map[string]any{"refresh_token": "old-refresh"},
+	})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM scheduler_outbox WHERE account_id = $1", account.ID)
+		_ = client.Account.DeleteOneID(account.ID).Exec(context.Background())
+	})
+	observed, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+
+	blockerTx, err := integrationDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = blockerTx.Rollback() })
+	laterGeneration := time.Now().UTC().Add(10 * time.Second)
+	_, err = blockerTx.ExecContext(ctx,
+		"UPDATE accounts SET status = $1, updated_at = $2 WHERE id = $3",
+		service.StatusDisabled,
+		laterGeneration,
+		account.ID,
+	)
+	require.NoError(t, err)
+
+	type updateResult struct {
+		result  service.AccountCredentialConditionalUpdateResult
+		applied bool
+		err     error
+	}
+	resultCh := make(chan updateResult, 1)
+	go func() {
+		result, applied, updateErr := repo.UpdateCredentialsIfUnchanged(
+			ctx,
+			accountCredentialSnapshotFor(observed),
+			map[string]any{"refresh_token": "rotated-refresh"},
+		)
+		resultCh <- updateResult{result: result, applied: applied, err: updateErr}
+	}()
+
+	select {
+	case result := <-resultCh:
+		_ = blockerTx.Rollback()
+		t.Fatalf("conditional credential update bypassed row lock: %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, blockerTx.Commit())
+
+	select {
+	case result := <-resultCh:
+		require.NoError(t, result.err)
+		require.True(t, result.applied)
+		require.WithinDuration(t, laterGeneration, result.result.PreviousUpdatedAt, time.Microsecond)
+		require.True(t, result.result.UpdatedAt.After(result.result.PreviousUpdatedAt),
+			"the credential update generation must not move backward to the statement start time")
+		got, getErr := repo.GetByID(ctx, account.ID)
+		require.NoError(t, getErr)
+		require.Equal(t, result.result.UpdatedAt, got.UpdatedAt)
+		require.Equal(t, service.StatusDisabled, got.Status)
+		require.Equal(t, "rotated-refresh", got.GetCredential("refresh_token"))
+	case <-ctx.Done():
+		t.Fatalf("conditional credential update did not resume after row lock release: %v", ctx.Err())
+	}
+}
+
+func (s *AccountRepoSuite) TestUpdateCredentialsIfUnchangedRejectsCredentialAndIdentityChanges() {
+	tests := []struct {
+		name   string
+		mutate func(accountID int64) error
+	}{
+		{
+			name: "credentials",
+			mutate: func(accountID int64) error {
+				_, err := s.client.Account.UpdateOneID(accountID).
+					SetCredentials(map[string]any{"refresh_token": "manual-refresh"}).
+					Save(s.ctx)
+				return err
+			},
+		},
+		{
+			name: "platform identity",
+			mutate: func(accountID int64) error {
+				_, err := s.client.Account.UpdateOneID(accountID).
+					SetPlatform(service.PlatformAnthropic).
+					Save(s.ctx)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			account := mustCreateAccount(s.T(), s.client, &service.Account{
+				Name:        "quota-recovery-credential-conflict-" + test.name,
+				Platform:    service.PlatformOpenAI,
+				Type:        service.AccountTypeOAuth,
+				Schedulable: true,
+				Credentials: map[string]any{"refresh_token": "observed-refresh"},
+			})
+			observed, err := s.repo.GetByID(s.ctx, account.ID)
+			s.Require().NoError(err)
+			s.Require().NoError(test.mutate(account.ID))
+
+			_, applied, err := s.repo.UpdateCredentialsIfUnchanged(
+				s.ctx,
+				accountCredentialSnapshotFor(observed),
+				map[string]any{"refresh_token": "provider-refresh"},
+			)
+			s.Require().NoError(err)
+			s.Require().False(applied)
+			got, err := s.repo.GetByID(s.ctx, account.ID)
+			s.Require().NoError(err)
+			s.Require().NotEqual("provider-refresh", got.GetCredential("refresh_token"))
+		})
+	}
+}
+
+func TestUpdateCredentialsIfUnchangedRollsBackWhenOutboxInsertFails(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	account := mustCreateAccount(t, client, &service.Account{
+		Name:        "quota-recovery-credential-outbox-rollback",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Schedulable: true,
+		Credentials: map[string]any{"refresh_token": "old-refresh"},
+	})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM scheduler_outbox WHERE account_id = $1", account.ID)
+		_ = client.Account.DeleteOneID(account.ID).Exec(context.Background())
+	})
+	baseRepo := newAccountRepositoryWithSQL(client, integrationDB, nil)
+	observed, err := baseRepo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	failingRepo := newAccountRepositoryWithSQL(client, &failAtomicSchedulerOutboxSQLExecutor{sqlExecutor: integrationDB}, nil)
+
+	_, applied, err := failingRepo.UpdateCredentialsIfUnchanged(
+		ctx,
+		accountCredentialSnapshotFor(observed),
+		map[string]any{"refresh_token": "new-refresh"},
+	)
+	require.Error(t, err)
+	require.False(t, applied)
+	got, err := baseRepo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, "old-refresh", got.GetCredential("refresh_token"))
+
+	var outboxCount int
+	require.NoError(t, integrationDB.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1",
+		account.ID,
+	).Scan(&outboxCount))
+	require.Zero(t, outboxCount)
+}
+
 func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedIsScopedAndEmitsOutbox() {
 	now := time.Now().UTC().Truncate(time.Second)
 	limitedAt := now.Add(-5 * time.Minute)
@@ -151,14 +450,8 @@ func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedIsScopedAndEmitsOutbox()
 	cacheRecorder := &schedulerCacheRecorder{}
 	s.repo.schedulerCache = cacheRecorder
 
-	wrongGeneration := service.QuotaRecoveryObservation{
-		AccountID:                account.ID,
-		RateLimitedAt:            limitedAt.Add(time.Second),
-		RateLimitResetAt:         resetAt,
-		AccountUpdatedAt:         observed.UpdatedAt,
-		CredentialOwnerID:        account.ID,
-		CredentialOwnerUpdatedAt: observed.UpdatedAt,
-	}
+	wrongGeneration := quotaRecoveryObservationFor(observed, observed)
+	wrongGeneration.RateLimitedAt = limitedAt.Add(time.Second)
 	cleared, err := s.repo.ClearRateLimitIfUnchanged(s.ctx, wrongGeneration)
 	s.Require().NoError(err)
 	s.Require().False(cleared)
@@ -174,6 +467,7 @@ func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedIsScopedAndEmitsOutbox()
 	s.Require().NoError(err)
 	s.Require().Nil(got.RateLimitedAt)
 	s.Require().Nil(got.RateLimitResetAt)
+	s.Require().True(got.UpdatedAt.After(observed.UpdatedAt))
 	s.Require().Equal(service.StatusActive, got.Status)
 	s.Require().True(got.Schedulable)
 	s.Require().NotNil(got.OverloadUntil)
@@ -219,17 +513,7 @@ func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedRejectsConcurrentAccount
 	s.Require().NoError(err)
 	s.Require().False(updated.UpdatedAt.Equal(observed.UpdatedAt))
 
-	cleared, err := s.repo.ClearRateLimitIfUnchanged(
-		s.ctx,
-		service.QuotaRecoveryObservation{
-			AccountID:                account.ID,
-			RateLimitedAt:            limitedAt,
-			RateLimitResetAt:         resetAt,
-			AccountUpdatedAt:         observed.UpdatedAt,
-			CredentialOwnerID:        account.ID,
-			CredentialOwnerUpdatedAt: observed.UpdatedAt,
-		},
-	)
+	cleared, err := s.repo.ClearRateLimitIfUnchanged(s.ctx, quotaRecoveryObservationFor(observed, observed))
 	s.Require().NoError(err)
 	s.Require().False(cleared)
 
@@ -237,6 +521,44 @@ func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedRejectsConcurrentAccount
 	s.Require().NoError(err)
 	s.Require().NotNil(got.RateLimitedAt)
 	s.Require().NotNil(got.RateLimitResetAt)
+}
+
+func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedRejectsDifferentCredentialsAtSameUpdatedAt() {
+	now := time.Now().UTC().Truncate(time.Second)
+	limitedAt := now.Add(-5 * time.Minute)
+	resetAt := now.Add(30 * time.Minute)
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:             "quota-recovery-exact-credentials-cas",
+		Platform:         service.PlatformOpenAI,
+		Type:             service.AccountTypeOAuth,
+		Schedulable:      true,
+		Credentials:      map[string]any{"access_token": "observed"},
+		RateLimitedAt:    &limitedAt,
+		RateLimitResetAt: &resetAt,
+	})
+	observed, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	observation := quotaRecoveryObservationFor(observed, observed)
+
+	updateResult, err := s.repo.sql.ExecContext(
+		s.ctx,
+		"UPDATE accounts SET credentials = $1::jsonb, updated_at = $2 WHERE id = $3",
+		`{"access_token":"manually-reauthorized"}`,
+		observed.UpdatedAt,
+		account.ID,
+	)
+	s.Require().NoError(err)
+	rowsAffected, err := updateResult.RowsAffected()
+	s.Require().NoError(err)
+	s.Require().EqualValues(1, rowsAffected)
+
+	cleared, err := s.repo.ClearRateLimitIfUnchanged(s.ctx, observation)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal("manually-reauthorized", got.GetCredential("access_token"))
+	s.Require().NotNil(got.RateLimitedAt)
 }
 
 func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedRejectsConcurrentSparkParentUpdate() {
@@ -271,19 +593,14 @@ func (s *AccountRepoSuite) TestClearRateLimitIfUnchangedRejectsConcurrentSparkPa
 	s.Require().NoError(err)
 	s.Require().False(updatedParent.UpdatedAt.Equal(observedParent.UpdatedAt))
 
-	observation := service.QuotaRecoveryObservation{
-		AccountID:                shadow.ID,
-		RateLimitedAt:            limitedAt,
-		RateLimitResetAt:         resetAt,
-		AccountUpdatedAt:         observedShadow.UpdatedAt,
-		CredentialOwnerID:        parent.ID,
-		CredentialOwnerUpdatedAt: observedParent.UpdatedAt,
-	}
+	observation := quotaRecoveryObservationFor(observedShadow, observedParent)
 	cleared, err := s.repo.ClearRateLimitIfUnchanged(s.ctx, observation)
 	s.Require().NoError(err)
 	s.Require().False(cleared)
 
-	observation.CredentialOwnerUpdatedAt = updatedParent.UpdatedAt
+	currentParent, err := s.repo.GetByID(s.ctx, updatedParent.ID)
+	s.Require().NoError(err)
+	observation = quotaRecoveryObservationFor(observedShadow, currentParent)
 	cleared, err = s.repo.ClearRateLimitIfUnchanged(s.ctx, observation)
 	s.Require().NoError(err)
 	s.Require().True(cleared)
@@ -339,14 +656,7 @@ func TestClearRateLimitIfUnchangedWaitsForConcurrentSparkParentUpdate(t *testing
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rowsAffected)
 
-	observation := service.QuotaRecoveryObservation{
-		AccountID:                shadow.ID,
-		RateLimitedAt:            limitedAt,
-		RateLimitResetAt:         resetAt,
-		AccountUpdatedAt:         observedShadow.UpdatedAt,
-		CredentialOwnerID:        parent.ID,
-		CredentialOwnerUpdatedAt: observedParent.UpdatedAt,
-	}
+	observation := quotaRecoveryObservationFor(observedShadow, observedParent)
 	type clearResult struct {
 		cleared bool
 		err     error
@@ -392,17 +702,12 @@ func TestClearRateLimitIfUnchangedRollsBackWhenOutboxInsertFails(t *testing.T) {
 	failingRepo := newAccountRepositoryWithSQL(client, &failAtomicSchedulerOutboxSQLExecutor{
 		sqlExecutor: integrationDB,
 	}, nil)
+	observed, err := failingRepo.GetByID(context.Background(), account.ID)
+	require.NoError(t, err)
 
 	cleared, err := failingRepo.ClearRateLimitIfUnchanged(
 		context.Background(),
-		service.QuotaRecoveryObservation{
-			AccountID:                account.ID,
-			RateLimitedAt:            limitedAt,
-			RateLimitResetAt:         resetAt,
-			AccountUpdatedAt:         account.UpdatedAt,
-			CredentialOwnerID:        account.ID,
-			CredentialOwnerUpdatedAt: account.UpdatedAt,
-		},
+		quotaRecoveryObservationFor(observed, observed),
 	)
 	require.Error(t, err)
 	require.False(t, cleared)

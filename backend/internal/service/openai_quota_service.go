@@ -275,7 +275,8 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, st
 	for recovered := false; ; {
 		quotaHeaders, expectedTaskID, headerErr := s.buildCodexQuotaHeaders(callCtx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 		if headerErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr)
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr).
+				WithCause(headerErr)
 		}
 		resp, err := client.R().
 			SetContext(callCtx).
@@ -304,10 +305,10 @@ func (s *OpenAIQuotaService) queryUsage(ctx context.Context, accountID int64, st
 	payload.FetchedAt = time.Now().Unix()
 	details, detailsErr := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
 	if detailsErr != nil {
+		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", detailsErr)
 		if strictCreditDetails {
 			return nil, detailsErr
 		}
-		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", detailsErr)
 	}
 	if details != nil {
 		hasDetailCount := details.AvailableCount != nil
@@ -361,7 +362,8 @@ func (s *OpenAIQuotaService) CacheResetCreditsSnapshot(ctx context.Context, acco
 func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64) (*openAIRateLimitResetCreditDetails, error) {
 	quotaHeaders, _, headerErr := s.buildCodexQuotaHeaders(ctx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 	if headerErr != nil {
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr)
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr).
+			WithCause(headerErr)
 	}
 	resp, err := client.R().
 		SetContext(ctx).
@@ -448,7 +450,8 @@ func (s *OpenAIQuotaService) ResetCreditWithRequestID(
 	for recovered := false; ; {
 		headers, expectedTaskID, headerErr := s.buildCodexQuotaHeaders(callCtx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 		if headerErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr)
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_AUTH_FAILED", "failed to build upstream authentication: %v", headerErr).
+				WithCause(headerErr)
 		}
 		headers["content-type"] = "application/json"
 		resp, err := client.R().
@@ -515,6 +518,10 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 			return "", "", "", false, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_SHADOW_RESOLVE_FAILED", "failed to resolve shadow account: %v", rerr)
 		}
 		account = resolved
+	}
+	if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return "", "", "", false, fmt.Errorf("validate quota recovery credential owner: %w", err)
 	}
 
 	chatGPTAccountID = strings.TrimSpace(account.GetCredential("chatgpt_account_id"))
@@ -597,24 +604,39 @@ func (s *OpenAIQuotaService) isAgentIdentityAccount(ctx context.Context, account
 }
 
 func (s *OpenAIQuotaService) buildCodexQuotaHeaders(ctx context.Context, accountID int64, accessToken, chatGPTAccountID string, fedRAMP bool) (map[string]string, string, error) {
-	headers := buildCodexCommonHeaders(accessToken, chatGPTAccountID, fedRAMP)
 	if s == nil || s.accountRepo == nil {
-		return headers, "", nil
+		return buildCodexCommonHeaders(accessToken, chatGPTAccountID, fedRAMP), "", nil
 	}
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil || account == nil {
+		if quotaRecoveryCredentialRefreshReceiptFromContext(ctx) != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return nil, "", fmt.Errorf("%w: quota header credential reread failed", ErrQuotaRecoveryCredentialStateChanged)
+		}
 		if strings.TrimSpace(accessToken) == "" {
 			return nil, "", fmt.Errorf("agent identity account credentials are unavailable")
 		}
-		return headers, "", nil
+		return buildCodexCommonHeaders(accessToken, chatGPTAccountID, fedRAMP), "", nil
 	}
 	if account.IsShadow() {
 		if resolved, resolveErr := resolveCredentialAccount(ctx, s.accountRepo, account); resolveErr == nil && resolved != nil {
 			account = resolved
-		} else if strings.TrimSpace(accessToken) == "" {
-			return nil, "", fmt.Errorf("agent identity shadow credentials are unavailable")
+		} else {
+			if quotaRecoveryCredentialRefreshReceiptFromContext(ctx) != nil {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return nil, "", fmt.Errorf("%w: quota header credential owner resolve failed", ErrQuotaRecoveryCredentialStateChanged)
+			}
+			if strings.TrimSpace(accessToken) == "" {
+				return nil, "", fmt.Errorf("agent identity shadow credentials are unavailable")
+			}
+			return buildCodexCommonHeaders(accessToken, chatGPTAccountID, fedRAMP), "", nil
 		}
 	}
+	if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return nil, "", err
+	}
+	headers := buildCodexCommonHeaders(accessToken, chatGPTAccountID, fedRAMP)
 	if !account.IsOpenAIAgentIdentity() {
 		return headers, "", nil
 	}

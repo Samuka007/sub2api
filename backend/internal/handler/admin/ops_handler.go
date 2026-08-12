@@ -14,7 +14,8 @@ import (
 )
 
 type OpsHandler struct {
-	opsService *service.OpsService
+	opsService    *service.OpsService
+	quotaRecovery *service.QuotaRecoveryService
 }
 
 // GetErrorLogByID returns ops error log detail.
@@ -70,6 +71,30 @@ func parseOpsViewParam(c *gin.Context) string {
 
 func NewOpsHandler(opsService *service.OpsService) *OpsHandler {
 	return &OpsHandler{opsService: opsService}
+}
+
+// ProvideOpsHandler wires the read-only Hermes status dependency while keeping
+// NewOpsHandler's one-argument constructor compatible with focused ops tests.
+func ProvideOpsHandler(
+	opsService *service.OpsService,
+	quotaRecovery *service.QuotaRecoveryService,
+) *OpsHandler {
+	h := NewOpsHandler(opsService)
+	h.quotaRecovery = quotaRecovery
+	return h
+}
+
+// GetHermesStatus returns a redacted, process-local Hermes health snapshot.
+// It intentionally does not require ops monitoring to be enabled: operators
+// must be able to distinguish a deliberate disabled configuration from a
+// missing or unhealthy worker.
+// GET /api/v1/admin/ops/hermes/status
+func (h *OpsHandler) GetHermesStatus(c *gin.Context) {
+	if h == nil || h.quotaRecovery == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Hermes status service not available")
+		return
+	}
+	response.Success(c, h.quotaRecovery.GetStatus())
 }
 
 // GetErrorLogs lists ops error logs.
