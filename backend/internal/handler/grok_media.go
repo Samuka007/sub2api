@@ -412,8 +412,22 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 
 		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result.OpenAIForwardResult), true, nil)
 		recordUsage := func() {
-			if shouldRecordGrokMediaUsage(endpoint, requestModel, result.OpenAIForwardResult) {
-				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result.OpenAIForwardResult, requestModel, body, requestID)
+			// Fork failure paths (missing response id, bind failure, commit
+			// failure) always bill the already-consumed upstream work: a video
+			// request that failed to persist its binding must not silently
+			// become unbilled, since status polling can no longer attribute it
+			// to an account. The successful create path keeps the upstream
+			// deferred-billing gate below (status/content polling bills).
+			if endpoint.IsGenerationRequest() && strings.TrimSpace(requestModel) != "" {
+				billResult := result.OpenAIForwardResult
+				// Upstream v0.1.173 defers video billing to status polling and
+				// leaves create-time VideoCount at 0; the fork's failure path
+				// bills one video unit immediately so failed persistence does
+				// not silently drop the charge.
+				if isGrokVideoCreateEndpoint(endpoint) && billResult != nil && billResult.VideoCount <= 0 {
+					billResult.VideoCount = 1
+				}
+				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, requestModel, body, requestID)
 			}
 		}
 		if endpoint.DefersSuccessResponse() {
