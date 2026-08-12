@@ -409,6 +409,22 @@ func (c *grokMediaBindingCache) DeleteSessionAccountID(_ context.Context, _ int6
 	return nil
 }
 
+func (c *grokMediaBindingCache) SetGrokVideoPendingBilling(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) GetGrokVideoPendingBilling(context.Context, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *grokMediaBindingCache) ClaimGrokVideoBilled(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (c *grokMediaBindingCache) ReleaseGrokVideoBilled(context.Context, string) error {
+	return nil
+}
+
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	var requestBody []byte
 	if req.Body != nil {
@@ -785,7 +801,7 @@ func TestGrokMedia429FailoverIsBounded(t *testing.T) {
 func TestGrokMediaVideoResponseWaitsForAccountBinding(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Run("definite binding failure returns 502 without task id", func(t *testing.T) {
+	t.Run("definite binding failure still returns upstream success response", func(t *testing.T) {
 		cache := &grokMediaBindingCache{videoSetErr: errors.New("redis write failed")}
 		usageRepo := &grokMediaUsageLogRepo{}
 		h, _, _, router, cleanup := newGrokCredentialFailoverHandlerWithCache(t, "postmap_cancel", cache, usageRepo)
@@ -803,16 +819,16 @@ func TestGrokMediaVideoResponseWaitsForAccountBinding(t *testing.T) {
 		router.ServeHTTP(recorder, req)
 
 		require.True(t, bindingObserved)
-		require.False(t, writerCommittedAtBind)
-		require.Equal(t, http.StatusBadGateway, recorder.Code, recorder.Body.String())
-		require.NotContains(t, recorder.Body.String(), "resp_healthy")
-		require.False(t, gjson.Get(recorder.Body.String(), "request_id").Exists())
+		// Upstream writes the success response before binding; the binding
+		// failure is only warned, never turned into a gateway error.
+		require.True(t, writerCommittedAtBind)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		require.Equal(t, "resp_healthy", gjson.Get(recorder.Body.String(), "id").String())
 		accountID, err := h.gatewayService.ResolveGrokMediaVideoRequestAccount(context.Background(), ptrInt64(901), "resp_healthy", 903, 902)
 		require.ErrorIs(t, err, service.ErrStickySessionNotFound)
+		// Create never bills directly; billing defers to status polling.
 		usageLogs := usageRepo.snapshot()
-		require.Len(t, usageLogs, 1)
-		require.Equal(t, int64(801), usageLogs[0].AccountID)
-		require.Equal(t, 1, usageLogs[0].VideoCount)
+		require.Len(t, usageLogs, 0)
 		require.Zero(t, accountID)
 	})
 
@@ -833,7 +849,7 @@ func TestGrokMediaVideoResponseWaitsForAccountBinding(t *testing.T) {
 
 		router.ServeHTTP(generation, generateReq)
 
-		require.False(t, writerCommittedAtBind)
+		require.True(t, writerCommittedAtBind)
 		require.Equal(t, http.StatusOK, generation.Code, generation.Body.String())
 		require.Equal(t, "resp_healthy", gjson.Get(generation.Body.String(), "id").String())
 		accountID, err := h.gatewayService.ResolveGrokMediaVideoRequestAccount(context.Background(), ptrInt64(901), "resp_healthy", 903, 902)

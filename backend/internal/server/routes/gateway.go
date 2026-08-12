@@ -2,6 +2,7 @@ package routes
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -217,6 +218,29 @@ func RegisterGatewayRoutes(
 	// still wrap API-key auth to observe the identity-resolution hook.
 	// Billing historically runs after API-key auth but before the group-assignment guard.
 	r.GET("/v1/sub2api/billing", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, h.Gateway.KeyBillingInfo)
+	// Upstream media and voice root aliases retain the same auth and routing invariants.
+	r.POST("/videos", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
+	r.POST("/tts", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		if getGroupPlatform(c) == service.PlatformGrok {
+			h.OpenAIGateway.GrokVoice(c, "tts")
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
+	r.POST("/stt", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		if getGroupPlatform(c) == service.PlatformGrok {
+			h.OpenAIGateway.GrokVoice(c, "stt")
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
+	r.POST("/web_search", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		if getGroupPlatform(c) == service.PlatformGrok {
+			h.Gateway.WebSearch(c)
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
 
 	{
 		gateway := r.Group("/v1", clientRequestID, opsErrorLogger, modelTraceCandidate)
@@ -234,9 +258,52 @@ func RegisterGatewayRoutes(
 		gateway.POST("/images/generations/async", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
 		gateway.POST("/images/edits/async", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
 		gateway.POST("/images/batches", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.BatchImage.Submit)
+		gateway.POST("/videos", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
 		gateway.POST("/videos/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
 		gateway.POST("/videos/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoEditHandler)
 		gateway.POST("/videos/extensions", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoExtensionHandler)
+		voiceHandler := func(endpoint string) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				if getGroupPlatform(c) != service.PlatformGrok {
+					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+					c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
+					return
+				}
+				h.OpenAIGateway.GrokVoice(c, endpoint)
+			}
+		}
+		gateway.POST("/tts", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, voiceHandler("tts"))
+		gateway.POST("/stt", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, voiceHandler("stt"))
+		gateway.POST("/custom-voices", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, voiceHandler("custom-voices"))
+		customVoicePathHandler := func(c *gin.Context) {
+			if getGroupPlatform(c) != service.PlatformGrok {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
+				return
+			}
+			h.OpenAIGateway.GrokVoice(c, grokCustomVoiceEndpoint(c))
+		}
+		gateway.GET("/custom-voices", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, voiceHandler("custom-voices"))
+		gateway.GET("/custom-voices/:voice_id/audio", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, customVoicePathHandler)
+		gateway.GET("/custom-voices/:voice_id", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, customVoicePathHandler)
+		gateway.PATCH("/custom-voices/:voice_id", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, customVoicePathHandler)
+		gateway.DELETE("/custom-voices/:voice_id", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, customVoicePathHandler)
+		gateway.GET("/realtime", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+			if getGroupPlatform(c) != service.PlatformGrok {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Realtime API is not supported for this platform"}})
+				return
+			}
+			h.OpenAIGateway.GrokRealtime(c)
+		})
+		gateway.POST("/web_search", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+			if getGroupPlatform(c) != service.PlatformGrok {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
+				return
+			}
+			h.Gateway.WebSearch(c)
+		})
 	}
 	r.POST("/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, countTokensHandler)
 	{
@@ -256,6 +323,12 @@ func RegisterGatewayRoutes(
 		gateway.POST("/images/batches/:id/cancel", h.BatchImage.Cancel)
 		gateway.DELETE("/images/batches/:id", h.BatchImage.DeleteRecord)
 		gateway.DELETE("/images/batches/:id/outputs", h.BatchImage.DeleteOutputs)
+		gateway.GET("/videos/generations/:request_id", videoStatusHandler)
+		gateway.GET("/videos/generations/:request_id/content", videoContentHandler)
+		gateway.GET("/videos/edits/:request_id", videoStatusHandler)
+		gateway.GET("/videos/edits/:request_id/content", videoContentHandler)
+		gateway.GET("/videos/extensions/:request_id", videoStatusHandler)
+		gateway.GET("/videos/extensions/:request_id/content", videoContentHandler)
 		gateway.GET("/videos/:request_id", videoStatusHandler)
 		gateway.GET("/videos/:request_id/content", videoContentHandler)
 	}
@@ -289,8 +362,47 @@ func RegisterGatewayRoutes(
 	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, modelsHandler)
 	r.POST("/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, countTokensHandler)
 	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, h.AsyncImage.Get)
+	r.GET("/videos/generations/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoContentHandler)
+	r.GET("/videos/edits/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoContentHandler)
+	r.GET("/videos/extensions/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoContentHandler)
+	r.GET("/videos/generations/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoStatusHandler)
+	r.GET("/videos/edits/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoStatusHandler)
+	r.GET("/videos/extensions/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoStatusHandler)
 	r.GET("/videos/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoStatusHandler)
 	r.GET("/videos/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, videoContentHandler)
+
+	rootVoiceHandler := func(endpoint string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			if getGroupPlatform(c) != service.PlatformGrok {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
+				return
+			}
+			h.OpenAIGateway.GrokVoice(c, endpoint)
+		}
+	}
+	r.POST("/custom-voices", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootVoiceHandler("custom-voices"))
+	rootCustomVoicePathHandler := func(c *gin.Context) {
+		if getGroupPlatform(c) != service.PlatformGrok {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
+			return
+		}
+		h.OpenAIGateway.GrokVoice(c, grokCustomVoiceEndpoint(c))
+	}
+	r.GET("/custom-voices", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootVoiceHandler("custom-voices"))
+	r.GET("/custom-voices/:voice_id/audio", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
+	r.GET("/custom-voices/:voice_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
+	r.PATCH("/custom-voices/:voice_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
+	r.DELETE("/custom-voices/:voice_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
+	r.GET("/realtime", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		if getGroupPlatform(c) != service.PlatformGrok {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Realtime API is not supported for this platform"}})
+			return
+		}
+		h.OpenAIGateway.GrokRealtime(c)
+	})
 
 	// Codex direct aliases.
 	{
@@ -347,4 +459,20 @@ func getGroupPlatform(c *gin.Context) string {
 		}
 	}
 	return apiKey.Group.Platform
+}
+
+// grokCustomVoiceEndpoint derives the upstream Voice endpoint for the
+// /custom-voices/:voice_id[/audio] routes.
+//
+// The /audio suffix must be decided from the matched route template, not from
+// the raw URL path: a voice literally named "audio" makes GET
+// /custom-voices/audio match /custom-voices/:voice_id, and a raw-path suffix
+// check would rewrite it to custom-voices/audio/audio — turning a profile
+// lookup into an audio download.
+func grokCustomVoiceEndpoint(c *gin.Context) string {
+	endpoint := "custom-voices/" + c.Param("voice_id")
+	if strings.HasSuffix(c.FullPath(), "/:voice_id/audio") {
+		endpoint += "/audio"
+	}
+	return endpoint
 }

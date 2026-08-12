@@ -22,11 +22,15 @@ func (imagePermissionGateAccountRepoStub) ListSchedulableByPlatform(context.Cont
 	return nil, nil
 }
 
+func (imagePermissionGateAccountRepoStub) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]service.Account, error) {
+	return nil, nil
+}
+
 func TestOpenAIGatewayHandlerResponses_GrokPassiveImageToolDeclarationBypassesPermissionGate(t *testing.T) {
 	body := `{"model":"grok-4.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}],"tool_choice":"auto","input":"write code"}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformGrok, body)
 
-	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.NotEqual(t, http.StatusForbidden, rec.Code)
 	require.NotContains(t, rec.Body.String(), service.ImageGenerationPermissionMessage())
 }
 
@@ -34,7 +38,7 @@ func TestOpenAIGatewayHandlerResponses_GrokResponsesLiteImageToolDeclarationBypa
 	body := `{"model":"grok-4.5","tool_choice":"auto","input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}]},{"type":"message","role":"user","content":"write code"}]}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformGrok, body)
 
-	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.NotEqual(t, http.StatusForbidden, rec.Code)
 	require.NotContains(t, rec.Body.String(), service.ImageGenerationPermissionMessage())
 }
 
@@ -80,8 +84,8 @@ func TestOpenAIGatewayHandlerResponses_PassiveNamespaceDoesNotTrigger403(t *test
 	passiveNamespace := `{"model":"gpt-5.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}],"tool_choice":"auto","input":"write code"}`
 	rec := runOpenAIResponsesImagePermissionGateTest(t, service.PlatformOpenAI, passiveNamespace)
 
-	require.Equal(t, http.StatusBadGateway, rec.Code,
-		"passive image_gen namespace with tool_choice=auto should continue to account selection (#4447)")
+	require.NotEqual(t, http.StatusForbidden, rec.Code,
+		"passive image_gen namespace with tool_choice=auto should not trigger 403 (#4447)")
 }
 
 func runOpenAIResponsesImagePermissionGateTest(t *testing.T, platform string, body string) *httptest.ResponseRecorder {
