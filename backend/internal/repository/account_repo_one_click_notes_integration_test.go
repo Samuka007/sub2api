@@ -540,6 +540,7 @@ func newOneClickAccountNotesIntegrationAdminService(repo *accountRepository) ser
 		nil,                  // affiliateService
 		nil,                  // compositeRouteRepo
 		nil,                  // compositeResolver
+		nil,                  // channelCacheInvalidator
 	)
 }
 

@@ -90,6 +90,7 @@ func TestCreateShadowWaitsBehindPlus401DeleteAndLeavesNoOrphan(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 
 	gateTx, err := integrationDB.BeginTx(ctx, nil)
