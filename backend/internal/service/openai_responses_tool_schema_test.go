@@ -222,6 +222,13 @@ func buildToolSchemaNullTypeBody(t *testing.T, hits int) []byte {
 // 全量拷贝；/v1/responses 的 body 上限是 gateway.max_body_size（默认 256MB），
 // 构造请求可以塞进百万级命中，会被放大成 TB 级 memcpy。这里用分配次数锁死该行为：
 // 命中数放大 500 倍，分配次数不得随之增长。
+//
+// 分配次数对编译优化敏感：appendOpenAIResponsesToolSchemaNullType 里若用
+// bytes.Equal(body[...], []byte(typ.Raw)) 校验偏移，[]byte(string) 转换在未应用
+// memequal 消除的构建里会按命中数线性分配，让 small+40 的紧阈值在 CI 上漂移
+// （观测到 large≈115~165，本地仅 ≈18）。改为逐字节比对后分配次数稳定；断言改用
+// 相对 small 的固定倍数 + 常数上界，既挡住线性回归（此处会是 2000 量级），又对
+// 分配器的受控环境漂移保持鲁棒。
 func TestSanitizeOpenAIResponsesToolParameterTypes_RewriteCountIndependentOfHits(t *testing.T) {
 	small := buildToolSchemaNullTypeBody(t, 4)
 	large := buildToolSchemaNullTypeBody(t, 2000)
@@ -233,8 +240,8 @@ func TestSanitizeOpenAIResponsesToolParameterTypes_RewriteCountIndependentOfHits
 		_, _, _ = sanitizeOpenAIResponsesToolParameterTypes(large)
 	})
 
-	// 命中切片扩容是对数级，留出充裕余量；线性写法在这里会是 2000 量级。
-	require.Less(t, largeAllocs, smallAllocs+40,
+	// 命中切片扩容是对数级；线性写法在这里会是 2000 量级。
+	require.Less(t, largeAllocs, smallAllocs*20+80,
 		"分配次数随命中数线性增长，说明退回了逐路径全量重写 (small=%v large=%v)", smallAllocs, largeAllocs)
 
 	// 同时确认大 body 的结果确实全部修好了。

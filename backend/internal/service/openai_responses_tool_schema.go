@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"sort"
 
 	"github.com/tidwall/gjson"
@@ -120,8 +119,13 @@ func appendOpenAIResponsesToolSchemaNullType(
 	if typ.Index <= 0 || end > len(body) {
 		return
 	}
-	if !bytes.Equal(body[typ.Index:end], []byte(typ.Raw)) {
-		return
+	// 逐字节比对，避免 []byte(typ.Raw) 的字符串→切片分配。该分配在未应用
+	// memequal 优化的构建里会随命中数线性增长，让复杂度守卫测试的分配次数在
+	// 不同构建环境间漂移。直接索引 body 与 typ.Raw 的字节即可，无需任何分配。
+	for i := 0; i < len(typ.Raw); i++ {
+		if body[typ.Index+i] != typ.Raw[i] {
+			return
+		}
 	}
 	*hits = append(*hits, openAIResponsesToolSchemaNullType{offset: typ.Index, length: len(typ.Raw)})
 }
