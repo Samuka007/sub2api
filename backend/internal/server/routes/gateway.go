@@ -304,6 +304,14 @@ func RegisterGatewayRoutes(
 			}
 			h.Gateway.WebSearch(c)
 		})
+		gateway.POST("/x_search", bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+			if getGroupPlatform(c) != service.PlatformGrok {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "X Search API is not supported for this platform"}})
+				return
+			}
+			h.Gateway.XSearch(c)
+		})
 	}
 	r.POST("/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, countTokensHandler)
 	{
@@ -402,6 +410,14 @@ func RegisterGatewayRoutes(
 			return
 		}
 		h.OpenAIGateway.GrokRealtime(c)
+	})
+	r.POST("/x_search", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		if getGroupPlatform(c) != service.PlatformGrok {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "X Search API is not supported for this platform"}})
+			return
+		}
+		h.Gateway.XSearch(c)
 	})
 
 	// Codex direct aliases.

@@ -11,12 +11,12 @@
 | 私有仓库 | `Alle-Group/sub2api` |
 | 主分支 | `main` |
 | 上游项目 | `Wei-Shaw/sub2api` |
-| 上游基线 | `v0.1.175` / `93c32fa1a2450351561abc46156d2e28cb5f74ca` |
-| 上游升级标签 | `v0.1.175` |
+| 上游基线 | `v0.1.176` / `e803e3851c0a7e222cfadeafad7b8636ab959d11` |
+| 上游升级标签 | `v0.1.176` |
 | 最近内部发布标签 | `company-v0.1.164.1` |
 | 最近内部发布提交 | `f3c6895a6f0b64eb6a638e3f89ea9b86a08c7c1d` |
 | 初始私有功能恢复提交 | `69c85913dc0732382eb2e1572c488b47b89b511d` |
-| 同步目标源码版本 | `0.1.175` |
+| 同步目标源码版本 | `0.1.176` |
 
 当前私有功能源码由官方基线、部署时保留的源码冻结包以及生产补丁重建而成。
 它是一个功能等价、可以继续协作开发的源码版本，但不能声称与已经丢失的原始生产提交逐字节一致。
@@ -24,25 +24,25 @@
 如需查看相对官方基线新增的全部私有代码，可执行：
 
 ```bash
-git diff v0.1.175..HEAD
+git diff v0.1.176..HEAD
 ```
 
-## 上游 v0.1.175 文档与功能
+## 上游 v0.1.176 文档与功能
 
-本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.175` 时，
+本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.176` 时，
 同时更新了上游的 [中文说明](README_CN.md) 和 [日文说明](README_JA.md)，用于查阅完整的
 Sub2API 公共功能、安装方式和配置项。两份上游说明中的公开仓库克隆、安装和发布命令仅供参考；
 内部开发、发布和部署必须遵循 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。
 该文档中的仓库地址是迁移前记录；当前团队仓库地址以本页“仓库信息”和本地 `origin` 为准：
 `git@github.com:Alle-Group/sub2api.git`。
 
-`v0.1.175` 在 `v0.1.173` 基线上收敛 Codex OAuth 设备指纹、修正 Responses 可见输出 TTFT、
-空 `response.completed` 流 failover、reasoning item ID 剥离、嵌套 `data.usage` 信封解析与
-确定性 400 透传；新增上游响应模型计费（`response_model` 计费源，渠道显式开启后按上游成功响应
-自报模型计价）、API Key 配额/有效期数值校验、账号统计 service-tier 定价、Gemini 独占最小
-tool schema 归一化、大文件备份分卷上传与恢复，以及安全审计的 cyber 事件范围与 WebSocket
-轮次去重。风控后端异常时不再阻断提示词请求（fail-open）。本区间无新增数据库迁移，
-新开关沿用上游安全默认值。
+`v0.1.176` 在 `v0.1.175` 基线上新增分组逐模型定价（`221_group_model_pricing` 迁移，可关闭
+长上下文阶梯）、`grok-4.6` 目录与官方定价、JWT tier 识别 Grok 订阅档位、独立 `/x_search`
+端点（Chat/Responses 往返保留 `x_search` 并补 `sources` 抽取）、SuperGrokPro 用 4.5 窗口区分
+Heavy、账号徽章与用量格按实时档位展示、Grok 快照增量刷新，并修正长上下文默认开启、Realtime
+仅在观察音频后计费、未登记 Grok 文本模型回退 `grok-4.5` 价卡、定时备份 leader 锁、分组平台
+变更时失效渠道缓存、定价冲突检测对齐定价缓存 key，以及探测响应未跑完不再落标「上游不支持
+Responses」。
 
 组合分组能力继续保留。管理员可以使用组合分组将请求模型解析到具体供应商，完整运维说明见
 [`docs/COMPOSITE_GROUPS.md`](docs/COMPOSITE_GROUPS.md)。
