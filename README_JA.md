@@ -3,7 +3,7 @@
 >
 > このリポジトリは `Alle-Group/sub2api` です。社内の開発、リリース、デプロイ規則については、
 > [プライベートプロジェクト説明](README.md) と [Git コラボレーション規則](GIT_WORKFLOW.md) を参照してください。
-> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.173` 日本語ドキュメントを保持しています。
+> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.175` 日本語ドキュメントを保持しています。
 > 上流の公開リポジトリ向けクローン、インストール、リリース手順は、このリポジトリの規則を上書きしません。
 
 <div align="center">
@@ -12,7 +12,7 @@
 
 # Sub2API
 
-[![Go](https://img.shields.io/badge/Go-1.25.7-00ADD8.svg)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
@@ -205,7 +205,7 @@ Sub2API を拡張・統合するコミュニティプロジェクト:
 
 | コンポーネント | 技術 |
 |-----------|------------|
-| バックエンド | Go 1.25.7, Gin, Ent |
+| バックエンド | Go 1.26.5, Gin, Ent |
 | フロントエンド | Vue 3.4+, Vite 5+, TailwindCSS |
 | データベース | PostgreSQL 15+ |
 | キャッシュ/キュー | Redis 7+ |
