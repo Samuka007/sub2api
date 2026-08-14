@@ -205,6 +205,11 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
+      # docker 凭据写入 job 私有目录，避免与并行 job（其他 PR / pre-release）
+      # 共享 runner 的 ~/.docker/config.json 时被互相 logout 覆盖
+      - name: Isolate docker credentials
+        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:

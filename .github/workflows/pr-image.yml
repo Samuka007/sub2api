@@ -35,6 +35,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # docker 凭据写入 job 私有目录，避免与并行 job（其他 PR / pre-release / release）
+      # 共享 runner 的 ~/.docker/config.json 时互相 logout 覆盖
+      - name: Isolate docker credentials
+        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
       - uses: pnpm/action-setup@v6
         with:
           version: 9.15.9
