@@ -9,6 +9,7 @@
           </h1>
           <p class="mt-1.5 text-sm text-[#71807c] dark:text-[#899995]">{{ t('dashboard.workspaceSummary') }}</p>
         </div>
+        <UserDashboardContactBanner />
         <router-link to="/keys" class="create-key-button">
           <Icon name="plus" size="sm" :stroke-width="2" />
           <span>{{ t('dashboard.createApiKey') }}</span>
@@ -87,6 +88,7 @@ import { getMyPlatformQuotas } from '@/api/user'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 import UserDashboardStats from '@/components/user/dashboard/UserDashboardStats.vue'
+import UserDashboardContactBanner from '@/components/user/dashboard/UserDashboardContactBanner.vue'
 import UserDashboardPlatformBreakdown from '@/components/user/dashboard/UserDashboardPlatformBreakdown.vue'
 import UserDashboardCharts from '@/components/user/dashboard/UserDashboardCharts.vue'
 import UserDashboardQuotaPanel from '@/components/user/dashboard/UserDashboardQuotaPanel.vue'

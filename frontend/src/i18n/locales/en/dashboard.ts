@@ -79,7 +79,11 @@ export default {
     addBalanceWithCode: 'Add balance with a code',
     loadFailed: 'Failed to load dashboard',
     loadFailedDescription: 'The account overview is temporarily unavailable. Please try again.',
-    retry: 'Try again'
+    retry: 'Try again',
+    contactBanner: {
+      label: 'Contact us',
+      dismiss: 'Dismiss',
+    },
   },
 
   // Groups (shared)

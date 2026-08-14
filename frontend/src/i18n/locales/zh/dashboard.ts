@@ -79,7 +79,11 @@ export default {
     addBalanceWithCode: '使用兑换码充值',
     loadFailed: '仪表盘加载失败',
     loadFailedDescription: '暂时无法获取账户概览，请稍后重试。',
-    retry: '重试'
+    retry: '重试',
+    contactBanner: {
+      label: '客服联系方式',
+      dismiss: '关闭',
+    },
   },
 
   // Groups (shared)
