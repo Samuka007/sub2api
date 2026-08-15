@@ -18,8 +18,7 @@ jobs:
         with:
           go-version-file: backend/go.mod
           check-latest: false
-          cache: true
-          cache-dependency-path: backend/go.sum
+          cache: false
       - name: Run govulncheck
         working-directory: backend
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

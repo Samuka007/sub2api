@@ -263,8 +263,7 @@ jobs:
         with:
           go-version-file: backend/go.mod
           check-latest: false
-          cache: ${{ needs.resolve-release.outputs.release_mode == 'full' }}
-          cache-dependency-path: backend/go.sum
+          cache: false
 
       - name: Verify Go version
         run: test "$(go env GOVERSION)" = "go1.26.6"

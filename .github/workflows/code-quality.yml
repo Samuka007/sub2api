@@ -44,12 +44,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
+      # self-hosted: 本地 go-build/模块缓存常驻磁盘（持久），actions cache 反而
+      # 要压缩 20G+ 缓存导致 post 步骤挂死，故显式关闭
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
           check-latest: false
-          cache: true
-          cache-dependency-path: backend/go.sum
+          cache: false
       - name: Verify Go version
         run: test "$(go env GOVERSION)" = "go1.26.6"
       - name: Validate model tracing Compose environment
@@ -64,18 +65,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
+      # 同上：self-hosted 依赖本地缓存；golangci-lint 的 HOME 指向 runner.temp
+      # 会隔离掉模块/go-build 缓存，保持默认 HOME 以复用
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
           check-latest: false
-          cache: true
-          cache-dependency-path: backend/go.sum
+          cache: false
       - name: Verify Go version
         run: test "$(go env GOVERSION)" = "go1.26.6"
       - name: Run fast Go linters (low memory footprint)
         uses: golangci/golangci-lint-action@v9
         env:
-          HOME: ${{ runner.temp }}/golangci-lint-home
+          GOMEMLIMIT: 3GiB
         with:
           version: v2.9
           working-directory: backend
