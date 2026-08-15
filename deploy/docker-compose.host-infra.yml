@@ -10,7 +10,7 @@ services:
         BUILDKIT_SYNTAX: docker.1ms.run/docker/dockerfile:1.7
         VERSION: ${SUB2API_VERSION:-0.1.161+pricing-radar.model-iq.3}
         NODE_IMAGE: docker.1ms.run/library/node:24-alpine
-        GOLANG_IMAGE: docker.1ms.run/library/golang:1.26.5-alpine
+        GOLANG_IMAGE: docker.1ms.run/library/golang:1.26.6-alpine
         ALPINE_IMAGE: docker.1ms.run/library/alpine:3.21
         POSTGRES_IMAGE: docker.1ms.run/library/postgres:18.4-alpine3.24
         NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}

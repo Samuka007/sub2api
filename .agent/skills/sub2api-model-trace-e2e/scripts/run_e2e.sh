@@ -179,7 +179,7 @@ runtime_exec docker run -d --name sub2api-e2e-upstream \
   -v "$GEMINI_TLS_DIR:/tls:ro" \
   -v "$SKILL_DIR/assets/upstream-fixture.go:/app/upstream-fixture.go:ro" \
   -w /app \
-  golang:1.26.5 \
+  golang:1.26.6 \
   go run ./upstream-fixture.go >/dev/null
 assert_e2e_resource_owned container sub2api-e2e-upstream
 for ((i = 0; i < 120; i++)); do
@@ -203,7 +203,7 @@ runtime_exec docker run --rm \
   -v "$REPO_ROOT/backend:/src:ro" \
   -v "$BIN_DIR:/out" \
   -w /src \
-  golang:1.26.5 \
+  golang:1.26.6 \
   sh -c "CGO_ENABLED=0 GOOS=linux GOARCH=$E2E_GOARCH go build -tags embed -ldflags='-s -w -X main.Version=e2e-test' -o /out/sub2api ./cmd/server"
 [[ -x "$BIN_DIR/sub2api" ]] || fail "binary not produced at $BIN_DIR/sub2api"
 RAW_RST_CLIENT_BIN="$BIN_DIR/raw-http-rst-client"
@@ -264,7 +264,7 @@ runtime_exec docker run -d --name sub2api-e2e \
   -v sub2api-e2e-data:/data \
   -v "$BIN_DIR/sub2api:/app/sub2api:ro" \
   -v "$REPO_ROOT/backend/resources:/app/resources:ro" \
-  golang:1.26.5 \
+  golang:1.26.6 \
   sh -c 'cd /app && ./sub2api' >/dev/null
 assert_e2e_resource_owned container sub2api-e2e
 

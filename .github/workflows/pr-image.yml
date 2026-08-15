@@ -50,6 +50,8 @@ jobs:
           node-version: '24'
 
       - name: Build frontend (vite → backend/internal/web/dist)
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
         run: |
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend exec vite build
@@ -62,7 +64,7 @@ jobs:
           cache: false
 
       - name: Verify Go version
-        run: test "$(go env GOVERSION)" = "go1.26.5"
+        run: test "$(go env GOVERSION)" = "go1.26.6"
 
       - name: Set lowercase owner
         id: lowercase

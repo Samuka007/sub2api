@@ -267,7 +267,7 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Verify Go version
-        run: test "$(go env GOVERSION)" = "go1.26.5"
+        run: test "$(go env GOVERSION)" = "go1.26.6"
 
       - name: Set up QEMU
         if: needs.resolve-release.outputs.release_mode == 'full'
