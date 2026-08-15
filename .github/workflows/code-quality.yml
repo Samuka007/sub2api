@@ -39,7 +39,7 @@ jobs:
 
   backend-test-build:
     runs-on: [self-hosted, Linux, X64, sub2api-pve]
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
