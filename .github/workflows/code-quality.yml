@@ -79,7 +79,7 @@ jobs:
         with:
           version: v2.9
           working-directory: backend
-          args: --timeout=10m --enable-only=errcheck,govet,staticcheck
+          args: --timeout=20m --enable-only=errcheck,govet,staticcheck
 
   frontend-build:
     runs-on: [self-hosted, Linux, X64, sub2api-pve]
