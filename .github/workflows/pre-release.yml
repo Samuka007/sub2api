@@ -161,7 +161,8 @@ jobs:
         with:
           go-version-file: backend/go.mod
           check-latest: false
-          cache: false
+          cache: true
+          cache-dependency-path: backend/go.sum
 
       - name: Verify Go version
         run: test "$(go env GOVERSION)" = "go1.26.6"
