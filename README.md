@@ -11,12 +11,12 @@
 | 私有仓库 | `Alle-Group/sub2api` |
 | 主分支 | `main` |
 | 上游项目 | `Wei-Shaw/sub2api` |
-| 上游基线 | `v0.1.176` / `e803e3851c0a7e222cfadeafad7b8636ab959d11` |
-| 上游升级标签 | `v0.1.176` |
+| 上游基线 | `v0.1.177` / `073e92d17178a1ccdb0a27017f572f10c9c7ab62` |
+| 上游升级标签 | `v0.1.177` |
 | 最近内部发布标签 | `company-v0.1.164.1` |
 | 最近内部发布提交 | `f3c6895a6f0b64eb6a638e3f89ea9b86a08c7c1d` |
 | 初始私有功能恢复提交 | `69c85913dc0732382eb2e1572c488b47b89b511d` |
-| 同步目标源码版本 | `0.1.176` |
+| 同步目标源码版本 | `0.1.177` |
 
 当前私有功能源码由官方基线、部署时保留的源码冻结包以及生产补丁重建而成。
 它是一个功能等价、可以继续协作开发的源码版本，但不能声称与已经丢失的原始生产提交逐字节一致。
@@ -24,25 +24,26 @@
 如需查看相对官方基线新增的全部私有代码，可执行：
 
 ```bash
-git diff v0.1.176..HEAD
+git diff v0.1.177..HEAD
 ```
 
-## 上游 v0.1.176 文档与功能
+## 上游 v0.1.177 文档与功能
 
-本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.176` 时，
+本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.177` 时，
 同时更新了上游的 [中文说明](README_CN.md) 和 [日文说明](README_JA.md)，用于查阅完整的
 Sub2API 公共功能、安装方式和配置项。两份上游说明中的公开仓库克隆、安装和发布命令仅供参考；
 内部开发、发布和部署必须遵循 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。
 该文档中的仓库地址是迁移前记录；当前团队仓库地址以本页“仓库信息”和本地 `origin` 为准：
 `git@github.com:Alle-Group/sub2api.git`。
 
-`v0.1.176` 在 `v0.1.175` 基线上新增分组逐模型定价（`221_group_model_pricing` 迁移，可关闭
-长上下文阶梯）、`grok-4.6` 目录与官方定价、JWT tier 识别 Grok 订阅档位、独立 `/x_search`
-端点（Chat/Responses 往返保留 `x_search` 并补 `sources` 抽取）、SuperGrokPro 用 4.5 窗口区分
-Heavy、账号徽章与用量格按实时档位展示、Grok 快照增量刷新，并修正长上下文默认开启、Realtime
-仅在观察音频后计费、未登记 Grok 文本模型回退 `grok-4.5` 价卡、定时备份 leader 锁、分组平台
-变更时失效渠道缓存、定价冲突检测对齐定价缓存 key，以及探测响应未跑完不再落标「上游不支持
-Responses」。
+`v0.1.177` 在 `v0.1.176` 基线上新增分组用量按日汇总（`222_group_usage_daily_rollups` /
+`223_group_usage_rollup_timezone` 迁移，日汇总表自动汇聚，分组页与仪表盘用量统计性能大幅提升）、
+Codex 会话级 beta 功能头（`remote_compaction_v2`）与 `x-codex-turn-state` 回合状态回传（跨账号
+回显拦截）、原生 remote compaction v2 压缩探测（旧 `/responses/compact` 接口已下线）、远程压缩
+v2 与旧版压缩路由分离，并修正 Grok 长上下文计费仅跟随分组开关、带版本号 Grok 媒体模型
+（如 `grok-2-image-1212`）不再误按文本 token 计价、账号页自动刷新偏好加载时被覆盖失效。
+破坏性变更：Codex OAuth 账号指纹收敛默认值改为「关闭」，未显式配置的账号恢复透传客户端原始
+标识（已显式选择档位的账号行为不变）。
 
 组合分组能力继续保留。管理员可以使用组合分组将请求模型解析到具体供应商，完整运维说明见
 [`docs/COMPOSITE_GROUPS.md`](docs/COMPOSITE_GROUPS.md)。
