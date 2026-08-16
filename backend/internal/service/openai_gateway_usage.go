@@ -276,17 +276,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		).Warn("openai_usage.pricing_missing_record_zero_cost", zap.Error(err))
 		cost = &CostBreakdown{BillingMode: string(BillingModeToken)}
 	}
-	var anomaly usageLimitAnomaly
-	holdCharge := false
-	heldActualCost := 0.0
 	if result.ImageCount == 0 && result.VideoCount == 0 {
-		anomaly, holdCharge = s.billingService.detectUsageLimitAnomaly(billingModel, tokens)
-	}
-	if holdCharge {
-		heldActualCost = cost.ActualCost
-		heldCost := *cost
-		heldCost.ActualCost = 0
-		cost = &heldCost
+		if anomaly, ok := s.billingService.detectUsageLimitAnomaly(billingModel, tokens); ok {
+			logger.L().With(
+				zap.String("component", "service.openai_gateway"),
+				zap.String("model", billingModel),
+				zap.String("dimension", anomaly.Dimension),
+				zap.Int64("reported_tokens", anomaly.Reported),
+				zap.Int64("model_limit", anomaly.Limit),
+			).Warn("openai_usage.anomalous_usage_detected")
+		}
 	}
 
 	// response_model：按上游成功响应自报的模型计费（渠道显式开启才生效）。
@@ -448,10 +447,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）
-	if holdCharge {
-		zero := 0.0
-		usageLog.AccountStatsCost = &zero
-	} else if apiKey.GroupID != nil {
+	if apiKey.GroupID != nil {
 		applyAccountStatsCost(ctx, usageLog, s.channelService, s.billingService,
 			account.ID, *apiKey.GroupID, result.UpstreamModel, result.Model,
 			tokens, cost.TotalCost,
@@ -462,24 +458,6 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		recordModelTraceUsage(ctx, usageLog)
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 		logger.LegacyPrintf("service.openai_gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
-		s.deferredService.ScheduleLastUsedUpdate(account.ID)
-		return nil
-	}
-
-	if holdCharge {
-		logger.L().With(
-			zap.String("request_id", usageLog.RequestID),
-			zap.Int64("user_id", user.ID),
-			zap.Int64("account_id", account.ID),
-			zap.String("provider", account.Platform),
-			zap.String("model", billingModel),
-			zap.String("dimension", anomaly.Dimension),
-			zap.Int64("reported_tokens", anomaly.Reported),
-			zap.Int64("model_limit", anomaly.Limit),
-			zap.Float64("calculated_actual_cost", heldActualCost),
-		).Error("openai_usage.anomalous_usage_charge_held")
-		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
-		recordModelTraceUsage(ctx, usageLog)
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 		return nil
 	}

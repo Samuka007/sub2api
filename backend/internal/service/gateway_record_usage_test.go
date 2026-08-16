@@ -169,7 +169,7 @@ func TestGatewayServiceRecordUsage_BillingFingerprintFallsBackToContextRequestID
 	require.Equal(t, "local:req-local-123", billingRepo.lastCmd.RequestPayloadHash)
 }
 
-func TestGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsModelLimit(t *testing.T) {
+func TestGatewayServiceRecordUsage_BillsWhenReportedUsageExceedsModelLimit(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
 	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
@@ -211,12 +211,12 @@ func TestGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsModelLimit
 	})
 
 	require.NoError(t, err)
-	require.Zero(t, billingRepo.calls, "usage exceeding provider model limits must not be charged automatically")
-	require.NotNil(t, usageRepo.lastLog, "held usage must remain persisted for review")
+	require.Equal(t, 1, billingRepo.calls, "usage exceeding provider model limits is still billed")
+	require.NotNil(t, usageRepo.lastLog, "usage log must remain persisted for review")
 	require.Equal(t, 7_489_444, usageRepo.lastLog.InputTokens)
 	require.Equal(t, 41_378, usageRepo.lastLog.OutputTokens)
 	require.InDelta(t, 76.96334, usageRepo.lastLog.TotalCost, 1e-9)
-	require.Zero(t, usageRepo.lastLog.ActualCost, "held usage must not change user balance")
+	require.Positive(t, usageRepo.lastLog.ActualCost, "usage exceeding provider model limits is still billed")
 }
 
 func TestGatewayServiceRecordUsage_RecordsOnlyAvailableBalanceAsActualCost(t *testing.T) {

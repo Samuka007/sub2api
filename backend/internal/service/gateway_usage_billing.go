@@ -959,17 +959,15 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		CacheReadTokens:     result.Usage.CacheReadInputTokens,
 		ImageOutputTokens:   result.Usage.ImageOutputTokens,
 	}
-	var anomaly usageLimitAnomaly
-	holdCharge := false
-	heldActualCost := 0.0
 	if result.ImageCount == 0 {
-		anomaly, holdCharge = s.billingService.detectUsageLimitAnomaly(billingModel, reportedTokens)
-	}
-	if holdCharge {
-		heldActualCost = cost.ActualCost
-		heldCost := *cost
-		heldCost.ActualCost = 0
-		cost = &heldCost
+		if anomaly, ok := s.billingService.detectUsageLimitAnomaly(billingModel, reportedTokens); ok {
+			slog.Warn("usage_billing.anomalous_usage_detected",
+				"model", billingModel,
+				"dimension", anomaly.Dimension,
+				"reported_tokens", anomaly.Reported,
+				"model_limit", anomaly.Limit,
+			)
+		}
 	}
 
 	// response_model：按上游成功响应自报的模型计费（渠道显式开启才生效）。
@@ -1007,10 +1005,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		requestedModel, multiplier, imageMultiplier, accountRateMultiplier, billingType, cacheTTLOverridden, cost, opts)
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）
-	if holdCharge {
-		zero := 0.0
-		usageLog.AccountStatsCost = &zero
-	} else if apiKey.GroupID != nil {
+	if apiKey.GroupID != nil {
 		applyAccountStatsCost(ctx, usageLog, s.channelService, s.billingService,
 			account.ID, *apiKey.GroupID, result.UpstreamModel, result.Model,
 			// Anthropic's input_tokens excludes cache_read and cache_creation (billed separately);
@@ -1024,24 +1019,6 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		recordModelTraceUsage(ctx, usageLog)
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
-		s.deferredService.ScheduleLastUsedUpdate(account.ID)
-		return nil
-	}
-
-	if holdCharge {
-		slog.Error("usage_billing.anomalous_usage_charge_held",
-			"request_id", usageLog.RequestID,
-			"user_id", user.ID,
-			"account_id", account.ID,
-			"provider", account.Platform,
-			"model", billingModel,
-			"dimension", anomaly.Dimension,
-			"reported_tokens", anomaly.Reported,
-			"model_limit", anomaly.Limit,
-			"calculated_actual_cost", heldActualCost,
-		)
-		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
-		recordModelTraceUsage(ctx, usageLog)
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 		return nil
 	}

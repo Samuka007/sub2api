@@ -365,7 +365,7 @@ func TestOpenAIGatewayServiceRecordUsage_ZeroUsageStillWritesUsageLog(t *testing
 	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsModelLimit(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_BillsWhenReportedUsageExceedsModelLimit(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
 	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
@@ -407,12 +407,12 @@ func TestOpenAIGatewayServiceRecordUsage_HoldsChargeWhenReportedUsageExceedsMode
 	})
 
 	require.NoError(t, err)
-	require.Zero(t, billingRepo.calls, "usage exceeding provider model limits must not be charged automatically")
+	require.Equal(t, 1, billingRepo.calls, "usage exceeding provider model limits is still billed")
 	require.Equal(t, 1, usageRepo.calls)
 	require.NotNil(t, usageRepo.lastLog)
 	require.Equal(t, 2_000_001, usageRepo.lastLog.InputTokens)
 	require.Positive(t, usageRepo.lastLog.TotalCost)
-	require.Zero(t, usageRepo.lastLog.ActualCost, "held usage must remain pending manual review")
+	require.Positive(t, usageRepo.lastLog.ActualCost, "usage exceeding provider model limits is still billed")
 }
 
 func TestOpenAIGatewayServiceRecordUsage_MissingPricingRecordsZeroCostUsageLog(t *testing.T) {
