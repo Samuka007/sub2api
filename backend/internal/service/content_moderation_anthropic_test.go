@@ -71,6 +71,7 @@ func TestContentModerationAnthropicMessagesRequest(t *testing.T) {
 	defer server.Close()
 
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	cfg := defaultContentModerationConfig()
 	cfg.UpstreamProtocol = ContentModerationUpstreamProtocolAnthropicMessages
 	cfg.BaseURL = server.URL
@@ -222,6 +223,7 @@ func TestContentModerationAnthropicMessagesRoutesThroughProxy(t *testing.T) {
 		7: {ID: 7, Name: "anthropic-audit-proxy", Protocol: "http", Host: host, Port: port, Status: StatusActive},
 	}}
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	cfg := defaultContentModerationConfig()
 	cfg.UpstreamProtocol = ContentModerationUpstreamProtocolAnthropicMessages
 	cfg.BaseURL = "http://anthropic-moderation-proxy-test.invalid"
@@ -282,6 +284,7 @@ func TestContentModerationAnthropicPreBlockFailsClosedOnUnusableResult(t *testin
 				&contentModerationTestHashCache{},
 				nil, nil, nil, nil, nil,
 			)
+			t.Cleanup(func() { svc.Close() })
 
 			decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
 				UserID:   1001,
@@ -351,6 +354,7 @@ func TestContentModerationAnthropicPreBlockFailsClosedOnUnmoderatableInput(t *te
 				&contentModerationTestHashCache{},
 				nil, nil, nil, nil, nil,
 			)
+			t.Cleanup(func() { svc.Close() })
 			body, err := json.Marshal(map[string]any{
 				"messages": []any{map[string]any{
 					"role": "user",
@@ -416,6 +420,7 @@ func TestContentModerationAnthropicPreBlockKeepsNetworkFailurePolicy(t *testing.
 		&contentModerationTestHashCache{},
 		nil, nil, nil, nil, nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
 		UserID:   1001,
 		Endpoint: "/v1/chat/completions",
@@ -449,6 +454,7 @@ func TestContentModerationAnthropicHTTPStatusUsesSharedRetryPolicy(t *testing.T)
 			defer server.Close()
 
 			svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+			t.Cleanup(func() { svc.Close() })
 			cfg := defaultContentModerationConfig()
 			cfg.UpstreamProtocol = ContentModerationUpstreamProtocolAnthropicMessages
 			cfg.BaseURL = server.URL
@@ -477,6 +483,7 @@ func TestContentModerationUpstreamProtocolDefaultsAndValidation(t *testing.T) {
 
 	cfg.UpstreamProtocol = "unsupported"
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	require.ErrorContains(t, svc.validateConfig(context.Background(), cfg), "上游协议无效")
 }
 
@@ -529,6 +536,7 @@ func TestContentModerationUpdateConfigRequiresAnthropicModelAfterProtocolChange(
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
 	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	protocol := ContentModerationUpstreamProtocolAnthropicMessages
 	replacementMode := contentModerationAPIKeysModeReplace
 	replacementKeys := []string{"sk-ant-new"}
@@ -582,6 +590,7 @@ func TestContentModerationTestAPIKeysRejectsStoredKeysAcrossProtocolChange(t *te
 		}},
 		nil, nil, nil, nil, nil, nil, nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	_, err = svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{
 		UpstreamProtocol: ContentModerationUpstreamProtocolAnthropicMessages,
@@ -605,6 +614,7 @@ func TestContentModerationTestAPIKeysDoesNotPersistUnmoderatableInputAsKeyFailur
 		}},
 		nil, nil, nil, nil, nil, nil, nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	result, err := svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{
 		UpstreamProtocol: ContentModerationUpstreamProtocolAnthropicMessages,

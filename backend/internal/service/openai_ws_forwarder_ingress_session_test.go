@@ -119,6 +119,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -270,6 +271,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LeaseLossSendsRe
 		cancel: cancelControl,
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(&openAIWSSingleConnDialer{conn: upstreamConn})
 	defer pool.Close()
 
@@ -397,6 +399,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_IdleTimeoutRelea
 	}}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 	defer pool.Close()
 	svc := &OpenAIGatewayService{
@@ -513,6 +516,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_FollowupCreateCa
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
@@ -648,6 +652,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CodexImageBridge
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -857,6 +862,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_DedicatedModeDoe
 		conns: []openAIWSClientConn{upstreamConn1, upstreamConn2},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -1508,6 +1514,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -1655,6 +1662,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -1796,6 +1804,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreEnabledSkip
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -1928,6 +1937,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2060,6 +2070,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2192,6 +2203,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledToo
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2327,6 +2339,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2462,6 +2475,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 		conns: []openAIWSClientConn{captureConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2596,6 +2610,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 		conns: []openAIWSClientConn{captureConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{
@@ -2739,6 +2754,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreflightPingFai
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -2881,6 +2897,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledStr
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3033,6 +3050,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3188,6 +3206,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3334,6 +3353,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3475,6 +3495,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_WriteFailBeforeD
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3638,6 +3659,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3789,6 +3811,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledStr
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -3945,6 +3968,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 		conns: []openAIWSClientConn{firstConn, secondConn},
 	}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(dialer)
 
 	svc := &OpenAIGatewayService{
@@ -4315,6 +4339,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_ClientDisconnect
 	}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{

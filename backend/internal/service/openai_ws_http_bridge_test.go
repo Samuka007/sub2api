@@ -939,6 +939,7 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	captureConn := &openAIWSCaptureConn{}
 	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	pool.setClientDialerForTest(captureDialer)
 
 	svc := &OpenAIGatewayService{

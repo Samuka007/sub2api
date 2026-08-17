@@ -246,6 +246,7 @@ func TestOpenAIWSConnPoolHeadersFactoryRunsAtDialAndStalePrewarmIsDiscarded(t *t
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(func() { pool.Close() })
 	defer pool.Close()
 	pool.setClientDialerForTest(&openAIWSFakeDialer{})
 

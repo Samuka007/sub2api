@@ -129,6 +129,7 @@ func TestContentModerationCallRoutesThroughProxy(t *testing.T) {
 		7: {ID: 7, Name: "audit-proxy", Protocol: "http", Host: host, Port: port, Status: StatusActive},
 	}}
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	cfg := defaultContentModerationConfig()
 	cfg.BaseURL = "http://moderation-proxy-test.invalid"
@@ -156,6 +157,7 @@ func TestContentModerationProxyResolveFailureDoesNotFallBackToDirect(t *testing.
 
 	proxyRepo := &contentModerationTestProxyRepo{getByIDErr: errors.New("proxy deleted")}
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	cfg := defaultContentModerationConfig()
 	cfg.BaseURL = directSrv.URL
@@ -206,6 +208,7 @@ func TestContentModerationPreBlockFailsClosedWhenProxyUnavailable(t *testing.T) 
 		nil,
 		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
 		UserID:   1001,
@@ -235,6 +238,7 @@ func TestContentModerationProxyURLResolutionReflectsRevocation(t *testing.T) {
 	proxy := &Proxy{ID: 3, Name: "p", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: StatusActive}
 	proxyRepo := &contentModerationTestProxyRepo{proxies: map[int64]*Proxy{3: proxy}}
 	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	if _, err := svc.resolveModerationProxyURL(context.Background(), 3); err != nil {
 		t.Fatalf("resolve active proxy: %v", err)
@@ -255,6 +259,7 @@ func TestContentModerationUpdateConfigProxyIDSemantics(t *testing.T) {
 		5: {ID: 5, Name: "p", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: StatusActive},
 	}}
 	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	ctx := context.Background()
 
 	view, err := svc.UpdateConfig(ctx, UpdateContentModerationConfigInput{ProxyID: moderationProxyIDPtr(5)})
@@ -319,6 +324,7 @@ func TestContentModerationTestAPIKeysProxySemantics(t *testing.T) {
 		7: {ID: 7, Name: "audit-proxy", Protocol: "http", Host: host, Port: port, Status: StatusActive},
 	}}
 	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	// nil：沿用已保存配置的代理，测试请求应经过代理成功。
 	result, err := svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{APIKeys: []string{"sk-input"}})

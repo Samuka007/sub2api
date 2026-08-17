@@ -564,6 +564,9 @@ type ContentModerationService struct {
 	runtimeRefreshRetryAt    atomic.Int64
 	keyHealthMu              sync.Mutex
 	keyHealth                map[string]*contentModerationKeyHealth
+	stopCh                   chan struct{}
+	stopOnce                 sync.Once
+	workerWg                 sync.WaitGroup
 }
 
 type contentModerationRuntimeSnapshot struct {
@@ -621,19 +624,60 @@ func NewContentModerationService(
 		userRepo:             userRepo,
 		proxyRepo:            proxyRepo,
 		authCacheInvalidator: authCacheInvalidator,
-		emailService:         emailService,
 		httpClient:           servertiming.InstrumentClient(nil),
+		emailService:         emailService,
 		workerCount:          maxContentModerationWorkerCount,
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
+		stopCh:               make(chan struct{}),
 	}
 	if settingRepo != nil && repo != nil {
+		svc.workerWg.Add(svc.workerCount)
 		for i := 0; i < svc.workerCount; i++ {
 			go svc.worker(i)
 		}
+		svc.workerWg.Add(1)
 		go svc.cleanupWorker()
 	}
 	return svc
+}
+
+// Close 停止后台 worker 与清理循环。幂等；未启动 worker 的实例（nil repo/settingRepo）为空操作。
+func (s *ContentModerationService) Close() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
+		s.workerWg.Wait()
+	})
+}
+
+func (s *ContentModerationService) isStopped() bool {
+	if s == nil || s.stopCh == nil {
+		return true
+	}
+	select {
+	case <-s.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// sleepWorkerIdle 让空闲 worker 等待一秒或被 stop 信号打断；返回 false 表示应退出。
+func (s *ContentModerationService) sleepWorkerIdle() bool {
+	if s == nil || s.stopCh == nil {
+		return false
+	}
+	select {
+	case <-s.stopCh:
+		return false
+	case <-time.After(time.Second):
+		return true
+	}
 }
 
 func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModerationConfigView, error) {
@@ -1374,14 +1418,19 @@ func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInp
 		s.asyncDropped.Add(1)
 	}
 }
-
 func (s *ContentModerationService) worker(id int) {
+	defer s.workerWg.Done()
 	for {
+		if s.isStopped() {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), maxContentModerationTimeoutMS*time.Millisecond+10*time.Second)
 		runtimeSnapshot, err := s.loadRuntimeSnapshot(ctx)
 		if err != nil || runtimeSnapshot == nil || runtimeSnapshot.config == nil || id >= runtimeSnapshot.config.WorkerCount {
 			cancel()
-			time.Sleep(time.Second)
+			if !s.sleepWorkerIdle() {
+				return
+			}
 			continue
 		}
 		cfg := runtimeSnapshot.config
@@ -1600,14 +1649,18 @@ func (s *ContentModerationService) GetStatus(ctx context.Context) (*ContentModer
 		LastCleanupDeletedNonHit:     s.lastCleanupDeletedNonHit.Load(),
 	}, nil
 }
-
 func (s *ContentModerationService) cleanupWorker() {
+	defer s.workerWg.Done()
 	timer := time.NewTimer(contentModerationCleanupDelay)
 	defer timer.Stop()
 	for {
-		<-timer.C
-		s.runCleanupOnce()
-		timer.Reset(contentModerationCleanupInterval)
+		select {
+		case <-s.stopCh:
+			return
+		case <-timer.C:
+			s.runCleanupOnce()
+			timer.Reset(contentModerationCleanupInterval)
+		}
 	}
 }
 
