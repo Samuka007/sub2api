@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
@@ -696,7 +697,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	// Backend mode: block non-admin token refresh
-	if h.settingSvc.IsBackendModeEnabled(c.Request.Context()) && result.UserRole != "admin" {
+	if h.settingSvc.IsBackendModeEnabled(c.Request.Context()) && !domain.HasAdminRole(result.UserRoles) {
 		response.Forbidden(c, "Backend mode is active. Only admin login is allowed.")
 		return
 	}

@@ -147,7 +147,7 @@ type CreateUserInput struct {
 	Password      string
 	Username      string
 	Notes         string
-	Role          string // 空字符串表示使用默认角色(user);合法值 admin/user
+	Roles         []string // 管理员角色集合;空表示普通用户。合法值见 domain.ValidAdminRoles
 	Balance       *float64
 	Concurrency   int
 	RPMLimit      int
@@ -161,7 +161,7 @@ type UpdateUserInput struct {
 	Password      string
 	Username      *string
 	Notes         *string
-	Role          string   // 空字符串表示"未提供"(不修改);合法值 admin/user
+	Roles         []string // nil 表示"未提供"(不修改);空切片表示清空为普通用户
 	Balance       *float64 // 使用指针区分"未提供"和"设置为0"
 	Concurrency   *int     // 使用指针区分"未提供"和"设置为0"
 	RPMLimit      *int     // 使用指针区分"未提供"和"设置为0"

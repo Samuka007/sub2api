@@ -24,8 +24,8 @@
                 <h2 class="truncate text-2xl font-semibold text-gray-900 dark:text-white">
                   {{ displayName }}
                 </h2>
-                <span :class="['badge', user?.role === 'admin' ? 'badge-primary' : 'badge-gray']">
-                  {{ user?.role === 'admin' ? t('profile.administrator') : t('profile.user') }}
+                <span :class="['badge', isAdmin ? 'badge-primary' : 'badge-gray']">
+                  {{ isAdmin ? t('profile.administrator') : t('profile.user') }}
                 </span>
                 <span
                   :class="['badge', user?.status === 'active' ? 'badge-success' : 'badge-danger']"
@@ -187,6 +187,7 @@ import ProfileAvatarCard from '@/components/user/profile/ProfileAvatarCard.vue'
 import ProfileEditForm from '@/components/user/profile/ProfileEditForm.vue'
 import ProfileIdentityBindingsSection from '@/components/user/profile/ProfileIdentityBindingsSection.vue'
 import type { User, UserAuthBindingStatus, UserAuthProvider, UserProfileSourceContext } from '@/types'
+import { hasAdminRole } from '@/utils/adminPermissions'
 
 const props = withDefaults(defineProps<{
   user: User | null
@@ -233,6 +234,7 @@ function isEmailBound(user: User | null | undefined): boolean {
 }
 
 const avatarUrl = computed(() => props.user?.avatar_url?.trim() || '')
+const isAdmin = computed(() => hasAdminRole(props.user?.roles ?? []))
 const displayName = computed(() => props.user?.username?.trim() || props.user?.email?.trim() || t('profile.user'))
 const primaryEmailDisplay = computed(() => {
   const email = props.user?.email?.trim() || ''

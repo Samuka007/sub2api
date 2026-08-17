@@ -1893,7 +1893,7 @@ func TestContentModerationAutoBanSkipsAdminAccount(t *testing.T) {
 	userID := int64(1001)
 	repo := &contentModerationTestRepo{}
 	require.NoError(t, repo.CreateLog(context.Background(), newContentModerationFlaggedLog(userID)))
-	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Roles: []string{RoleSuperAdmin}, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
@@ -1941,7 +1941,7 @@ func TestContentModerationAdminBelowBanThresholdRecordsViolationOnly(t *testing.
 
 	userID := int64(1001)
 	repo := &contentModerationTestRepo{}
-	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Roles: []string{RoleSuperAdmin}, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 

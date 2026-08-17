@@ -102,6 +102,12 @@ func (_c *UserCreate) SetNillableRole(v *string) *UserCreate {
 	return _c
 }
 
+// SetRoles sets the "roles" field.
+func (_c *UserCreate) SetRoles(v []string) *UserCreate {
+	_c.mutation.SetRoles(v)
+	return _c
+}
+
 // SetBalance sets the "balance" field.
 func (_c *UserCreate) SetBalance(v float64) *UserCreate {
 	_c.mutation.SetBalance(v)
@@ -604,6 +610,10 @@ func (_c *UserCreate) defaults() error {
 		v := user.DefaultRole
 		_c.mutation.SetRole(v)
 	}
+	if _, ok := _c.mutation.Roles(); !ok {
+		v := user.DefaultRoles
+		_c.mutation.SetRoles(v)
+	}
 	if _, ok := _c.mutation.Balance(); !ok {
 		v := user.DefaultBalance
 		_c.mutation.SetBalance(v)
@@ -690,6 +700,9 @@ func (_c *UserCreate) check() error {
 		if err := user.RoleValidator(v); err != nil {
 			return &ValidationError{Name: "role", err: fmt.Errorf(`ent: validator failed for field "User.role": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.Roles(); !ok {
+		return &ValidationError{Name: "roles", err: errors.New(`ent: missing required field "User.roles"`)}
 	}
 	if _, ok := _c.mutation.Balance(); !ok {
 		return &ValidationError{Name: "balance", err: errors.New(`ent: missing required field "User.balance"`)}
@@ -795,6 +808,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
 		_node.Role = value
+	}
+	if value, ok := _c.mutation.Roles(); ok {
+		_spec.SetField(user.FieldRoles, field.TypeJSON, value)
+		_node.Roles = value
 	}
 	if value, ok := _c.mutation.Balance(); ok {
 		_spec.SetField(user.FieldBalance, field.TypeFloat64, value)
@@ -1195,6 +1212,18 @@ func (u *UserUpsert) SetRole(v string) *UserUpsert {
 // UpdateRole sets the "role" field to the value that was provided on create.
 func (u *UserUpsert) UpdateRole() *UserUpsert {
 	u.SetExcluded(user.FieldRole)
+	return u
+}
+
+// SetRoles sets the "roles" field.
+func (u *UserUpsert) SetRoles(v []string) *UserUpsert {
+	u.Set(user.FieldRoles, v)
+	return u
+}
+
+// UpdateRoles sets the "roles" field to the value that was provided on create.
+func (u *UserUpsert) UpdateRoles() *UserUpsert {
+	u.SetExcluded(user.FieldRoles)
 	return u
 }
 
@@ -1599,6 +1628,20 @@ func (u *UserUpsertOne) SetRole(v string) *UserUpsertOne {
 func (u *UserUpsertOne) UpdateRole() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateRole()
+	})
+}
+
+// SetRoles sets the "roles" field.
+func (u *UserUpsertOne) SetRoles(v []string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetRoles(v)
+	})
+}
+
+// UpdateRoles sets the "roles" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateRoles() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateRoles()
 	})
 }
 
@@ -2216,6 +2259,20 @@ func (u *UserUpsertBulk) SetRole(v string) *UserUpsertBulk {
 func (u *UserUpsertBulk) UpdateRole() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateRole()
+	})
+}
+
+// SetRoles sets the "roles" field.
+func (u *UserUpsertBulk) SetRoles(v []string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetRoles(v)
+	})
+}
+
+// UpdateRoles sets the "roles" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateRoles() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateRoles()
 	})
 }
 

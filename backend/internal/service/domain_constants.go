@@ -20,6 +20,28 @@ const (
 const (
 	RoleAdmin = domain.RoleAdmin
 	RoleUser  = domain.RoleUser
+
+	RoleSuperAdmin    = domain.RoleSuperAdmin
+	RoleBillingAdmin  = domain.RoleBillingAdmin
+	RoleUpstreamAdmin = domain.RoleUpstreamAdmin
+)
+
+// Admin permission constants (re-exported from domain).
+const (
+	PermissionSuperAdmin             = domain.PermissionSuperAdmin
+	PermissionUsersRead              = domain.PermissionUsersRead
+	PermissionUsersManage            = domain.PermissionUsersManage
+	PermissionUsersBalanceAdjust     = domain.PermissionUsersBalanceAdjust
+	PermissionRedeemCodesManage      = domain.PermissionRedeemCodesManage
+	PermissionPromoCodesManage       = domain.PermissionPromoCodesManage
+	PermissionAccountsManage         = domain.PermissionAccountsManage
+	PermissionGroupsManage           = domain.PermissionGroupsManage
+	PermissionProxiesManage          = domain.PermissionProxiesManage
+	PermissionChannelsManage         = domain.PermissionChannelsManage
+	PermissionOpenAIOAuthManage      = domain.PermissionOpenAIOAuthManage
+	PermissionGeminiOAuthManage      = domain.PermissionGeminiOAuthManage
+	PermissionAntigravityOAuthManage = domain.PermissionAntigravityOAuthManage
+	PermissionGrokOAuthManage        = domain.PermissionGrokOAuthManage
 )
 
 // Affiliate rebate settings

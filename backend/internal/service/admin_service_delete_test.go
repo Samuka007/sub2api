@@ -628,7 +628,7 @@ func TestAdminService_DeleteUser_NotFound(t *testing.T) {
 }
 
 func TestAdminService_DeleteUser_AdminGuard(t *testing.T) {
-	repo := &userRepoStub{user: &User{ID: 1, Role: RoleAdmin}}
+	repo := &userRepoStub{user: &User{ID: 1, Role: RoleAdmin, Roles: []string{RoleSuperAdmin}}}
 	svc := &adminServiceImpl{userRepo: repo}
 
 	err := svc.DeleteUser(context.Background(), 1)

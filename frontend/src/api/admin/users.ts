@@ -5,6 +5,7 @@
 
 import { apiClient } from '../client'
 import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
+import type { AdminRole } from '@/types'
 
 export interface AdminBindAuthIdentityChannelRequest {
   channel: string
@@ -132,7 +133,7 @@ export async function create(userData: {
   password: string
   username?: string
   notes?: string
-  role?: 'admin' | 'user'
+  roles?: AdminRole[]
   balance?: number
   concurrency?: number
   rpm_limit?: number

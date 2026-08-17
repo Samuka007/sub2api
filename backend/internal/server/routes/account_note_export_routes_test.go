@@ -43,6 +43,7 @@ func TestAdminRoutesProtectAndDispatchAccountNoteExport(t *testing.T) {
 	adminAuth := servermiddleware.AdminAuthMiddleware(func(c *gin.Context) {
 		switch c.GetHeader("Authorization") {
 		case "Bearer admin-token":
+			c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: 1, Roles: []string{service.RoleSuperAdmin}})
 			c.Next()
 		case "":
 			servermiddleware.AbortWithError(c, http.StatusUnauthorized, "UNAUTHORIZED", "Authorization required")

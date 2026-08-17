@@ -93,11 +93,15 @@ func ServerTimingHeaderValue(c *gin.Context) string {
 	if c == nil || c.Request == nil {
 		return ""
 	}
-	role, ok := GetUserRoleFromContext(c)
-	if !ok || role == "" {
+	// 管理员（任意管理角色）放行任意 UI 请求的 timing header。
+	if IsAdminContext(c) {
+		return servertiming.HeaderValue(c.Request.Context(), time.Now(), responseCacheStatus(c.Writer.Header()))
+	}
+	// 非管理员：仅放行已认证用户访问用户端 timing 路径。
+	if !isUserTimingPath(c.Request.URL.Path) {
 		return ""
 	}
-	if role != "admin" && !isUserTimingPath(c.Request.URL.Path) {
+	if _, ok := GetUserRoleFromContext(c); !ok {
 		return ""
 	}
 	return servertiming.HeaderValue(c.Request.Context(), time.Now(), responseCacheStatus(c.Writer.Header()))

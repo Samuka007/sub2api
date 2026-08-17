@@ -26,6 +26,7 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 		ID:           1,
 		Email:        "admin@example.com",
 		Role:         service.RoleAdmin,
+		Roles:        []string{service.RoleSuperAdmin},
 		Status:       service.StatusActive,
 		TokenVersion: 2,
 		Concurrency:  1,

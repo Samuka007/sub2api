@@ -206,6 +206,7 @@ func setupOneClickAccountNotesRouteTest(t *testing.T) (*gin.Engine, *oneClickAcc
 		ID:                   1,
 		Email:                "admin-route-test@example.com",
 		Role:                 service.RoleAdmin,
+		Roles:                []string{service.RoleSuperAdmin},
 		Status:               service.StatusActive,
 		TokenVersion:         1,
 		TokenVersionResolved: true,

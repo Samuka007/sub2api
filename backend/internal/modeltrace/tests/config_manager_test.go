@@ -213,7 +213,7 @@ func TestModelTraceConfigAdminGETPUTHidesSecretAndEnforcesCAS(t *testing.T) {
 	handler := modeltrace.NewAdminHandler(modeltrace.NewConfigManager(config.ModelTracingConfig{}, store, modelTracePrefixEncryptor{}, true))
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99, Roles: []string{"super_admin"}})
 		c.Set(string(middleware.ContextKeyUserRole), "admin")
 		c.Next()
 	})
@@ -252,7 +252,7 @@ func TestModelTraceConfigAdminAPIAcceptsCollectorWithoutLangfuseCredentials(t *t
 	handler := modeltrace.NewAdminHandler(manager)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99, Roles: []string{"super_admin"}})
 		c.Set(string(middleware.ContextKeyUserRole), "admin")
 		c.Next()
 	})
@@ -362,7 +362,7 @@ func TestModelTraceConfigAdminAPIRejectsEndpointCredentialsQueriesAndFragments(t
 			handler := modeltrace.NewAdminHandler(manager)
 			router := gin.New()
 			router.Use(func(c *gin.Context) {
-				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99, Roles: []string{"super_admin"}})
 				c.Set(string(middleware.ContextKeyUserRole), "admin")
 				c.Next()
 			})
@@ -410,7 +410,7 @@ func TestModelTraceConfigPublicReadDoesNotEchoInvalidStoredEndpoint(t *testing.T
 
 	g := gin.New()
 	g.Use(func(c *gin.Context) {
-		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99})
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 99, Roles: []string{"super_admin"}})
 		c.Set(string(middleware.ContextKeyUserRole), "admin")
 		c.Next()
 	})

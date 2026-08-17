@@ -13,6 +13,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/authidentity"
 	"github.com/Wei-Shaw/sub2api/ent/authidentitychannel"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -105,16 +106,13 @@ func (s *adminServiceImpl) GetUserIncludeDeleted(ctx context.Context, id int64) 
 	return s.userRepo.GetByIDIncludeDeleted(ctx, id)
 }
 
-// normalizeUserRole 校验并归一化角色输入。
-// 空字符串返回 fallback(未提供时的默认角色);非法值返回错误。
-func normalizeUserRole(role, fallback string) (string, error) {
-	if role == "" {
-		return fallback, nil
+// normalizeAdminRoles 校验并归一化管理员角色集合。
+// 非法角色返回错误；返回的集合去重、排序，并同步派生 legacy role 兼容值。
+func normalizeAdminRoles(roles []string) ([]string, error) {
+	if err := domain.ValidateAdminRoles(roles); err != nil {
+		return nil, err
 	}
-	if role != RoleAdmin && role != RoleUser {
-		return "", fmt.Errorf("invalid role: %q (must be %s or %s)", role, RoleAdmin, RoleUser)
-	}
-	return role, nil
+	return domain.NormalizeAdminRoles(roles), nil
 }
 
 func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInput) (*User, error) {
@@ -125,8 +123,8 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 		balance = s.settingService.GetDefaultBalance(ctx)
 	}
 
-	// 角色可由管理员在创建时指定(admin/user);未提供时默认 user。
-	role, err := normalizeUserRole(input.Role, RoleUser)
+	// 管理员角色集合可由管理员在创建时指定;未提供或为空时默认普通用户。
+	roles, err := normalizeAdminRoles(input.Roles)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +133,8 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 		Email:         input.Email,
 		Username:      input.Username,
 		Notes:         input.Notes,
-		Role:          role,
+		Roles:         roles,
+		Role:          domain.LegacyRoleForRoles(roles),
 		Balance:       balance,
 		Concurrency:   input.Concurrency,
 		RPMLimit:      input.RPMLimit,
@@ -149,7 +148,7 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 		return nil, err
 	}
 	// 创建管理员属权限敏感操作，落审计日志（含操作者），便于事后追溯。
-	if user.Role == RoleAdmin {
+	if domain.HasAdminRole(user.Roles) {
 		logger.LegacyPrintf("service.admin", "audit: admin user created actor_admin_id=%d target_user_id=%d",
 			input.ActorAdminID, user.ID)
 	}
@@ -157,7 +156,9 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 	return user, nil
 }
 
-// ensureNotLastAdmin 降级管理员前确认系统中仍存在其他管理员，防止零 admin 锁死。
+// ensureNotLastAdmin 移除超级管理员前确认系统中仍存在其他超级管理员，防止零
+// super_admin 锁死。Role 过滤走 legacy 兼容列（super_admin → "admin"），因此只统计
+// 超级管理员，而不是 billing/upstream 子角色。
 // 注：读取与写入之间存在竞态窗口，极端并发下仍可能双双降级；作为后台低频操作
 // 的兜底保护足够，彻底防护需依赖数据库层约束。
 func (s *adminServiceImpl) ensureNotLastAdmin(ctx context.Context) error {
@@ -207,14 +208,14 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		return nil, err
 	}
 
-	// Protect admin users: cannot disable admin accounts
-	if user.Role == "admin" && input.Status == "disabled" {
+	// Protect admin users: cannot disable super admin accounts
+	if user.HasRole(RoleSuperAdmin) && input.Status == "disabled" {
 		return nil, errors.New("cannot disable admin user")
 	}
 
 	oldConcurrency := user.Concurrency
 	oldStatus := user.Status
-	oldRole := user.Role
+	oldRoles := append([]string(nil), user.Roles...)
 	oldRPMLimit := user.RPMLimit
 	oldAllowedGroups := append([]int64(nil), user.AllowedGroups...)
 
@@ -247,20 +248,22 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		fields.Status = true
 	}
 
-	// 角色变更(admin/user);空字符串表示不修改。
-	if input.Role != "" {
-		role, err := normalizeUserRole(input.Role, user.Role)
+	// 角色集合变更;nil 表示"未提供"(不修改)。非 nil（含空切片）表示显式设置。
+	if input.Roles != nil {
+		roles, err := normalizeAdminRoles(input.Roles)
 		if err != nil {
 			return nil, err
 		}
 		// 防锁死保护：不允许降级系统中最后一个管理员（自我降级已在 handler 层拦截，
 		// 此处兜底覆盖跨管理员互降导致零 admin 的场景）。
-		if user.Role == RoleAdmin && role == RoleUser {
+		if user.HasRole(RoleSuperAdmin) && !containsString(roles, RoleSuperAdmin) {
 			if err := s.ensureNotLastAdmin(ctx); err != nil {
 				return nil, err
 			}
 		}
-		user.Role = role
+		user.Roles = roles
+		user.Role = domain.LegacyRoleForRoles(roles)
+		fields.Roles = true
 		fields.Role = true
 	}
 
@@ -284,9 +287,9 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	}
 
 	// 角色变更属权限敏感操作，落审计日志（含操作者），便于事后追溯。
-	if user.Role != oldRole {
-		logger.LegacyPrintf("service.admin", "audit: user role changed actor_admin_id=%d target_user_id=%d old_role=%s new_role=%s",
-			input.ActorAdminID, user.ID, oldRole, user.Role)
+	if !sameStringSet(user.Roles, oldRoles) {
+		logger.LegacyPrintf("service.admin", "audit: user role changed actor_admin_id=%d target_user_id=%d old_roles=%v new_roles=%v",
+			input.ActorAdminID, user.ID, oldRoles, user.Roles)
 	}
 
 	// 同步用户专属分组倍率
@@ -299,7 +302,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	if s.authCacheInvalidator != nil {
 		// RPMLimit 直接参与 billing_cache_service.checkRPM 的三级级联，
 		// allowed_groups 参与 API Key 专属分组授权判断；不失效缓存会让修改在一个 L2 TTL 内失去效果。
-		if user.Concurrency != oldConcurrency || user.Status != oldStatus || user.Role != oldRole || user.RPMLimit != oldRPMLimit || !sameInt64Set(user.AllowedGroups, oldAllowedGroups) {
+		if user.Concurrency != oldConcurrency || user.Status != oldStatus || !sameStringSet(user.Roles, oldRoles) || user.RPMLimit != oldRPMLimit || !sameInt64Set(user.AllowedGroups, oldAllowedGroups) {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, user.ID)
 		}
 	}
@@ -348,13 +351,44 @@ func sameInt64Set(a, b []int64) bool {
 	return true
 }
 
+// containsString reports whether s contains target.
+func containsString(s []string, target string) bool {
+	for _, v := range s {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
+// sameStringSet reports whether a and b contain the same multiset of values.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		if counts[v] == 0 {
+			return false
+		}
+		counts[v]--
+	}
+	return true
+}
+
 func (s *adminServiceImpl) DeleteUser(ctx context.Context, id int64) error {
-	// Protect admin users: cannot delete admin accounts
+	// Protect admin users: cannot delete super admin accounts
 	user, err := s.userRepo.GetByID(ctx, id)
 	if err != nil {
 		return err
 	}
-	if user.Role == "admin" {
+	if user.HasRole(RoleSuperAdmin) {
 		return errors.New("cannot delete admin user")
 	}
 

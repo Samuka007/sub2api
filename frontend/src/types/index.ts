@@ -36,6 +36,32 @@ export interface NotifyEmailEntry {
 
 export type UserAuthProvider = 'email' | 'linuxdo' | 'oidc' | 'wechat' | 'github' | 'google' | 'dingtalk'
 
+/**
+ * 管理员角色标识，与后端 users.roles 多角色集合一致。
+ * super_admin 拥有全部权限；billing_admin / upstream_admin 只拥有各自领域权限。
+ */
+export type AdminRole = 'super_admin' | 'billing_admin' | 'upstream_admin'
+
+/**
+ * 管理员权限标识（领域动作），与后端 domain 权限常量一致。
+ * 'admin.super' 仅 super_admin 可满足，用于标记超级管理员专属能力。
+ */
+export type AdminPermission =
+  | 'admin.super'
+  | 'admin.users.read'
+  | 'admin.users.manage'
+  | 'admin.users.balance.adjust'
+  | 'admin.redeem_codes.manage'
+  | 'admin.promo_codes.manage'
+  | 'admin.accounts.manage'
+  | 'admin.groups.manage'
+  | 'admin.proxies.manage'
+  | 'admin.channels.manage'
+  | 'admin.openai_oauth.manage'
+  | 'admin.gemini_oauth.manage'
+  | 'admin.antigravity_oauth.manage'
+  | 'admin.grok_oauth.manage'
+
 export interface UserAuthBindingStatus {
   bound?: boolean
   bound_count?: number
@@ -85,6 +111,7 @@ export interface User {
   oidc_bound?: boolean
   wechat_bound?: boolean
   role: 'admin' | 'user' // User role for authorization
+  roles?: AdminRole[] // 权威多角色集合；缺省/空 = 普通用户
   balance: number // User balance for API usage
   frozen_balance?: number // Balance currently held by async batch jobs
   concurrency: number // Allowed concurrent requests
@@ -1961,7 +1988,7 @@ export interface UpdateUserRequest {
   password?: string
   username?: string
   notes?: string
-  role?: 'admin' | 'user'
+  roles?: AdminRole[]
   balance?: number
   concurrency?: number
   rpm_limit?: number

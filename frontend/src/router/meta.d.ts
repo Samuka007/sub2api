@@ -20,6 +20,13 @@ declare module 'vue-router' {
     requiresAdmin?: boolean
 
     /**
+     * 细粒度管理员权限标识（见 @/types AdminPermission）。
+     * 设置后，除 requiresAdmin 外，还需当前管理员拥有该权限才能访问。
+     * 仅作 UX 门禁；后端仍为最终授权边界。
+     */
+    requiredPermission?: string
+
+    /**
      * Page title for this route
      */
     title?: string

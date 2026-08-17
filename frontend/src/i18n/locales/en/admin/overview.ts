@@ -508,6 +508,7 @@ export default {
         passwordPlaceholder: 'Enter password (leave empty to keep unchanged)',
         roleLabel: 'Role',
         selectRole: 'Select role',
+        rolesHint: 'Multiple admin roles combine as a union. Leave empty for a regular user.',
         balanceLabel: 'Balance',
         concurrencyLabel: 'Concurrency',
         statusLabel: 'Status',
@@ -670,7 +671,10 @@ export default {
       totalRecharged: 'Total Recharged',
       roles: {
         admin: 'Admin',
-        user: 'User'
+        user: 'User',
+        super_admin: 'Super Admin',
+        billing_admin: 'Billing Admin',
+        upstream_admin: 'Upstream Admin'
       },
       // Settings Dropdowns
       filterSettings: 'Filter Settings',

@@ -210,6 +210,7 @@ import { sanitizeSvg } from '@/utils/sanitize'
 import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
+import type { AdminPermission } from '@/types'
 
 interface NavItem {
   path: string
@@ -230,6 +231,11 @@ interface NavItem {
    * 开关切换时菜单自动更新。
    */
   featureFlag?: () => boolean | undefined
+  /**
+   * 管理员权限门禁。设置后仅拥有该权限的管理员可见该菜单项。
+   * 未设置时对任意管理员可见。
+   */
+  permission?: AdminPermission
 }
 
 // applyFeatureFlags 递归过滤掉 featureFlag() === false 的节点（含子节点）。
@@ -240,6 +246,22 @@ function applyFeatureFlags(items: NavItem[]): NavItem[] {
     if (item.featureFlag && item.featureFlag() === false) continue
     if (item.children) {
       out.push({ ...item, children: applyFeatureFlags(item.children) })
+    } else {
+      out.push(item)
+    }
+  }
+  return out
+}
+
+// applyPermissionFilters 递归过滤掉当前管理员无权限访问的节点（含子节点）。
+function applyPermissionFilters(items: NavItem[]): NavItem[] {
+  const out: NavItem[] = []
+  for (const item of items) {
+    if (item.permission && !authStore.hasPermission(item.permission)) continue
+    if (item.children) {
+      const children = applyPermissionFilters(item.children)
+      if (children.length === 0 && item.expandOnly) continue
+      out.push({ ...item, children })
     } else {
       out.push(item)
     }
@@ -801,41 +823,43 @@ const customMenuItemsForAdmin = computed(() => {
 const adminNavItems = computed((): NavItem[] => {
   const baseItems: NavItem[] = [
     { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon },
-    { path: '/admin/ops', label: t('nav.ops'), icon: ChartIcon, featureFlag: flagOpsMonitoring },
-    { path: '/admin/ops/hermes', label: t('nav.hermesStatus'), icon: ShieldIcon, featureFlag: flagOpsMonitoring },
-    { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, hideInSimpleMode: true },
-    { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon, hideInSimpleMode: true },
+    { path: '/admin/ops', label: t('nav.ops'), icon: ChartIcon, featureFlag: flagOpsMonitoring, permission: 'admin.super' },
+    { path: '/admin/ops/hermes', label: t('nav.hermesStatus'), icon: ShieldIcon, featureFlag: flagOpsMonitoring, permission: 'admin.super' },
+    { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, hideInSimpleMode: true, permission: 'admin.users.read' },
+    { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon, hideInSimpleMode: true, permission: 'admin.groups.manage' },
     {
       path: '/admin/channels',
       label: t('nav.channelManagement'),
       icon: ChannelIcon,
       hideInSimpleMode: true,
       expandOnly: true,
+      permission: 'admin.channels.manage',
       children: [
         { path: '/admin/channels/pricing', label: t('nav.channelPricing'), icon: PriceTagIcon },
         { path: '/admin/channels/monitor', label: t('nav.channelMonitor'), icon: SignalIcon, featureFlag: flagChannelMonitor },
       ],
     },
-    { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true },
-    { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
-    { path: '/admin/plus-quota-automation', label: t('nav.plusQuotaAutomation'), icon: ChartIcon },
-    { path: '/admin/one-click-account-notes', label: t('nav.oneClickAccountNotes'), icon: OrderListIcon },
-    { path: '/admin/account-health-detector', label: t('nav.accountHealthDetector'), icon: ShieldIcon },
-    { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
-    { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon },
+    { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, permission: 'admin.super' },
+    { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon, permission: 'admin.accounts.manage' },
+    { path: '/admin/plus-quota-automation', label: t('nav.plusQuotaAutomation'), icon: ChartIcon, permission: 'admin.accounts.manage' },
+    { path: '/admin/one-click-account-notes', label: t('nav.oneClickAccountNotes'), icon: OrderListIcon, permission: 'admin.accounts.manage' },
+    { path: '/admin/account-health-detector', label: t('nav.accountHealthDetector'), icon: ShieldIcon, permission: 'admin.accounts.manage' },
+    { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon, permission: 'admin.super' },
+    { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon, permission: 'admin.proxies.manage' },
     {
       path: '/admin/security-audit',
       label: t('nav.securityAudit'),
       icon: ShieldIcon,
       expandOnly: true,
       featureFlag: flagRiskControl,
+      permission: 'admin.super',
       children: [
         { path: '/admin/risk-control', label: t('nav.contentModeration'), icon: ShieldIcon },
         { path: '/admin/prompt-audit', label: t('nav.promptAudit'), icon: ShieldIcon },
       ],
     },
-    { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, hideInSimpleMode: true },
-    { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, hideInSimpleMode: true },
+    { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, hideInSimpleMode: true, permission: 'admin.redeem_codes.manage' },
+    { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, hideInSimpleMode: true, permission: 'admin.promo_codes.manage' },
     {
       path: '/admin/affiliates',
       label: t('nav.affiliateManagement'),
@@ -843,6 +867,7 @@ const adminNavItems = computed((): NavItem[] => {
       hideInSimpleMode: true,
       expandOnly: true,
       featureFlag: flagAffiliate,
+      permission: 'admin.super',
       children: [
         { path: '/admin/affiliates/invites', label: t('nav.affiliateInviteRecords'), icon: UsersIcon },
         { path: '/admin/affiliates/rebates', label: t('nav.affiliateRebateRecords'), icon: OrderIcon },
@@ -856,30 +881,35 @@ const adminNavItems = computed((): NavItem[] => {
       hideInSimpleMode: true,
       expandOnly: true,
       featureFlag: flagAdminPayment,
+      permission: 'admin.super',
       children: [
         { path: '/admin/orders/dashboard', label: t('nav.paymentDashboard'), icon: ChartIcon },
         { path: '/admin/orders', label: t('nav.orderManagement'), icon: OrderIcon },
         { path: '/admin/orders/plans', label: t('nav.paymentPlans'), icon: CreditCardIcon },
       ],
     },
-    { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon },
-    { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, hideInSimpleMode: true }
+    { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon, permission: 'admin.super' },
+    { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, hideInSimpleMode: true, permission: 'admin.super' }
   ]
 
-  const visible = applyFeatureFlags(baseItems)
+  const visible = applyPermissionFilters(applyFeatureFlags(baseItems))
 
   // 简单模式下，在系统设置前插入 API密钥
   if (authStore.isSimpleMode) {
     const filtered = visible.filter(item => !item.hideInSimpleMode)
     filtered.push({ path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon })
-    filtered.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
+    if (authStore.hasPermission('admin.super')) {
+      filtered.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
+    }
     for (const cm of customMenuItemsForAdmin.value) {
       filtered.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
     }
     return filtered
   }
 
-  visible.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
+  if (authStore.hasPermission('admin.super')) {
+    visible.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
+  }
   for (const cm of customMenuItemsForAdmin.value) {
     visible.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
   }

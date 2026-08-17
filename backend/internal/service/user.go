@@ -3,6 +3,7 @@ package service
 import (
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -17,13 +18,18 @@ type User struct {
 	AvatarByteSize int
 	AvatarSHA256   string
 	PasswordHash   string
-	Role           string
-	Balance        float64
-	FrozenBalance  float64
-	Concurrency    int
-	Status         string
-	AllowedGroups  []int64
-	TokenVersion   int64 // Incremented on password change to invalidate existing tokens
+	// Role is the legacy users.role compat column ("admin"/"user"). It is derived
+	// from Roles on write and must never be read for authorization.
+	Role string
+	// Roles is the canonical multi-role set ("super_admin"/"billing_admin"/
+	// "upstream_admin"). Authorization reads Roles exclusively.
+	Roles         []string
+	Balance       float64
+	FrozenBalance float64
+	Concurrency   int
+	Status        string
+	AllowedGroups []int64
+	TokenVersion  int64 // Incremented on password change to invalidate existing tokens
 	// TokenVersionResolved indicates TokenVersion already contains the fingerprint-derived
 	// value expected in JWT claims and refresh-token state.
 	TokenVersionResolved bool
@@ -65,7 +71,30 @@ type User struct {
 }
 
 func (u *User) IsAdmin() bool {
-	return u.Role == RoleAdmin
+	return domain.HasAdminRole(u.Roles)
+}
+
+// HasRole reports whether the user has the given admin role (or, for the legacy
+// "admin"/"user" values, whether they are a super admin / any admin respectively).
+func (u *User) HasRole(role string) bool {
+	switch role {
+	case RoleAdmin:
+		return domain.HasAdminRole(u.Roles)
+	case RoleUser:
+		return !domain.HasAdminRole(u.Roles)
+	default:
+		for _, r := range u.Roles {
+			if r == role {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// HasPermission reports whether the user's role set grants the permission.
+func (u *User) HasPermission(permission string) bool {
+	return domain.HasPermission(u.Roles, permission)
 }
 
 func (u *User) IsActive() bool {

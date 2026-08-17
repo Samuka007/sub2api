@@ -138,7 +138,11 @@ func newPanelTestRouter(limiter gin.HandlerFunc, identity *panelTestIdentity) *g
 	router := gin.New()
 	if identity != nil {
 		router.Use(func(c *gin.Context) {
-			c.Set(string(ContextKeyUser), AuthSubject{UserID: identity.userID})
+			var roles []string
+			if identity.role == service.RoleAdmin {
+				roles = []string{"super_admin"}
+			}
+			c.Set(string(ContextKeyUser), AuthSubject{UserID: identity.userID, Roles: roles})
 			c.Set(string(ContextKeyUserRole), identity.role)
 			c.Next()
 		})

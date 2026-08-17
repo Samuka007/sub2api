@@ -325,10 +325,15 @@
             </div>
           </template>
 
-          <template #cell-role="{ value }">
-            <span :class="['badge', value === 'admin' ? 'badge-purple' : 'badge-gray']">
-              {{ t('admin.users.roles.' + value) }}
-            </span>
+          <template #cell-role="{ row }">
+            <div class="flex flex-wrap gap-1">
+              <template v-if="row.roles && row.roles.length > 0">
+                <span v-for="r in row.roles" :key="r" class="badge badge-purple">
+                  {{ t('admin.users.roles.' + r) }}
+                </span>
+              </template>
+              <span v-else class="badge badge-gray">{{ t('admin.users.roles.user') }}</span>
+            </div>
           </template>
 
           <template #cell-groups="{ row }">

@@ -342,6 +342,62 @@ describe('useAuthStore', () => {
     })
   })
 
+  // --- roles & permissions ---
+
+  describe('roles & permissions', () => {
+    it('billing_admin 暴露 roles 并授予计费权限', async () => {
+      const billingUser = {
+        ...fakeUser,
+        id: 3,
+        role: 'user' as const,
+        roles: ['billing_admin'] as const,
+      }
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, user: { ...billingUser } })
+      const store = useAuthStore()
+
+      await store.login({ email: 'billing@example.com', password: '123456' })
+
+      expect(store.isAdmin).toBe(true)
+      expect(store.roles).toEqual(['billing_admin'])
+      expect(store.hasPermission('admin.users.balance.adjust')).toBe(true)
+      expect(store.hasPermission('admin.accounts.manage')).toBe(false)
+    })
+
+    it('双角色并集授权', async () => {
+      const dualRoleUser = {
+        ...fakeUser,
+        id: 4,
+        role: 'user' as const,
+        roles: ['billing_admin', 'upstream_admin'] as const,
+      }
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, user: { ...dualRoleUser } })
+      const store = useAuthStore()
+
+      await store.login({ email: 'dual@example.com', password: '123456' })
+
+      expect(store.hasPermission('admin.users.balance.adjust')).toBe(true)
+      expect(store.hasPermission('admin.accounts.manage')).toBe(true)
+      expect(store.hasPermission('admin.super')).toBe(false)
+    })
+
+    it('super_admin 授予全部权限', async () => {
+      const superUser = {
+        ...fakeUser,
+        id: 5,
+        role: 'admin' as const,
+        roles: ['super_admin'] as const,
+      }
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, user: { ...superUser } })
+      const store = useAuthStore()
+
+      await store.login({ email: 'super@example.com', password: '123456' })
+
+      expect(store.hasPermission('admin.super')).toBe(true)
+      expect(store.hasPermission('admin.accounts.manage')).toBe(true)
+      expect(store.hasPermission('admin.users.balance.adjust')).toBe(true)
+    })
+  })
+
   // --- refreshUser ---
 
   describe('refreshUser', () => {

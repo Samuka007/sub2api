@@ -25,6 +25,7 @@ func setupRoleStepUpRouter(t *testing.T) (*gin.Engine, *stubAdminService) {
 	adminSvc.users = append(adminSvc.users, service.User{
 		ID:     2,
 		Email:  "admin@example.com",
+		Roles:  []string{service.RoleSuperAdmin},
 		Role:   service.RoleAdmin,
 		Status: service.StatusActive,
 	})
@@ -49,21 +50,21 @@ func doJSON(t *testing.T, router *gin.Engine, method, path string, payload map[s
 func TestUpdateUserPromoteToAdminRequiresStepUp(t *testing.T) {
 	router, _ := setupRoleStepUpRouter(t)
 
-	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/1", map[string]any{"role": "admin"})
+	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/1", map[string]any{"roles": []string{"super_admin"}})
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestUpdateUserKeepAdminRoleSkipsStepUp(t *testing.T) {
 	router, _ := setupRoleStepUpRouter(t)
 
-	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/2", map[string]any{"role": "admin"})
+	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/2", map[string]any{"roles": []string{"super_admin"}})
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestUpdateUserRegularRoleSkipsStepUp(t *testing.T) {
 	router, _ := setupRoleStepUpRouter(t)
 
-	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/1", map[string]any{"role": "user", "email": "u@example.com"})
+	rec := doJSON(t, router, http.MethodPut, "/api/v1/admin/users/1", map[string]any{"roles": []string{}, "email": "u@example.com"})
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
@@ -71,7 +72,7 @@ func TestCreateAdminUserRequiresStepUp(t *testing.T) {
 	router, _ := setupRoleStepUpRouter(t)
 
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/admin/users", map[string]any{
-		"email": "new-admin@example.com", "password": "pass123", "role": "admin",
+		"email": "new-admin@example.com", "password": "pass123", "roles": []string{"super_admin"},
 	})
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
@@ -80,7 +81,7 @@ func TestCreateRegularUserSkipsStepUp(t *testing.T) {
 	router, _ := setupRoleStepUpRouter(t)
 
 	rec := doJSON(t, router, http.MethodPost, "/api/v1/admin/users", map[string]any{
-		"email": "new-user@example.com", "password": "pass123", "role": "user",
+		"email": "new-user@example.com", "password": "pass123", "roles": []string{},
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 }

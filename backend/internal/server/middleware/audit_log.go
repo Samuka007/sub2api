@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -252,8 +253,8 @@ func NewAuditLogMiddleware(auditService *service.AuditLogService) AuditLogMiddle
 			uid := subject.UserID
 			entry.ActorUserID = &uid
 		}
-		if role, ok := GetUserRoleFromContext(c); ok {
-			entry.ActorRole = role
+		if roles, ok := GetAdminRolesFromContext(c); ok {
+			entry.ActorRole = domain.RolesSummary(roles)
 		}
 		entry.ActorEmail = c.GetString(ContextKeyAuthEmail)
 		entry.AuthMethod = c.GetString("auth_method")

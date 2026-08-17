@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -89,7 +90,7 @@ func enforceSessionBinding(
 		auditService.Record(&service.AuditLog{
 			ActorUserID: &uid,
 			ActorEmail:  claims.Email,
-			ActorRole:   claims.Role,
+			ActorRole:   domain.RolesSummary(claims.Roles),
 			AuthMethod:  service.AuditAuthMethodJWT,
 			Action:      service.AuditActionSessionBindingMismatch,
 			Method:      c.Request.Method,

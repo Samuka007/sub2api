@@ -559,7 +559,10 @@ export default {
       deleteConfirm: "确定要删除用户 '{email}' 吗？此操作无法撤销。",
       roles: {
         admin: '管理员',
-        user: '用户'
+        user: '用户',
+        super_admin: '超级管理员',
+        billing_admin: '充值管理员',
+        upstream_admin: '上游账号管理员'
       },
       form: {
         emailLabel: '邮箱',
@@ -573,6 +576,7 @@ export default {
         passwordPlaceholder: '请输入密码（留空则不修改）',
         roleLabel: '角色',
         selectRole: '选择角色',
+        rolesHint: '多选管理员角色按并集生效；不选则为普通用户。',
         balanceLabel: '余额',
         concurrencyLabel: '并发数',
         statusLabel: '状态',

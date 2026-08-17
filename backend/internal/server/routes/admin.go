@@ -2,6 +2,7 @@
 package routes
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	adminhandler "github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// adminGroup 创建挂在 adminAuth 之下的分组，并追加权限校验中间件。
+// super_admin 短路通过任意权限；细分角色只放行映射到的权限。
+func adminGroup(admin *gin.RouterGroup, path, permission string) *gin.RouterGroup {
+	g := admin.Group(path)
+	g.Use(middleware.RequireAdminPermission(permission))
+	return g
+}
 
 // RegisterAdminRoutes 注册管理员路由
 func RegisterAdminRoutes(
@@ -129,7 +138,7 @@ func RegisterAdminRoutes(
 }
 
 func registerPromptAuditRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	promptAudit := admin.Group("/prompt-audit")
+	promptAudit := adminGroup(admin, "/prompt-audit", domain.PermissionSuperAdmin)
 	{
 		promptAudit.GET("/config", h.Admin.PromptAudit.GetConfig)
 		promptAudit.PUT("/config", h.Admin.PromptAudit.UpdateConfig)
@@ -145,7 +154,7 @@ func registerPromptAuditRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerAuditLogRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middleware.StepUpAuthMiddleware) {
-	auditLogs := admin.Group("/audit-logs")
+	auditLogs := adminGroup(admin, "/audit-logs", domain.PermissionSuperAdmin)
 	{
 		auditLogs.GET("", h.Admin.AuditLog.List)
 		auditLogs.GET("/:id", h.Admin.AuditLog.Get)
@@ -163,7 +172,7 @@ func registerAdminComplianceRoutes(admin *gin.RouterGroup, h *handler.Handlers) 
 }
 
 func registerContentModerationRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	risk := admin.Group("/risk-control")
+	risk := adminGroup(admin, "/risk-control", domain.PermissionSuperAdmin)
 	{
 		risk.GET("/config", h.Admin.ContentModeration.GetConfig)
 		risk.PUT("/config", h.Admin.ContentModeration.UpdateConfig)
@@ -177,14 +186,14 @@ func registerContentModerationRoutes(admin *gin.RouterGroup, h *handler.Handlers
 }
 
 func registerAdminAPIKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	apiKeys := admin.Group("/api-keys")
+	apiKeys := adminGroup(admin, "/api-keys", domain.PermissionSuperAdmin)
 	{
 		apiKeys.PUT("/:id", h.Admin.APIKey.UpdateGroup)
 	}
 }
 
 func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	ops := admin.Group("/ops")
+	ops := adminGroup(admin, "/ops", domain.PermissionSuperAdmin)
 	{
 		// Realtime ops signals
 		ops.GET("/hermes/status", h.Admin.Ops.GetHermesStatus)
@@ -275,53 +284,69 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerDashboardRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	// 通用运营读取：任意管理角色可访问（作为其登录后落地页）。
 	dashboard := admin.Group("/dashboard")
 	{
 		dashboard.GET("/snapshot-v2", h.Admin.Dashboard.GetSnapshotV2)
-		dashboard.GET("/stats", h.Admin.Dashboard.GetStats)
 		dashboard.GET("/realtime", h.Admin.Dashboard.GetRealtimeMetrics)
 		dashboard.GET("/trend", h.Admin.Dashboard.GetUsageTrend)
 		dashboard.GET("/models", h.Admin.Dashboard.GetModelStats)
 		dashboard.GET("/groups", h.Admin.Dashboard.GetGroupStats)
 		dashboard.GET("/api-keys-trend", h.Admin.Dashboard.GetAPIKeyUsageTrend)
 		dashboard.GET("/users-trend", h.Admin.Dashboard.GetUserUsageTrend)
-		dashboard.GET("/users-ranking", h.Admin.Dashboard.GetUserSpendingRanking)
-		dashboard.POST("/users-usage", h.Admin.Dashboard.GetBatchUsersUsage)
 		dashboard.POST("/api-keys-usage", h.Admin.Dashboard.GetBatchAPIKeysUsage)
-		dashboard.GET("/user-breakdown", h.Admin.Dashboard.GetUserBreakdown)
-		dashboard.POST("/aggregation/backfill", h.Admin.Dashboard.BackfillAggregation)
+	}
+
+	// 财务/敏感数据与写操作：仅超级管理员。
+	dashboardSuper := adminGroup(admin, "/dashboard", domain.PermissionSuperAdmin)
+	{
+		dashboardSuper.GET("/stats", h.Admin.Dashboard.GetStats)
+		dashboardSuper.GET("/users-ranking", h.Admin.Dashboard.GetUserSpendingRanking)
+		dashboardSuper.POST("/users-usage", h.Admin.Dashboard.GetBatchUsersUsage)
+		dashboardSuper.GET("/user-breakdown", h.Admin.Dashboard.GetUserBreakdown)
+		dashboardSuper.POST("/aggregation/backfill", h.Admin.Dashboard.BackfillAggregation)
 	}
 }
 
 func registerUserManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	users := admin.Group("/users")
+	// /users 是混合职责路由：billing 管理员可读取用户并调整余额，但用户创建、
+	// 删除、角色/状态/属性管理必须保持超级管理员专属，不能因余额 endpoint 放行。
+	usersRead := adminGroup(admin, "/users", domain.PermissionUsersRead)
 	{
-		users.GET("", h.Admin.User.List)
-		users.GET("/:id", h.Admin.User.GetByID)
-		users.POST("/:id/auth-identities", h.Admin.User.BindAuthIdentity)
-		users.POST("", h.Admin.User.Create)
-		users.PUT("/:id", h.Admin.User.Update)
-		users.DELETE("/:id", h.Admin.User.Delete)
-		users.POST("/:id/balance", h.Admin.User.UpdateBalance)
-		users.GET("/:id/api-keys", h.Admin.User.GetUserAPIKeys)
-		users.GET("/:id/usage", h.Admin.User.GetUserUsage)
-		users.GET("/:id/balance-history", h.Admin.User.GetBalanceHistory)
-		users.POST("/:id/replace-group", h.Admin.User.ReplaceGroup)
-		users.GET("/:id/rpm-status", h.Admin.User.GetUserRPMStatus)
-		users.POST("/batch-concurrency", h.Admin.User.BatchUpdateConcurrency)
-		users.POST("/batch-limits", h.Admin.User.BatchUpdateLimits)
-		users.GET("/:id/platform-quotas", h.Admin.User.GetUserPlatformQuotas)
-		users.PUT("/:id/platform-quotas", h.Admin.User.UpdateUserPlatformQuotas)
-		users.POST("/:id/platform-quotas/reset", h.Admin.User.ResetUserPlatformQuotaWindow)
+		usersRead.GET("", h.Admin.User.List)
+		usersRead.GET("/:id", h.Admin.User.GetByID)
+		usersRead.GET("/:id/balance-history", h.Admin.User.GetBalanceHistory)
+	}
+
+	usersBalance := adminGroup(admin, "/users", domain.PermissionUsersBalanceAdjust)
+	{
+		usersBalance.POST("/:id/balance", h.Admin.User.UpdateBalance)
+	}
+
+	usersManage := adminGroup(admin, "/users", domain.PermissionUsersManage)
+	{
+		usersManage.POST("/:id/auth-identities", h.Admin.User.BindAuthIdentity)
+		usersManage.POST("", h.Admin.User.Create)
+		usersManage.PUT("/:id", h.Admin.User.Update)
+		usersManage.DELETE("/:id", h.Admin.User.Delete)
+		usersManage.GET("/:id/api-keys", h.Admin.User.GetUserAPIKeys)
+		usersManage.GET("/:id/usage", h.Admin.User.GetUserUsage)
+		usersManage.POST("/:id/replace-group", h.Admin.User.ReplaceGroup)
+		usersManage.GET("/:id/rpm-status", h.Admin.User.GetUserRPMStatus)
+		usersManage.POST("/batch-concurrency", h.Admin.User.BatchUpdateConcurrency)
+		usersManage.POST("/batch-limits", h.Admin.User.BatchUpdateLimits)
+		usersManage.GET("/:id/platform-quotas", h.Admin.User.GetUserPlatformQuotas)
+		usersManage.PUT("/:id/platform-quotas", h.Admin.User.UpdateUserPlatformQuotas)
+		usersManage.POST("/:id/platform-quotas/reset", h.Admin.User.ResetUserPlatformQuotaWindow)
 
 		// User attribute values
-		users.GET("/:id/attributes", h.Admin.UserAttribute.GetUserAttributes)
-		users.PUT("/:id/attributes", h.Admin.UserAttribute.UpdateUserAttributes)
+		usersManage.GET("/:id/attributes", h.Admin.UserAttribute.GetUserAttributes)
+		usersManage.PUT("/:id/attributes", h.Admin.UserAttribute.UpdateUserAttributes)
 	}
 }
 
 func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	groups := admin.Group("/groups")
+	groups := adminGroup(admin, "/groups", domain.PermissionGroupsManage)
 	{
 		groups.GET("", h.Admin.Group.List)
 		groups.GET("/all", h.Admin.Group.GetAll)
@@ -352,7 +377,7 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
-	accounts := admin.Group("/accounts")
+	accounts := adminGroup(admin, "/accounts", domain.PermissionAccountsManage)
 	{
 		accounts.GET("", h.Admin.Account.List)
 		accounts.GET("/account-health-candidates", h.Admin.Account.ListAccountHealthCandidates)
@@ -430,7 +455,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 }
 
 func registerAnnouncementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	announcements := admin.Group("/announcements")
+	announcements := adminGroup(admin, "/announcements", domain.PermissionSuperAdmin)
 	{
 		announcements.GET("", h.Admin.Announcement.List)
 		announcements.POST("", h.Admin.Announcement.Create)
@@ -442,7 +467,7 @@ func registerAnnouncementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	openai := admin.Group("/openai")
+	openai := adminGroup(admin, "/openai", domain.PermissionOpenAIOAuthManage)
 	{
 		openai.POST("/generate-auth-url", h.Admin.OpenAIOAuth.GenerateAuthURL)
 		openai.POST("/exchange-code", h.Admin.OpenAIOAuth.ExchangeCode)
@@ -465,7 +490,7 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerGeminiOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	gemini := admin.Group("/gemini")
+	gemini := adminGroup(admin, "/gemini", domain.PermissionGeminiOAuthManage)
 	{
 		gemini.POST("/oauth/auth-url", h.Admin.GeminiOAuth.GenerateAuthURL)
 		gemini.POST("/oauth/exchange-code", h.Admin.GeminiOAuth.ExchangeCode)
@@ -474,7 +499,7 @@ func registerGeminiOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	antigravity := admin.Group("/antigravity")
+	antigravity := adminGroup(admin, "/antigravity", domain.PermissionAntigravityOAuthManage)
 	{
 		antigravity.POST("/oauth/auth-url", h.Admin.AntigravityOAuth.GenerateAuthURL)
 		antigravity.POST("/oauth/exchange-code", h.Admin.AntigravityOAuth.ExchangeCode)
@@ -483,7 +508,7 @@ func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 }
 
 func registerGrokOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	grok := admin.Group("/grok")
+	grok := adminGroup(admin, "/grok", domain.PermissionGrokOAuthManage)
 	{
 		grok.GET("/oauth/capabilities", h.Admin.GrokOAuth.GetCapabilities)
 		grok.POST("/oauth/auth-url", h.Admin.GrokOAuth.GenerateAuthURL)
@@ -502,7 +527,7 @@ func registerGrokOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
-	proxies := admin.Group("/proxies")
+	proxies := adminGroup(admin, "/proxies", domain.PermissionProxiesManage)
 	{
 		proxies.GET("", h.Admin.Proxy.List)
 		proxies.GET("/all", h.Admin.Proxy.GetAll)
@@ -523,7 +548,7 @@ func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth
 }
 
 func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	codes := admin.Group("/redeem-codes")
+	codes := adminGroup(admin, "/redeem-codes", domain.PermissionRedeemCodesManage)
 	{
 		codes.GET("", h.Admin.Redeem.List)
 		codes.GET("/stats", h.Admin.Redeem.GetStats)
@@ -539,7 +564,7 @@ func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerPromoCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	promoCodes := admin.Group("/promo-codes")
+	promoCodes := adminGroup(admin, "/promo-codes", domain.PermissionPromoCodesManage)
 	{
 		promoCodes.GET("", h.Admin.Promo.List)
 		promoCodes.GET("/:id", h.Admin.Promo.GetByID)
@@ -551,7 +576,7 @@ func registerPromoCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	adminSettings := admin.Group("/settings")
+	adminSettings := adminGroup(admin, "/settings", domain.PermissionSuperAdmin)
 	{
 		adminSettings.GET("", h.Admin.Setting.GetSettings)
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
@@ -593,7 +618,7 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerDataManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
-	dataManagement := admin.Group("/data-management")
+	dataManagement := adminGroup(admin, "/data-management", domain.PermissionSuperAdmin)
 	{
 		dataManagement.GET("/agent/health", h.Admin.DataManagement.GetAgentHealth)
 		dataManagement.GET("/config", h.Admin.DataManagement.GetConfig)
@@ -617,7 +642,7 @@ func registerDataManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers, s
 }
 
 func registerBackupRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
-	backup := admin.Group("/backups")
+	backup := adminGroup(admin, "/backups", domain.PermissionSuperAdmin)
 	{
 		// S3 存储配置
 		backup.GET("/s3-config", h.Admin.Backup.GetS3Config)
@@ -649,7 +674,7 @@ func registerBackupRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 }
 
 func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	system := admin.Group("/system")
+	system := adminGroup(admin, "/system", domain.PermissionSuperAdmin)
 	{
 		system.GET("/version", h.Admin.System.GetVersion)
 		system.GET("/check-updates", h.Admin.System.CheckUpdates)
@@ -661,7 +686,7 @@ func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	subscriptions := admin.Group("/subscriptions")
+	subscriptions := adminGroup(admin, "/subscriptions", domain.PermissionSuperAdmin)
 	{
 		subscriptions.GET("", h.Admin.Subscription.List)
 		subscriptions.GET("/:id", h.Admin.Subscription.GetByID)
@@ -676,14 +701,15 @@ func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 
 	// 分组下的订阅列表
-	admin.GET("/groups/:id/subscriptions", h.Admin.Subscription.ListByGroup)
+	subscriptionReads := adminGroup(admin, "", domain.PermissionSuperAdmin)
+	subscriptionReads.GET("/groups/:id/subscriptions", h.Admin.Subscription.ListByGroup)
 
 	// 用户下的订阅列表
-	admin.GET("/users/:id/subscriptions", h.Admin.Subscription.ListByUser)
+	subscriptionReads.GET("/users/:id/subscriptions", h.Admin.Subscription.ListByUser)
 }
 
 func registerUsageRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	usage := admin.Group("/usage")
+	usage := adminGroup(admin, "/usage", domain.PermissionSuperAdmin)
 	{
 		usage.GET("", h.Admin.Usage.List)
 		usage.GET("/stats", h.Admin.Usage.Stats)
@@ -696,7 +722,7 @@ func registerUsageRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerUserAttributeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	attrs := admin.Group("/user-attributes")
+	attrs := adminGroup(admin, "/user-attributes", domain.PermissionSuperAdmin)
 	{
 		attrs.GET("", h.Admin.UserAttribute.ListDefinitions)
 		attrs.POST("", h.Admin.UserAttribute.CreateDefinition)
@@ -708,7 +734,7 @@ func registerUserAttributeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	plans := admin.Group("/scheduled-test-plans")
+	plans := adminGroup(admin, "/scheduled-test-plans", domain.PermissionSuperAdmin)
 	{
 		plans.POST("", h.Admin.ScheduledTest.Create)
 		plans.PUT("/:id", h.Admin.ScheduledTest.Update)
@@ -716,11 +742,12 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		plans.GET("/:id/results", h.Admin.ScheduledTest.ListResults)
 	}
 	// Nested under accounts
-	admin.GET("/accounts/:id/scheduled-test-plans", h.Admin.ScheduledTest.ListByAccount)
+	adminGroup(admin, "", domain.PermissionSuperAdmin).
+		GET("/accounts/:id/scheduled-test-plans", h.Admin.ScheduledTest.ListByAccount)
 }
 
 func registerErrorPassthroughRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	rules := admin.Group("/error-passthrough-rules")
+	rules := adminGroup(admin, "/error-passthrough-rules", domain.PermissionSuperAdmin)
 	{
 		rules.GET("", h.Admin.ErrorPassthrough.List)
 		rules.GET("/:id", h.Admin.ErrorPassthrough.GetByID)
@@ -731,7 +758,7 @@ func registerErrorPassthroughRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 }
 
 func registerTLSFingerprintProfileRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	profiles := admin.Group("/tls-fingerprint-profiles")
+	profiles := adminGroup(admin, "/tls-fingerprint-profiles", domain.PermissionSuperAdmin)
 	{
 		profiles.GET("", h.Admin.TLSFingerprintProfile.List)
 		profiles.GET("/:id", h.Admin.TLSFingerprintProfile.GetByID)
@@ -742,7 +769,7 @@ func registerTLSFingerprintProfileRoutes(admin *gin.RouterGroup, h *handler.Hand
 }
 
 func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	channels := admin.Group("/channels")
+	channels := adminGroup(admin, "/channels", domain.PermissionChannelsManage)
 	{
 		channels.GET("", h.Admin.Channel.List)
 		channels.GET("/model-pricing", h.Admin.Channel.GetModelDefaultPricing)
@@ -756,7 +783,7 @@ func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 
 func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
 	guard := channelMonitorAdminFeatureGuard(settingService)
-	monitors := admin.Group("/channel-monitors")
+	monitors := adminGroup(admin, "/channel-monitors", domain.PermissionChannelsManage)
 	monitors.Use(guard)
 	{
 		monitors.GET("", h.Admin.ChannelMonitor.List)
@@ -769,7 +796,7 @@ func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers, s
 		monitors.GET("/:id/history", h.Admin.ChannelMonitor.History)
 	}
 
-	templates := admin.Group("/channel-monitor-templates")
+	templates := adminGroup(admin, "/channel-monitor-templates", domain.PermissionChannelsManage)
 	templates.Use(guard)
 	{
 		templates.GET("", h.Admin.ChannelMonitorTemplate.List)
@@ -784,7 +811,7 @@ func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers, s
 
 // registerAffiliateRoutes 注册邀请返利的管理端路由（专属用户配置）
 func registerAffiliateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	affiliates := admin.Group("/affiliates")
+	affiliates := adminGroup(admin, "/affiliates", domain.PermissionSuperAdmin)
 	{
 		affiliates.GET("/invites", h.Admin.Affiliate.ListInviteRecords)
 		affiliates.GET("/rebates", h.Admin.Affiliate.ListRebateRecords)
@@ -808,7 +835,7 @@ func registerChannelMonitorV2Routes(admin *gin.RouterGroup, h *handler.Handlers,
 	featureGuard := channelMonitorAdminFeatureGuard(settingService)
 	modeV2Guard := channelMonitorModeV2Guard(settingService)
 
-	monitor := admin.Group("/channel-monitor-v2")
+	monitor := adminGroup(admin, "/channel-monitor-v2", domain.PermissionChannelsManage)
 	{
 		config := monitor.Group("")
 		config.Use(featureGuard)

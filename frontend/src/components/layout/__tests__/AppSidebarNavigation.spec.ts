@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   authStore: {
     isAdmin: false,
     isSimpleMode: false,
+    hasPermission: vi.fn(() => true),
   },
   adminSettingsStore: {
     opsMonitoringEnabled: false,

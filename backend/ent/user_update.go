@@ -10,6 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/announcementread"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
@@ -105,6 +106,18 @@ func (_u *UserUpdate) SetNillableRole(v *string) *UserUpdate {
 	if v != nil {
 		_u.SetRole(*v)
 	}
+	return _u
+}
+
+// SetRoles sets the "roles" field.
+func (_u *UserUpdate) SetRoles(v []string) *UserUpdate {
+	_u.mutation.SetRoles(v)
+	return _u
+}
+
+// AppendRoles appends value to the "roles" field.
+func (_u *UserUpdate) AppendRoles(v []string) *UserUpdate {
+	_u.mutation.AppendRoles(v)
 	return _u
 }
 
@@ -1012,6 +1025,14 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Roles(); ok {
+		_spec.SetField(user.FieldRoles, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRoles(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, user.FieldRoles, value)
+		})
+	}
 	if value, ok := _u.mutation.Balance(); ok {
 		_spec.SetField(user.FieldBalance, field.TypeFloat64, value)
 	}
@@ -1781,6 +1802,18 @@ func (_u *UserUpdateOne) SetNillableRole(v *string) *UserUpdateOne {
 	if v != nil {
 		_u.SetRole(*v)
 	}
+	return _u
+}
+
+// SetRoles sets the "roles" field.
+func (_u *UserUpdateOne) SetRoles(v []string) *UserUpdateOne {
+	_u.mutation.SetRoles(v)
+	return _u
+}
+
+// AppendRoles appends value to the "roles" field.
+func (_u *UserUpdateOne) AppendRoles(v []string) *UserUpdateOne {
+	_u.mutation.AppendRoles(v)
 	return _u
 }
 
@@ -2717,6 +2750,14 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Roles(); ok {
+		_spec.SetField(user.FieldRoles, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRoles(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, user.FieldRoles, value)
+		})
 	}
 	if value, ok := _u.mutation.Balance(); ok {
 		_spec.SetField(user.FieldBalance, field.TypeFloat64, value)

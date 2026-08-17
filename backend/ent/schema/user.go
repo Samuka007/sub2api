@@ -46,6 +46,12 @@ func (User) Fields() []ent.Field {
 		field.String("role").
 			MaxLen(20).
 			Default(domain.RoleUser),
+		// roles 是权威的多角色集合（super_admin/billing_admin/upstream_admin）。
+		// role 列保留为 legacy 兼容摘要（super_admin → "admin"，其余 → "user"），
+		// 授权只读取 roles，绝不读取 role。
+		field.JSON("roles", []string{}).
+			Default([]string{}).
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 		field.Float("balance").
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,8)"}).
 			Default(0),

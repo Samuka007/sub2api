@@ -140,6 +140,7 @@ func (r *userRepository) create(ctx context.Context, userIn *service.User, guard
 		SetNotes(userIn.Notes).
 		SetPasswordHash(userIn.PasswordHash).
 		SetRole(userIn.Role).
+		SetRoles(userIn.Roles).
 		SetBalance(userIn.Balance).
 		SetConcurrency(userIn.Concurrency).
 		SetStatus(userIn.Status).
@@ -300,6 +301,9 @@ func (r *userRepository) Update(ctx context.Context, userIn *service.User, field
 	}
 	if fields.Role {
 		updateOp = updateOp.SetRole(userIn.Role)
+	}
+	if fields.Roles {
+		updateOp = updateOp.SetRoles(userIn.Roles)
 	}
 	if fields.Concurrency {
 		updateOp = updateOp.SetConcurrency(userIn.Concurrency)
@@ -1460,6 +1464,9 @@ func (r *userRepository) RemoveGroupFromUserAllowedGroups(ctx context.Context, u
 }
 
 func (r *userRepository) GetFirstAdmin(ctx context.Context) (*service.User, error) {
+	// 全局 Admin API Key 只绑定超级管理员。role 列为 legacy 兼容摘要
+	// （super_admin → "admin"），因此 RoleEQ("admin") 精确命中活动超级管理员，
+	// 不会把 billing/upstream 子角色误当作 Admin API Key 的 owner。
 	m, err := r.client.User.Query().
 		Where(
 			dbuser.RoleEQ(service.RoleAdmin),

@@ -26,6 +26,11 @@ func runServerTimingRequest(
 	engine.Use(ServerTiming(enabled))
 	engine.Any("/*path", func(c *gin.Context) {
 		if role != "" {
+			var roles []string
+			if role == "admin" {
+				roles = []string{"super_admin"}
+			}
+			c.Set(string(ContextKeyUser), AuthSubject{UserID: 1, Roles: roles})
 			c.Set(string(ContextKeyUserRole), role)
 		}
 		handler(c)
@@ -244,6 +249,7 @@ func TestServerTimingResponseHeaderForWebSocket(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/ops/ws/qps", nil)
 	collector := servertiming.New(time.Now())
 	c.Request = c.Request.WithContext(servertiming.WithCollector(c.Request.Context(), collector))
+	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1, Roles: []string{"super_admin"}})
 	c.Set(string(ContextKeyUserRole), "admin")
 
 	header := ServerTimingResponseHeader(c)
@@ -251,6 +257,7 @@ func TestServerTimingResponseHeaderForWebSocket(t *testing.T) {
 		t.Fatal("WebSocket response header missing timing value")
 	}
 
+	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
 	c.Set(string(ContextKeyUserRole), "user")
 	if got := ServerTimingResponseHeader(c); got != nil {
 		t.Fatalf("non-admin WebSocket received timing header: %#v", got)

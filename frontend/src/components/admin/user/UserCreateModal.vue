@@ -27,10 +27,13 @@
       </div>
       <div>
         <label class="input-label">{{ t('admin.users.form.roleLabel') }}</label>
-        <select v-model="form.role" class="input">
-          <option value="user">{{ t('admin.users.roles.user') }}</option>
-          <option value="admin">{{ t('admin.users.roles.admin') }}</option>
-        </select>
+        <div class="flex flex-wrap gap-4 pt-1">
+          <label v-for="r in adminRoles" :key="r" class="flex items-center gap-1.5 text-sm">
+            <input v-model="form.roles" type="checkbox" :value="r" class="rounded border-gray-300 dark:border-dark-600" />
+            {{ t('admin.users.roles.' + r) }}
+          </label>
+        </div>
+        <p class="input-hint">{{ t('admin.users.form.rolesHint') }}</p>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
@@ -77,12 +80,15 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
+import type { AdminRole } from '@/types'
+import { ALL_ADMIN_ROLES } from '@/utils/adminPermissions'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits(['close', 'success']); const { t } = useI18n()
 const appStore = useAppStore()
 
-const form = reactive({ email: '', password: '', username: '', notes: '', role: 'user' as 'user' | 'admin', balance: '', concurrency: 1, rpm_limit: 0 })
+const form = reactive({ email: '', password: '', username: '', notes: '', roles: [] as AdminRole[], balance: '', concurrency: 1, rpm_limit: 0 })
+const adminRoles = ALL_ADMIN_ROLES
 
 const stepUp = useStepUp()
 const loading = ref(false)
@@ -116,7 +122,7 @@ const submit = async () => {
   } finally { loading.value = false }
 }
 
-watch(() => props.show, (v) => { if(v) Object.assign(form, { email: '', password: '', username: '', notes: '', role: 'user', balance: '', concurrency: 1, rpm_limit: 0 }) })
+watch(() => props.show, (v) => { if(v) Object.assign(form, { email: '', password: '', username: '', notes: '', roles: [] as AdminRole[], balance: '', concurrency: 1, rpm_limit: 0 }) })
 
 const generateRandomPassword = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*'

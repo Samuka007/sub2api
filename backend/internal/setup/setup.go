@@ -429,6 +429,7 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 	admin := &service.User{
 		Email:       cfg.Admin.Email,
 		Role:        service.RoleAdmin,
+		Roles:       []string{service.RoleSuperAdmin},
 		Status:      service.StatusActive,
 		Balance:     0,
 		Concurrency: setupDefaultAdminConcurrency(),
@@ -442,11 +443,12 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO users (email, password_hash, role, balance, concurrency, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO users (email, password_hash, role, roles, balance, concurrency, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
 		admin.Email,
 		admin.PasswordHash,
 		admin.Role,
+		`["super_admin"]`,
 		admin.Balance,
 		admin.Concurrency,
 		admin.Status,

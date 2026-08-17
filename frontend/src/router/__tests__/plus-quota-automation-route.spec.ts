@@ -28,7 +28,7 @@ describe('Plus quota automation navigation', () => {
 
   it('places the menu entry immediately after account management', () => {
     expect(sidebarSource).toMatch(
-      /\{ path: '\/admin\/accounts',[^\n]+\n\s*\{ path: '\/admin\/plus-quota-automation', label: t\('nav\.plusQuotaAutomation'\), icon: ChartIcon \}/
+      /\{ path: '\/admin\/accounts',[^\n]+\n\s*\{ path: '\/admin\/plus-quota-automation', label: t\('nav\.plusQuotaAutomation'\), icon: ChartIcon(?:, permission: '[^']+')? \}/
     )
   })
 })

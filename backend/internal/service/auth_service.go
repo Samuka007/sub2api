@@ -58,10 +58,11 @@ const refreshTokenPrefix = "rt_"
 
 // JWTClaims JWT载荷数据
 type JWTClaims struct {
-	UserID       int64  `json:"user_id"`
-	Email        string `json:"email"`
-	Role         string `json:"role"`
-	TokenVersion int64  `json:"token_version"` // Used to invalidate tokens on password change
+	UserID       int64    `json:"user_id"`
+	Email        string   `json:"email"`
+	Role         string   `json:"role"`
+	Roles        []string `json:"roles,omitempty"`
+	TokenVersion int64    `json:"token_version"` // Used to invalidate tokens on password change
 	// SessionID 会话 ID（与 refresh token family 对应），用于单会话撤销与 step-up 授权绑定。
 	SessionID string `json:"sid,omitempty"`
 	// BindingHash 会话指纹哈希（IP+UA），会话绑定开启时校验；空值表示旧 token（平滑升级）。
@@ -1405,6 +1406,7 @@ func (s *AuthService) generateAccessToken(user *User, sessionID, bindingHash str
 		UserID:       user.ID,
 		Email:        user.Email,
 		Role:         user.Role,
+		Roles:        user.Roles,
 		TokenVersion: resolvedTokenVersion(user),
 		SessionID:    sessionID,
 		BindingHash:  bindingHash,
@@ -1655,7 +1657,7 @@ type TokenPair struct {
 // TokenPairWithUser extends TokenPair with user role for backend mode checks
 type TokenPairWithUser struct {
 	TokenPair
-	UserRole string
+	UserRoles []string
 }
 
 // GenerateTokenPair 生成Access Token和Refresh Token对
@@ -1831,7 +1833,7 @@ func (s *AuthService) RefreshTokenPair(ctx context.Context, refreshToken string)
 	}
 	return &TokenPairWithUser{
 		TokenPair: *pair,
-		UserRole:  user.Role,
+		UserRoles: user.Roles,
 	}, nil
 }
 

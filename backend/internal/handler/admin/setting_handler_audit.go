@@ -3,6 +3,7 @@ package admin
 import (
 	"log/slog"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -21,11 +22,11 @@ func (h *SettingHandler) auditSettingsUpdate(c *gin.Context, before *service.Sys
 	}
 
 	subject, _ := middleware.GetAuthSubjectFromContext(c)
-	role, _ := middleware.GetUserRoleFromContext(c)
+	roles, _ := middleware.GetAdminRolesFromContext(c)
 	slog.Info("settings updated",
 		"audit", true,
 		"user_id", subject.UserID,
-		"role", role,
+		"role", domain.RolesSummary(roles),
 		"changed", changed,
 	)
 }

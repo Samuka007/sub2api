@@ -17,6 +17,7 @@ func UserFromServiceShallow(u *service.User) *User {
 		Email:                      u.Email,
 		Username:                   u.Username,
 		Role:                       u.Role,
+		Roles:                      nonNilRoles(u.Roles),
 		Balance:                    u.Balance,
 		FrozenBalance:              u.FrozenBalance,
 		Concurrency:                u.Concurrency,
@@ -873,4 +874,13 @@ func PromoCodeUsageFromService(u *service.PromoCodeUsage) *PromoCodeUsage {
 		UsedAt:      u.UsedAt,
 		User:        UserFromServiceShallow(u.User),
 	}
+}
+
+// nonNilRoles ensures a stable `[]` (not `null`) JSON representation for users
+// without admin roles, keeping the API contract predictable for clients.
+func nonNilRoles(roles []string) []string {
+	if roles == nil {
+		return []string{}
+	}
+	return roles
 }

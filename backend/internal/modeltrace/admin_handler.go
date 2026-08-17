@@ -4,9 +4,9 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
-	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -59,12 +59,13 @@ func (h *AdminHandler) UpdateConfig(c *gin.Context) {
 }
 
 func requireModelTraceAdmin(c *gin.Context) (middleware.AuthSubject, bool) {
-	role, ok := middleware.GetUserRoleFromContext(c)
+	roles, ok := middleware.GetAdminRolesFromContext(c)
 	if !ok {
 		response.Unauthorized(c, "Unauthorized")
 		return middleware.AuthSubject{}, false
 	}
-	if role != service.RoleAdmin {
+	// 模型追踪为超级管理员专属能力。
+	if !domain.HasPermission(roles, domain.PermissionSuperAdmin) {
 		response.Forbidden(c, "Admin access required")
 		return middleware.AuthSubject{}, false
 	}

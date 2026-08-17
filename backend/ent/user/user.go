@@ -27,6 +27,8 @@ const (
 	FieldPasswordHash = "password_hash"
 	// FieldRole holds the string denoting the role field in the database.
 	FieldRole = "role"
+	// FieldRoles holds the string denoting the roles field in the database.
+	FieldRoles = "roles"
 	// FieldBalance holds the string denoting the balance field in the database.
 	FieldBalance = "balance"
 	// FieldFrozenBalance holds the string denoting the frozen_balance field in the database.
@@ -200,6 +202,7 @@ var Columns = []string{
 	FieldEmail,
 	FieldPasswordHash,
 	FieldRole,
+	FieldRoles,
 	FieldBalance,
 	FieldFrozenBalance,
 	FieldConcurrency,
@@ -258,6 +261,8 @@ var (
 	DefaultRole string
 	// RoleValidator is a validator for the "role" field. It is called by the builders before save.
 	RoleValidator func(string) error
+	// DefaultRoles holds the default value on creation for the "roles" field.
+	DefaultRoles []string
 	// DefaultBalance holds the default value on creation for the "balance" field.
 	DefaultBalance float64
 	// DefaultFrozenBalance holds the default value on creation for the "frozen_balance" field.

@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -73,6 +74,7 @@ func RegisterPaymentRoutes(
 	adminGroup.Use(gin.HandlerFunc(adminAuth))
 	adminGroup.Use(gin.HandlerFunc(auditLog))
 	adminGroup.Use(middleware.AdminComplianceGuard(settingService))
+	adminGroup.Use(middleware.RequireAdminPermission(domain.PermissionSuperAdmin))
 	{
 		// Dashboard
 		adminGroup.GET("/dashboard", adminPaymentHandler.GetDashboard)

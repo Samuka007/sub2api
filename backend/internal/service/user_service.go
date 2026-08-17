@@ -101,6 +101,7 @@ type UserUpdateFields struct {
 	Notes        bool
 	PasswordHash bool
 	Role         bool
+	Roles        bool
 	Status       bool
 	Concurrency  bool
 	RPMLimit     bool

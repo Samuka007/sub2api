@@ -75,7 +75,7 @@ func TestApplicationModelTracingActivationInstallsDeploymentConfigAndCleansUp(t 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/model-tracing/config", nil)
-	ctx.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1})
+	ctx.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1, Roles: []string{service.RoleSuperAdmin}})
 	ctx.Set(string(middleware.ContextKeyUserRole), service.RoleAdmin)
 	handler.GetConfig(ctx)
 
