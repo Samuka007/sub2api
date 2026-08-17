@@ -1,6 +1,6 @@
 # 4Sub2 长期记忆
 
-更新时间：`2026-07-28`
+更新时间：`2026-08-14`
 
 本文件只保存跨任务仍然有价值、且能从仓库或生产证据核验的事实。临时需求、方案原因和详细功能设计应分别维护在仓库对应的任务、决策或专题文档中。
 
@@ -8,7 +8,7 @@
 
 | 项目 | 当前事实 | 来源 |
 | --- | --- | --- |
-| 官方基线 | `v0.1.164` / `cd8bb98c44303b2c8f04c0da340447c992f0cb7d` | [`.upstream-version`](../.upstream-version) |
+| 官方基线 | `v0.1.177` / `073e92d17178a1ccdb0a27017f572f10c9c7ab62` | [`.upstream-version`](../.upstream-version) |
 | 最近内部发布 | `release-1.0.4` | [`deployments/release-1.0.4.md`](deployments/release-1.0.4.md) |
 | 发布 commit | `d4edac4efe6c30c3e8304b53ec74c8c1bb836a07` | 同上 |
 | 生产固定镜像 | `ghcr.io/alle-group/sub2api@sha256:082232bab72f5d662a6a3f1524fa823b338fab54369a8284bf6525ce805a4179` | 同上 |
