@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -25,9 +26,14 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	_ "github.com/lib/pq"
 	redisclient "github.com/redis/go-redis/v9"
+	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 )
+
+// integrationSetupTimeout bounds all container/DB setup done before m.Run(),
+// where the go test watchdog cannot see hangs.
+const integrationSetupTimeout = 5 * time.Minute
 
 const (
 	redisImageTag    = "redis:8.4-alpine"
@@ -44,25 +50,65 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	ctx := context.Background()
+	os.Exit(runIntegrationTests(m))
+}
+
+// runIntegrationTests owns the pre-test container setup. The go test timeout
+// watchdog only arms inside m.Run(), so everything above it runs unwatched.
+// Container startup talks to the Docker daemon; a stalled daemon used to hang
+// this setup silently forever on context.Background(), killing the whole
+// backend-test-build job at its CI timeout with no log. The entire pre-test
+// setup now runs under integrationSetupTimeout so a stalled daemon fails
+// loudly instead of hanging, and the stage log marks exactly where it stopped.
+//
+// Returning instead of os.Exit keeps the container-cleanup defers alive: the
+// previous defers never ran because every path below them called os.Exit.
+func runIntegrationTests(m *testing.M) int {
+	ctx, cancel := context.WithTimeout(context.Background(), integrationSetupTimeout)
+
+	// Terminate with a detached context: cleanup must survive ctx cancellation,
+	// which is the expected state when setup itself timed out.
+	terminateAfter := func(c interface {
+		Terminate(context.Context, ...testcontainers.TerminateOption) error
+	}) {
+		if c != nil {
+			terminateCtx, terminateCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer terminateCancel()
+			_ = c.Terminate(terminateCtx)
+		}
+	}
+	var pgContainer, redisContainer interface {
+		Terminate(context.Context, ...testcontainers.TerminateOption) error
+	}
+	defer func() {
+		terminateAfter(redisContainer)
+		terminateAfter(pgContainer)
+		cancel()
+	}()
 
 	if err := timezone.Init("UTC"); err != nil {
 		log.Printf("failed to init timezone: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
+	log.Printf("integration harness: checking docker availability")
 	if !dockerIsAvailable(ctx) {
+		if ctx.Err() != nil {
+			log.Printf("docker availability check did not finish within %s (daemon stalled?)", integrationSetupTimeout)
+			return 1
+		}
 		// In CI we expect Docker to be available so integration tests should fail loudly.
 		if os.Getenv("CI") != "" {
 			log.Printf("docker is not available (CI=true); failing integration tests")
-			os.Exit(1)
+			return 1
 		}
 		log.Printf("docker is not available; skipping integration tests (start Docker to enable)")
-		os.Exit(0)
+		return 0
 	}
 
 	postgresImage := selectDockerImage(ctx, postgresImageTag)
-	pgContainer, err := tcpostgres.Run(
+	log.Printf("integration harness: starting postgres container (%s)", postgresImage)
+	pg, err := tcpostgres.Run(
 		ctx,
 		postgresImage,
 		tcpostgres.WithDatabase("sub2api_test"),
@@ -72,60 +118,65 @@ func TestMain(m *testing.M) {
 	)
 	if err != nil {
 		log.Printf("failed to start postgres container: %v", err)
-		os.Exit(1)
+		return 1
 	}
-	defer func() { _ = pgContainer.Terminate(ctx) }()
+	pgContainer = pg
 
-	redisContainer, err := tcredis.Run(
+	log.Printf("integration harness: starting redis container (%s)", redisImageTag)
+	rd, err := tcredis.Run(
 		ctx,
 		redisImageTag,
 	)
 	if err != nil {
 		log.Printf("failed to start redis container: %v", err)
-		os.Exit(1)
+		return 1
 	}
-	defer func() { _ = redisContainer.Terminate(ctx) }()
+	redisContainer = rd
 
-	dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable", "TimeZone=UTC")
+	dsn, err := pg.ConnectionString(ctx, "sslmode=disable", "TimeZone=UTC")
 	if err != nil {
 		log.Printf("failed to get postgres dsn: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
+	log.Printf("integration harness: waiting for postgres to accept connections")
 	integrationPostgresDSN = dsn
 	integrationDB, err = openSQLWithRetry(ctx, dsn, 30*time.Second)
 	if err != nil {
 		log.Printf("failed to open sql db: %v", err)
-		os.Exit(1)
+		return 1
 	}
+	log.Printf("integration harness: applying migrations")
 	if err := ApplyMigrations(ctx, integrationDB); err != nil {
 		log.Printf("failed to apply db migrations: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// 创建 ent client 用于集成测试
 	drv := entsql.OpenDB(dialect.Postgres, integrationDB)
 	integrationEntClient = dbent.NewClient(dbent.Driver(drv))
 
-	redisHost, err := redisContainer.Host(ctx)
+	redisHost, err := rd.Host(ctx)
 	if err != nil {
 		log.Printf("failed to get redis host: %v", err)
-		os.Exit(1)
+		return 1
 	}
-	redisPort, err := redisContainer.MappedPort(ctx, "6379/tcp")
+	redisPort, err := rd.MappedPort(ctx, "6379/tcp")
 	if err != nil {
 		log.Printf("failed to get redis port: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	integrationRedis = redisclient.NewClient(&redisclient.Options{
-		Addr: fmt.Sprintf("%s:%d", redisHost, redisPort.Int()),
+		Addr: net.JoinHostPort(redisHost, strconv.Itoa(redisPort.Int())),
 		DB:   0,
 	})
+	log.Printf("integration harness: pinging redis")
 	if err := integrationRedis.Ping(ctx).Err(); err != nil {
 		log.Printf("failed to ping redis: %v", err)
-		os.Exit(1)
+		return 1
 	}
+	log.Printf("integration harness: ready")
 
 	code := m.Run()
 
@@ -133,7 +184,7 @@ func TestMain(m *testing.M) {
 	_ = integrationRedis.Close()
 	_ = integrationDB.Close()
 
-	os.Exit(code)
+	return code
 }
 
 func dockerIsAvailable(ctx context.Context) bool {
