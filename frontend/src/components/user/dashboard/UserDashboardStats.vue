@@ -28,6 +28,9 @@
         <p class="mt-1 truncate text-sm font-semibold text-[#26312f] dark:text-[#dce5e2]" :title="metric.value">
           {{ metric.value }}
         </p>
+        <p v-if="metric.detail" class="mt-0.5 truncate text-xs text-[#8a9693] dark:text-[#758783]" :title="metric.detail">
+          {{ metric.detail }}
+        </p>
       </div>
     </div>
   </section>
@@ -86,21 +89,25 @@ const secondaryMetrics = computed(() => [
   {
     label: t('dashboard.todayTokens'),
     value: formatTokens(props.stats.today_tokens || 0),
+    detail: `${t('dashboard.input')}: ${formatTokens(props.stats.today_input_tokens || 0)} / ${t('dashboard.output')}: ${formatTokens(props.stats.today_output_tokens || 0)} / ${t('dashboard.cache')}: ${formatTokens((props.stats.today_cache_creation_tokens || 0) + (props.stats.today_cache_read_tokens || 0))}`,
     icon: 'cube' as const
   },
   {
     label: t('dashboard.totalTokens'),
     value: formatTokens(props.stats.total_tokens || 0),
+    detail: `${t('dashboard.input')}: ${formatTokens(props.stats.total_input_tokens || 0)} / ${t('dashboard.output')}: ${formatTokens(props.stats.total_output_tokens || 0)} / ${t('dashboard.cache')}: ${formatTokens((props.stats.total_cache_creation_tokens || 0) + (props.stats.total_cache_read_tokens || 0))}`,
     icon: 'database' as const
   },
   {
     label: t('dashboard.performance'),
     value: `${formatTokens(props.stats.rpm || 0)} RPM / ${formatTokens(props.stats.tpm || 0)} TPM`,
+    detail: '',
     icon: 'bolt' as const
   },
   {
     label: t('dashboard.avgResponse'),
     value: formatDuration(props.stats.average_duration_ms || 0),
+    detail: '',
     icon: 'clock' as const
   }
 ])
