@@ -425,6 +425,14 @@ func (c *grokMediaBindingCache) ReleaseGrokVideoBilled(context.Context, string) 
 	return nil
 }
 
+func (c *grokMediaBindingCache) SetReasoningContent(context.Context, string, string, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) GetReasoningContent(context.Context, string) (string, error) {
+	return "", service.ErrReasoningContentNotFound
+}
+
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	var requestBody []byte
 	if req.Body != nil {
