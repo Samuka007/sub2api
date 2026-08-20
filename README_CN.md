@@ -2,7 +2,7 @@
 > **4Sub2 内部仓库说明**
 >
 > 当前仓库为 `Alle-Group/sub2api`。内部开发、发布和部署规则以 [私有项目说明](README.md)
-> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.178`
+> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.179`
 > 中文说明作为功能参考；其中面向上游公开仓库的克隆、安装和发布命令不覆盖本仓库规则。
 
 <div align="center">
@@ -596,7 +596,6 @@ gateway:
 访问策略说明：
 - `/sora/media`：内部调用或客户端携带 API Key 才能下载
 - `/sora/media-signed`：外部可访问，但有签名 + 过期控制
-
 `config.yaml` 还支持以下安全相关配置：
 
 - `cors.allowed_origins` 配置 CORS 白名单
@@ -804,11 +803,11 @@ sub2api/
 
 ## Star History
 
-<a href="https://star-history.com/#Wei-Shaw/sub2api&Date">
+<a href="https://star-history.dera.page/#Wei-Shaw/sub2api&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Wei-Shaw/sub2api&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Wei-Shaw/sub2api&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Wei-Shaw/sub2api&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
  </picture>
 </a>
 

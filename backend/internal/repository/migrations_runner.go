@@ -63,6 +63,9 @@ const usageLogsUpstreamModelMismatchIndexMigration = "195_add_usage_log_upstream
 const usageLogsUpstreamModelMismatchIndex = "idx_usage_logs_upstream_model_mismatch_created_at"
 const accountNameLookupIndexMigration = "196_add_account_name_lookup_index_notx.sql"
 const accountNameLookupIndex = "idx_accounts_lower_name_id_active"
+const usageLogsEffectiveModelIndexesMigration = "226_add_usage_log_effective_model_indexes_notx.sql"
+const usageLogsEffectiveRequestedModelIndex = "idx_usage_logs_effective_requested_model_created"
+const usageLogsEffectiveUpstreamModelIndex = "idx_usage_logs_effective_upstream_model_created"
 
 type migrationChecksumCompatibilityRule struct {
 	fileChecksum       string
@@ -304,6 +307,13 @@ func prepareNonTransactionalMigration(ctx context.Context, db migrationConnectio
 		return dropInvalidIndexIfPresent(ctx, db, usageLogsUpstreamModelMismatchIndex)
 	case accountNameLookupIndexMigration:
 		return dropInvalidIndexIfPresent(ctx, db, accountNameLookupIndex)
+	case usageLogsEffectiveModelIndexesMigration:
+		for _, indexName := range []string{usageLogsEffectiveRequestedModelIndex, usageLogsEffectiveUpstreamModelIndex} {
+			if err := dropInvalidIndexIfPresent(ctx, db, indexName); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return nil
 	}

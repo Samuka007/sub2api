@@ -836,6 +836,7 @@ type SecurityConfig struct {
 	ResponseHeaders ResponseHeaderConfig `mapstructure:"response_headers"`
 	CSP             CSPConfig            `mapstructure:"csp"`
 	ProxyFallback   ProxyFallbackConfig  `mapstructure:"proxy_fallback"`
+	ProxyProbe      ProxyProbeConfig     `mapstructure:"proxy_probe"`
 	// TrustForwardedIPForAPIKeyACL enables legacy raw forwarded-header takeover.
 	// When disabled, server.trusted_proxies is authoritative for all client-IP consumers.
 	TrustForwardedIPForAPIKeyACL  bool                                       `mapstructure:"trust_forwarded_ip_for_api_key_acl"`
@@ -952,6 +953,57 @@ type ProxyFallbackConfig struct {
 	// 这些关键路径的代理失败始终返回错误，不会回退直连。
 	// 默认 false：避免因代理配置错误导致服务器真实 IP 泄露。
 	AllowDirectOnError bool `mapstructure:"allow_direct_on_error"`
+}
+
+type ProxyProbeConfig struct {
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"` // 已禁用：禁止跳过 TLS 证书验证
+	// URLs 按优先级排列的自定义探测 URL 列表。
+	// 留空时使用内置默认列表（ip-api → ipify）。
+	// 某些 AI API 专用代理只允许访问特定域名，配置多个备选可提高探测成功率。
+	URLs []ProbeURLConfig `mapstructure:"urls"`
+}
+
+// ProbeURLConfig 描述一个探测端点及其响应解析方式。
+type ProbeURLConfig struct {
+	URL    string `mapstructure:"url"`
+	Parser string `mapstructure:"parser"` // "ip-api" / "ipify" / "chatgpt-trace"
+}
+
+func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	normalized := make([]ProbeURLConfig, 0, len(targets))
+	for i, target := range targets {
+		rawURL := strings.TrimSpace(target.URL)
+		parser := strings.ToLower(strings.TrimSpace(target.Parser))
+		if rawURL == "" {
+			return nil, fmt.Errorf("entry %d: url is required", i)
+		}
+		if parser == "" {
+			return nil, fmt.Errorf("entry %d: parser is required", i)
+		}
+		switch parser {
+		case "ip-api", "ipify", "chatgpt-trace":
+		default:
+			return nil, fmt.Errorf("entry %d: unsupported parser %q", i, target.Parser)
+		}
+
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Host == "" {
+			return nil, fmt.Errorf("entry %d: invalid url %q", i, target.URL)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("entry %d: url scheme must be http or https", i)
+		}
+
+		normalized = append(normalized, ProbeURLConfig{
+			URL:    rawURL,
+			Parser: parser,
+		})
+	}
+	return normalized, nil
 }
 
 type BillingConfig struct {
@@ -2124,6 +2176,7 @@ func setDefaults() {
 
 	// Security - disable direct fallback on proxy error
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
+	viper.SetDefault("security.proxy_probe.insecure_skip_verify", false)
 
 	// Billing
 	viper.SetDefault("billing.circuit_breaker.enabled", true)
@@ -2731,6 +2784,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("metrics.path must not overlap /debug/pprof when metrics.pprof_enabled is true")
 		}
 	}
+	proxyProbeURLs, err := normalizeProxyProbeURLs(c.Security.ProxyProbe.URLs)
+	if err != nil {
+		return fmt.Errorf("security.proxy_probe.urls: %w", err)
+	}
+	c.Security.ProxyProbe.URLs = proxyProbeURLs
 	if c.Server.ReadHeaderTimeout < 1 || c.Server.ReadHeaderTimeout > 60 {
 		return fmt.Errorf("server.read_header_timeout must be between 1 and 60 seconds")
 	}
