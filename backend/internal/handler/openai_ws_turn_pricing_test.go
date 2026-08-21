@@ -14,8 +14,24 @@ import (
 // 峰前建连并保活即可让后续 turn 沿用旧价格。
 func TestOpenAIWSTurnPricingZeroValue(t *testing.T) {
 	var p openAIWSTurnPricing
-	require.True(t, p.current().IsZero(),
+	require.True(t, p.currentOr(time.Time{}).IsZero(),
 		"首个 turn 起始回调前必须保持零值")
+}
+
+func TestOpenAIWSTurnPricingCurrentOr(t *testing.T) {
+	fallback := time.Date(2024, time.January, 2, 2, 0, 0, 0, time.UTC)
+
+	t.Run("frozen time takes precedence", func(t *testing.T) {
+		frozen := fallback.Add(time.Minute)
+		var p openAIWSTurnPricing
+		p.freeze(frozen)
+		require.Equal(t, frozen, p.currentOr(fallback))
+	})
+
+	t.Run("zero value falls back to turn start", func(t *testing.T) {
+		var p openAIWSTurnPricing
+		require.Equal(t, fallback, p.currentOr(fallback))
+	})
 }
 
 // TestOpenAIWSTurnPricingFreezePerTurn 钉死每个 turn 的 BeforeTurn 都会覆盖
@@ -26,8 +42,8 @@ func TestOpenAIWSTurnPricingFreezePerTurn(t *testing.T) {
 	turn2 := time.Now()
 
 	p.freeze(turn1)
-	require.Equal(t, turn1, p.current())
+	require.Equal(t, turn1, p.currentOr(time.Time{}))
 
 	p.freeze(turn2)
-	require.Equal(t, turn2, p.current(), "后续 turn 必须使用自己的定价时刻")
+	require.Equal(t, turn2, p.currentOr(time.Time{}), "后续 turn 必须使用自己的定价时刻")
 }
