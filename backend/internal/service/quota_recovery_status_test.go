@@ -93,6 +93,9 @@ func TestQuotaRecoveryStatusHeartbeatAndErrorsAreRedacted(t *testing.T) {
 	require.Equal(t, "reconciliation failed", status.LastRun.LastError)
 	payload, err := json.Marshal(status)
 	require.NoError(t, err)
-	require.NotContains(t, string(payload), "123")
+	// Assert redaction of the exact leak fragments. A bare "123" assertion
+	// would be over-broad: wall-clock timestamps in the payload can contain
+	// the digit sequence "123" (e.g. nanoseconds), spuriously failing.
+	require.NotContains(t, string(payload), "account_id=123")
 	require.NotContains(t, string(payload), "do-not-expose")
 }
