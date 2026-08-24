@@ -21,6 +21,13 @@ describe('ops locale key completeness', () => {
     'admin.ops.timeRange.custom',
     'admin.ops.customTimeRange.startTime',
     'admin.ops.customTimeRange.endTime',
+    'admin.ops.errorDetail.upstreamStatus',
+    'admin.ops.errorDetail.rootCause',
+    'admin.ops.errorDetail.diagnosticPayloads',
+    'admin.ops.errorDetail.payloads.client',
+    'admin.ops.errorDetail.payloads.upstream_message',
+    'admin.ops.errorDetail.payloads.upstream_detail',
+    'admin.ops.errorDetail.payloads.upstream_events',
   ]
 
   for (const key of requiredKeys) {
@@ -42,6 +49,13 @@ describe('ops locale key completeness', () => {
     it(`en and zh locales have ${key}`, () => {
       expect(flattenKeys(en)).toContain(key)
       expect(flattenKeys(zh)).toContain(key)
+    })
+  }
+
+  for (const key of requiredKeys) {
+    it(`zh locale has ${key}`, () => {
+      const zhKeys = flattenKeys(zh)
+      expect(zhKeys).toContain(key)
     })
   }
 })

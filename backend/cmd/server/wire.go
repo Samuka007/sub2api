@@ -33,6 +33,7 @@ type Application struct {
 	ModelTrace       *modeltrace.Manager
 	Metrics          *appmetrics.Metrics
 	OpsMetrics       *service.OpsMetricsCollector
+	PluginManager    *service.PluginManager
 	Cleanup          func()
 	cleanupOnce      sync.Once
 }
@@ -58,6 +59,7 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 
 		// BuildInfo provider
 		provideServiceBuildInfo,
+		providePluginHostInfo,
 
 		// Model tracing runtime configuration provider
 		provideModelTraceConfigManager,
@@ -68,7 +70,7 @@ func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.M
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "ModelTrace", "Metrics", "OpsMetrics", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "ModelTrace", "Metrics", "OpsMetrics", "PluginManager", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -105,6 +107,13 @@ func provideModelTraceConfigManager(
 		cfg.Totp.EncryptionKeyConfigured,
 		runtime,
 	)
+}
+
+func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
+	return service.PluginHostInfo{
+		Version:   buildInfo.Version,
+		BuildType: buildInfo.BuildType,
+	}
 }
 
 func provideCleanup(
@@ -154,7 +163,9 @@ func provideCleanup(
 	modelIQ *service.ModelIQService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	auditLog *service.AuditLogService,
+	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
+	pluginManager *service.PluginManager,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -167,6 +178,18 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"PluginManager", func() error {
+				if pluginManager != nil {
+					pluginManager.Stop()
+				}
+				return nil
+			}},
+			{"OpenAIQuotaAutoResetService", func() error {
+				if openAIAutoReset != nil {
+					openAIAutoReset.Stop()
+				}
+				return nil
+			}},
 			{"OpsIngressRejectAggregator", func() error {
 				if opsIngressReject != nil {
 					opsIngressReject.Stop()
@@ -366,12 +389,12 @@ func provideCleanup(
 				return nil
 			}},
 			{"ChannelMonitorV2Aggregator", func() error {
-			if channelMonitorV2Aggregator != nil {
-				channelMonitorV2Aggregator.Stop()
-			}
-			return nil
-		}},
-		{"ChannelMonitorRunner", func() error {
+				if channelMonitorV2Aggregator != nil {
+					channelMonitorV2Aggregator.Stop()
+				}
+				return nil
+			}},
+			{"ChannelMonitorRunner", func() error {
 				if channelMonitorRunner != nil {
 					channelMonitorRunner.Stop()
 				}

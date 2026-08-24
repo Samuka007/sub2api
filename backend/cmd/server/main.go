@@ -229,6 +229,12 @@ func runMainServer() {
 	if app.Metrics != nil && app.Metrics.Addr() != nil {
 		log.Printf("Metrics listener started on %s", app.Metrics.Addr())
 	}
+	defer app.Cleanup()
+	if app.PluginManager != nil {
+		if err := app.PluginManager.Start(context.Background()); err != nil {
+			log.Printf("Plugin manager started in degraded state: %v", err)
+		}
+	}
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)

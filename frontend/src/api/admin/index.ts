@@ -36,6 +36,7 @@ import riskControlAPI from './riskControl'
 import adminComplianceAPI from './compliance'
 import auditAPI from './audit'
 import plusQuotaAutomationAPI from './plusQuotaAutomation'
+import pluginsAPI from './plugins'
 
 /**
  * Unified admin API object for convenient access
@@ -73,7 +74,8 @@ export const adminAPI = {
   riskControl: riskControlAPI,
   compliance: adminComplianceAPI,
   audit: auditAPI,
-  plusQuotaAutomation: plusQuotaAutomationAPI
+  plusQuotaAutomation: plusQuotaAutomationAPI,
+  plugins: pluginsAPI
 }
 
 export {
@@ -109,7 +111,8 @@ export {
   riskControlAPI,
   adminComplianceAPI,
   auditAPI,
-  plusQuotaAutomationAPI
+  plusQuotaAutomationAPI,
+  pluginsAPI
 }
 
 export default adminAPI
@@ -129,3 +132,9 @@ export type {
   PlusQuotaAutomationOverview,
   PlusQuotaAutomationState
 } from './plusQuotaAutomation'
+export type {
+  PluginInstallation,
+  PluginCompatibility,
+  PluginUISession,
+  PluginTestResult
+} from './plugins'

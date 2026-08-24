@@ -615,6 +615,9 @@ func (h *GrokOAuthHandler) ResetQuota(c *gin.Context) {
 		response.BadRequest(c, "grok quota service is not enabled")
 		return
 	}
+	// ResetQuota 恒返回 GROK_QUOTA_RESET_UNSUPPORTED（xAI 无 OAuth 配额重置接口），
+	// 该错误由 response.ErrorFrom 归一化后以 501 响应客户端（merged tree 的
+	// GrokQuotaService.ResetQuota 为 fork 的 1-value error 签名）。
 	response.ErrorFrom(c, h.quotaService.ResetQuota(c.Request.Context(), accountID))
 }
 
