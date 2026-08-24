@@ -313,7 +313,10 @@ func TestOpenAIQuotaAutoResetService_TimeoutRetryReusesRequestBody(t *testing.T)
 	}
 	idempotencyConfig := DefaultIdempotencyConfig()
 	idempotencyConfig.ObserveOnly = false
-	idempotencyConfig.FailedRetryBackoff = 0
+	// Fork 的 retryableFailureBackoff 把 <=0 视为「未配置 → 默认 5s」，
+	// 因此这里用 1ms 显式配置并在两次调用间等待，让重试窗口过期后第二次
+	// evaluateAccount 能 reclaim 记录并复用同一 credit_id/redeem_request_id。
+	idempotencyConfig.FailedRetryBackoff = time.Millisecond
 	service := NewOpenAIQuotaAutoResetService(
 		repo,
 		quota,
@@ -323,6 +326,7 @@ func TestOpenAIQuotaAutoResetService_TimeoutRetryReusesRequestBody(t *testing.T)
 	)
 
 	require.Error(t, service.evaluateAccount(context.Background(), account.ID))
+	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, service.evaluateAccount(context.Background(), account.ID))
 	quota.mu.Lock()
 	args := append([][2]string(nil), quota.resetArgs...)

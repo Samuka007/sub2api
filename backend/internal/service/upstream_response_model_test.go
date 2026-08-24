@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
 func TestUpstreamResponseModelObserverTerminalWinsAndRecordsConflict(t *testing.T) {
 	observer := &upstreamResponseModelObserver{}
 

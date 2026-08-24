@@ -52,7 +52,7 @@ jobs:
           check-latest: false
           cache: false
       - name: Verify Go version
-        run: test "$(go env GOVERSION)" = "go1.26.6"
+        run: test "$(go env GOVERSION)" = "go1.27.0"
       - name: Validate model tracing Compose environment
         run: /bin/bash deploy/tests/model-tracing-compose-test.sh
       - name: Run unit, integration, and build in parallel
@@ -75,7 +75,7 @@ jobs:
           check-latest: false
           cache: false
       - name: Verify Go version
-        run: test "$(go env GOVERSION)" = "go1.26.6"
+        run: test "$(go env GOVERSION)" = "go1.27.0"
       - name: Run fast Go linters (low memory footprint)
         uses: golangci/golangci-lint-action@v9
         env:

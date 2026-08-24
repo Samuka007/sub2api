@@ -1979,8 +1979,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// F5a: 握手层会话屏蔽检查。WS 握手无 body，显式标识仅来自握手 header
 	// （session_id / conversation_id）；无标识则放行，连接内仍有本地 flag 兜底。
 	trustedObserveHandshake := h.isContentModerationTrustedAPIKey(c.Request.Context(), apiKey, reqModel, GetInboundEndpoint(c))
-	cyberBlockKey := service.CyberSessionBlockKey(apiKey.ID, c, nil)
-	if !trustedObserveHandshake && cyberBlockKey != "" && h.gatewayService.IsCyberSessionBlocked(c.Request.Context(), cyberBlockKey) {
+	cyberBlockKey := findBlockedCyberSessionKey(c.Request.Context(), h.gatewayService, apiKey.ID, c, nil)
+	if !trustedObserveHandshake && cyberBlockKey != "" {
 		writeCyberSessionBlockedWSError(c.Request.Context(), wsConn)
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "session blocked by cyber-security policy")
 		h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, reqModel, cyberBlockKey)
@@ -2364,8 +2364,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				currentTurnModel = model
 				requestPayloadHash = service.HashUsageRequestPayload(payload)
 				currentTurnTrustedObserve = h.isContentModerationTrustedAPIKey(c.Request.Context(), apiKey, model, GetInboundEndpoint(c))
-				currentTurnCyberBlockKey = service.CyberSessionBlockKey(apiKey.ID, c, payload)
-				if !currentTurnTrustedObserve && currentTurnCyberBlockKey != "" && h.gatewayService.IsCyberSessionBlocked(c.Request.Context(), currentTurnCyberBlockKey) {
+				currentTurnCyberBlockKey = findBlockedCyberSessionKey(c.Request.Context(), h.gatewayService, apiKey.ID, c, payload)
+				if !currentTurnTrustedObserve && currentTurnCyberBlockKey != "" {
 					writeCyberSessionBlockedWSError(c.Request.Context(), wsConn)
 					h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, model, currentTurnCyberBlockKey)
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
@@ -3557,7 +3557,7 @@ func (h *OpenAIGatewayHandler) rejectIfCyberSessionBlocked(c *gin.Context, apiKe
 	if h.isContentModerationTrustedAPIKey(c.Request.Context(), apiKey, model, GetInboundEndpoint(c)) {
 		return false
 	}
-	key := service.CyberSessionBlockKey(apiKey.ID, c, body)
+	key := findBlockedCyberSessionKey(c.Request.Context(), h.gatewayService, apiKey.ID, c, body)
 	if key == "" {
 		return false
 	}

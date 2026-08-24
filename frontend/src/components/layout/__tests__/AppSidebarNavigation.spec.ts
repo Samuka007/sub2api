@@ -65,6 +65,7 @@ vi.mock('@/stores', () => ({
 vi.mock('@/utils/featureFlags', () => ({
   FeatureFlags: {
     channelMonitor: { key: 'channel_monitor_enabled' },
+    pluginManagement: { key: 'plugin_management_enabled' },
     payment: {},
     availableChannels: {},
     affiliate: {},

@@ -847,10 +847,10 @@ const adminNavItems = computed((): NavItem[] => {
     },
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, permission: 'admin.super' },
     { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon, permission: 'admin.accounts.manage' },
-    { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/plus-quota-automation', label: t('nav.plusQuotaAutomation'), icon: ChartIcon, permission: 'admin.accounts.manage' },
     { path: '/admin/one-click-account-notes', label: t('nav.oneClickAccountNotes'), icon: OrderListIcon, permission: 'admin.accounts.manage' },
     { path: '/admin/account-health-detector', label: t('nav.accountHealthDetector'), icon: ShieldIcon, permission: 'admin.accounts.manage' },
+    { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon, permission: 'admin.super' },
     { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon, permission: 'admin.proxies.manage' },
     {
