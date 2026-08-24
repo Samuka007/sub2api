@@ -81,7 +81,7 @@ jobs:
         env:
           GOMEMLIMIT: 3GiB
         with:
-          version: v2.9
+          version: v2.13
           working-directory: backend
           args: --timeout=20m --enable-only=errcheck,govet,staticcheck
 
