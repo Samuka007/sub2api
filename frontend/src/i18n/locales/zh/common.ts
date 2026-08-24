@@ -183,6 +183,7 @@ export default {
     oneClickAccountNotes: '一键备注',
     accountHealthDetector: '账号健康检测',
     plusQuotaAutomation: 'Plus 用量刷新',
+    plugins: '插件管理',
     proxies: 'IP管理',
     redeemCodes: '兑换码',
     ops: '运维监控',

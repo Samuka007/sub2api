@@ -10,6 +10,7 @@ import modelTracing from './modelTracing'
 import plusQuotaAutomation from './plusQuotaAutomation'
 import accountHealthDetector from './accountHealthDetector'
 import oneClickAccountNotes from './oneClickAccountNotes'
+import plugins from './plugins'
 
 export default {
   ...overview,
@@ -24,4 +25,5 @@ export default {
   ...plusQuotaAutomation,
   ...accountHealthDetector,
   ...oneClickAccountNotes,
+  ...plugins,
 }

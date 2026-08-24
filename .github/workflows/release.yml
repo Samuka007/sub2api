@@ -266,7 +266,7 @@ jobs:
           cache: false
 
       - name: Verify Go version
-        run: test "$(go env GOVERSION)" = "go1.26.6"
+        run: test "$(go env GOVERSION)" = "go1.27.0"
 
       - name: Set up QEMU
         if: needs.resolve-release.outputs.release_mode == 'full'

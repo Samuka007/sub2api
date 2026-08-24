@@ -183,6 +183,7 @@ export default {
     oneClickAccountNotes: 'One-click Notes',
     accountHealthDetector: 'Account Health',
     plusQuotaAutomation: 'Plus Usage Reset',
+    plugins: 'Plugins',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',
     ops: 'Ops',

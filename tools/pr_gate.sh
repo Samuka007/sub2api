@@ -21,8 +21,8 @@ for command_name in bash docker go golangci-lint node pnpm python3; do
   require_command "${command_name}"
 done
 
-if [[ "$(go env GOVERSION)" != "go1.26.6" ]]; then
-  printf 'Go version must be go1.26.6; got %s\n' "$(go env GOVERSION)" >&2
+if [[ "$(go env GOVERSION)" != "go1.27.0" ]]; then
+  printf 'Go version must be go1.27.0; got %s\n' "$(go env GOVERSION)" >&2
   exit 1
 fi
 
