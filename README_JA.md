@@ -3,7 +3,7 @@
 >
 > このリポジトリは `Alle-Group/sub2api` です。社内の開発、リリース、デプロイ規則については、
 > [プライベートプロジェクト説明](README.md) と [Git コラボレーション規則](GIT_WORKFLOW.md) を参照してください。
-> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.181` 日本語ドキュメントを保持しています。
+> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.182` 日本語ドキュメントを保持しています。
 > 上流の公開リポジトリ向けクローン、インストール、リリース手順は、このリポジトリの規則を上書きしません。
 
 <div align="center">
@@ -170,6 +170,11 @@
 <tr>
 <td width="180"><a href="https://www.duckip.cn/?keyword=cu7oog6y"><img src="assets/partners/logos/duckip.png" alt="DuckIP" width="150"></a></td>
 <td><a href="https://www.duckip.cn/?keyword=cu7oog6y">DuckIP</a> - 195 以上の国と地域にわたる 9,000 万以上のグローバルレジデンシャルネットワークリソース。ローテーションとスティッキーセッションに対応し、パブリックデータ収集、RAG 更新、モデル評価、マルチリージョンデータワークロードに最適。🟢レジデンシャルプロキシ - 20% オフ；🟢スタティックレジデンシャルプロキシ - ¥50.00/IP から；🟢無制限レジデンシャルプロキシ - ¥19.8/時間 から。✅500M 無料トライアルを取得。</td>
+</tr>
+
+<tr>
+<td width="180"><a href="https://go.apimart.ai/gh-sub2api"><img src="assets/partners/logos/apimart.jpg" alt="APIMart" width="150"></a></td>
+<td>APIMart のご支援に感謝します！<a href="https://go.apimart.ai/gh-sub2api">APIMart</a> は AI 画像・動画生成に特化した低価格 API プラットフォームです。GPT-Image-2 は 1 枚 $0.006 から、1 ドルで 160 枚以上の画像を生成できます。画像と動画の両方に対応する非同期 API を 1 つで利用でき、タスクを送信して ID を取得し、ポーリングまたはコールバックで結果を取得できます。数万枚規模のバッチ処理でもタイムアウトせず、モデルを変更してもコードの変更は不要です。月額料金なしの従量課金制で、<a href="https://go.apimart.ai/gh-sub2api">こちらの登録リンク</a>からすぐに利用を開始できます。</td>
 </tr>
 
 </table>
