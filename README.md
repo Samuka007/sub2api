@@ -11,12 +11,12 @@
 | 私有仓库 | `Alle-Group/sub2api` |
 | 主分支 | `main` |
 | 上游项目 | `Wei-Shaw/sub2api` |
-| 上游基线 | `v0.1.181` / `3af5443b224823ae507a50c7b113aa50604409c8` |
-| 上游升级标签 | `v0.1.181` |
+| 上游基线 | `v0.1.182` / `5a7d469622911a6b1291a692376df5fa03f9ac2e` |
+| 上游升级标签 | `v0.1.182` |
 | 最近内部发布标签 | `company-v0.1.164.1` |
 | 最近内部发布提交 | `f3c6895a6f0b64eb6a638e3f89ea9b86a08c7c1d` |
 | 初始私有功能恢复提交 | `69c85913dc0732382eb2e1572c488b47b89b511d` |
-| 同步目标源码版本 | `0.1.181` |
+| 同步目标源码版本 | `0.1.182` |
 
 当前私有功能源码由官方基线、部署时保留的源码冻结包以及生产补丁重建而成。
 它是一个功能等价、可以继续协作开发的源码版本，但不能声称与已经丢失的原始生产提交逐字节一致。
@@ -24,22 +24,24 @@
 如需查看相对官方基线新增的全部私有代码，可执行：
 
 ```bash
-git diff v0.1.181..HEAD
+git diff v0.1.182..HEAD
 ```
 
-## 上游 v0.1.181 文档与功能
+## 上游 v0.1.182 文档与功能
 
-本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.181` 时，
+本仓库以这份 README 作为 4Sub2 私有功能和团队协作的主说明。同步 `v0.1.182` 时，
 同时更新了上游的 [中文说明](README_CN.md) 和 [日文说明](README_JA.md)，用于查阅完整的
 Sub2API 公共功能、安装方式和配置项。两份上游说明中的公开仓库克隆、安装和发布命令仅供参考；
 内部开发、发布和部署必须遵循 [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md)。
 该文档中的仓库地址是迁移前记录；当前团队仓库地址以本页“仓库信息”和本地 `origin` 为准：
 `git@github.com:Alle-Group/sub2api.git`。
 
-`v0.1.181` 在 `v0.1.180` 基线上集中修复上游参数兼容问题：Gemini 工具 Schema 清理上游
-不支持的字段、Grok 上游请求改用官方 CLI User-Agent、OpenAI Responses Lite 保留
-`additional_tools` 请求所需的 `parallel_tool_calls` 参数、OpenAI Responses 批量清理
-同类型输入项中不受支持的 `status` 字段，避免长对话重试失败。
+`v0.1.182` 在 `v0.1.181` 基线上集中提升 OpenAI Responses Lite 在不同账号类型及传输方式下的
+兼容性：统一 OAuth、API Key、HTTP 与 WebSocket 请求处理，固定并行工具调用模式并保留数值精度；
+同时修复 OpenAI 图片生成 OAuth 请求原样保留提示词、OpenCode Go 用量限制重置时长解析、
+Anthropic 缓存创建明细重复累计导致的重复计费、Antigravity Sonnet 4.5 兼容路由（保留显式
+Sonnet 4.5 请求）、Composite 分组 Kimi Code K3 模型路由与渠道监控 V2 错误归属，以及支付
+结果页余额刷新。
 
 组合分组能力继续保留。管理员可以使用组合分组将请求模型解析到具体供应商，完整运维说明见
 [`docs/COMPOSITE_GROUPS.md`](docs/COMPOSITE_GROUPS.md)。
