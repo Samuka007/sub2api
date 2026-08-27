@@ -73,22 +73,40 @@
         <!-- 批量调整 + 全部清空 -->
         <div v-if="localEntries.length > 0" class="mt-3 flex items-center gap-3 border-t border-gray-100 pt-3 dark:border-dark-600">
           <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.groups.batchAdjust') }}</span>
-          <div class="flex items-center gap-1.5">
-            <span class="text-xs text-gray-400">×</span>
-            <input
-              v-model.number="batchFactor"
-              type="number"
-              step="0.1"
-              min="0"
-              autocomplete="off"
-              class="hide-spinner w-20 rounded border border-gray-200 bg-white px-2 py-1 text-center text-sm transition-colors focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
-              placeholder="0.5"
-            />
+          <div class="flex flex-wrap items-center gap-1.5">
+            <label class="flex items-center gap-1 text-xs text-gray-400">
+              <span>{{ t('admin.groups.multiplierFactor') }}</span>
+              <input
+                v-model.number="batchMultiplier"
+                type="number"
+                step="0.1"
+                min="0.001"
+                autocomplete="off"
+                class="hide-spinner w-20 rounded border border-gray-200 bg-white px-2 py-1 text-center text-sm transition-colors focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
+                placeholder="1"
+                data-testid="batch-rate-multiplier"
+                :aria-label="t('admin.groups.multiplierFactor')"
+              />
+            </label>
+            <label class="flex items-center gap-1 text-xs text-gray-400">
+              <span>{{ t('admin.groups.additionValue') }}</span>
+              <input
+                v-model.number="batchAddition"
+                type="number"
+                step="0.1"
+                autocomplete="off"
+                class="hide-spinner w-20 rounded border border-gray-200 bg-white px-2 py-1 text-center text-sm transition-colors focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
+                placeholder="0"
+                data-testid="batch-rate-addition"
+                :aria-label="t('admin.groups.additionValue')"
+              />
+            </label>
             <button
               type="button"
+              data-testid="apply-batch-rate-adjustment"
               class="btn btn-primary btn-sm shrink-0 px-2.5 py-1 text-xs"
-              :disabled="!batchFactor || batchFactor <= 0"
-              @click="applyBatchFactor"
+              :disabled="!canApplyBatchAdjustment"
+              @click="applyBatchAdjustment"
             >
               {{ t('admin.groups.applyMultiplier') }}
             </button>
@@ -170,6 +188,7 @@
                         autocomplete="off"
                         :value="entry.rate_multiplier ?? ''"
                         :placeholder="String(props.group?.rate_multiplier ?? 1)"
+                        data-testid="group-rate-input"
                         class="hide-spinner w-20 rounded border border-gray-200 bg-white px-2 py-1 text-center text-sm font-medium transition-colors focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
                         @change="updateLocalRate(entry.user_id, ($event.target as HTMLInputElement).value)"
                       />
@@ -249,6 +268,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import Icon from '@/components/icons/Icon.vue'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
+import { applyRateAdjustment } from '@/utils/rateAdjustment'
 
 interface LocalEntry extends GroupRateMultiplierEntry {}
 
@@ -276,7 +296,8 @@ const selectedUser = ref<AdminUser | null>(null)
 const newRate = ref<number | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
-const batchFactor = ref<number | null>(null)
+const batchMultiplier = ref<number | null>(null)
+const batchAddition = ref<number | null>(null)
 
 let searchTimeout: ReturnType<typeof setTimeout>
 
@@ -289,16 +310,26 @@ const platformColorClass = computed(() => {
   }
 })
 
+const normalizeOptionalNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
 // 是否显示"最终倍率"预览列
 const showFinalRate = computed(() => {
-  return batchFactor.value != null && batchFactor.value > 0 && batchFactor.value !== 1
+  const multiplier = normalizeOptionalNumber(batchMultiplier.value)
+  const addition = normalizeOptionalNumber(batchAddition.value)
+  return (multiplier != null && multiplier !== 1) || (addition != null && addition !== 0)
 })
 
 // 计算最终倍率预览
 const computeFinalRate = (rate: number | null | undefined) => {
   const base = rate ?? props.group?.rate_multiplier ?? 1
-  if (!batchFactor.value) return base
-  return parseFloat((base * batchFactor.value).toFixed(6))
+  const multiplier = normalizeOptionalNumber(batchMultiplier.value)
+  const addition = normalizeOptionalNumber(batchAddition.value)
+  if (multiplier == null && addition == null) return base
+  return applyRateAdjustment(base, multiplier, addition)
 }
 
 // 检测是否有未保存的修改
@@ -344,7 +375,8 @@ const adjustPage = () => {
 watch(() => props.show, (val) => {
   if (val && props.group) {
     currentPage.value = 1
-    batchFactor.value = null
+    batchMultiplier.value = null
+    batchAddition.value = null
     searchQuery.value = ''
     searchResults.value = []
     selectedUser.value = null
@@ -428,15 +460,31 @@ const removeLocal = (userId: number) => {
   adjustPage()
 }
 
-// 批量乘数应用到本地
-const applyBatchFactor = () => {
-  if (!batchFactor.value || batchFactor.value <= 0) return
+const canApplyBatchAdjustment = computed(() => {
+  const multiplier = normalizeOptionalNumber(batchMultiplier.value)
+  const addition = normalizeOptionalNumber(batchAddition.value)
+  if (multiplier == null && addition == null) return false
+  if (multiplier != null && multiplier <= 0) return false
+
+  const entries = localEntries.value.filter(e => e.rate_multiplier != null)
+  return entries.length > 0 && entries.every(entry => {
+    const result = applyRateAdjustment(entry.rate_multiplier as number, multiplier, addition)
+    return result > 0 && Number.isFinite(result)
+  })
+})
+
+// 批量乘/加应用到本地
+const applyBatchAdjustment = () => {
+  if (!canApplyBatchAdjustment.value) return
+  const multiplier = normalizeOptionalNumber(batchMultiplier.value)
+  const addition = normalizeOptionalNumber(batchAddition.value)
   for (const entry of localEntries.value) {
     if (entry.rate_multiplier != null) {
-      entry.rate_multiplier = parseFloat((entry.rate_multiplier * batchFactor.value).toFixed(6))
+      entry.rate_multiplier = applyRateAdjustment(entry.rate_multiplier, multiplier, addition)
     }
   }
-  batchFactor.value = null
+  batchMultiplier.value = null
+  batchAddition.value = null
 }
 
 // 本地清空
@@ -447,7 +495,8 @@ const clearAllLocal = () => {
 // 取消：恢复到服务器数据
 const handleCancel = () => {
   localEntries.value = cloneEntries(serverEntries.value)
-  batchFactor.value = null
+  batchMultiplier.value = null
+  batchAddition.value = null
   adjustPage()
 }
 
