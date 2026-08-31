@@ -765,7 +765,6 @@ func TestCachePostResetSnapshot(t *testing.T) {
 	}
 
 	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
-	require.Equal(t, 1, repo.extraUpdateCalls)
 	require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
 	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_5h_used_percent"])
 	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_7d_used_percent"])

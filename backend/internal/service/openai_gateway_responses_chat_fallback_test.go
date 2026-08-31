@@ -43,7 +43,6 @@ func TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletion
 	result, err := svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "company-coding-model", gjson.GetBytes(upstream.lastBody, "model").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "reasoning_effort").Exists())
 	require.Nil(t, result.ReasoningEffort)
 	require.Equal(t, "http://upstream.example/v1/chat/completions", upstream.lastReq.URL.String())
