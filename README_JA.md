@@ -3,7 +3,7 @@
 >
 > このリポジトリは `Alle-Group/sub2api` です。社内の開発、リリース、デプロイ規則については、
 > [プライベートプロジェクト説明](README.md) と [Git コラボレーション規則](GIT_WORKFLOW.md) を参照してください。
-> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.183` 日本語ドキュメントを保持しています。
+> 以下には機能リファレンスとして、上流 `Wei-Shaw/sub2api` の `v0.1.184` 日本語ドキュメントを保持しています。
 > 上流の公開リポジトリ向けクローン、インストール、リリース手順は、このリポジトリの規則を上書きしません。
 
 <div align="center">
@@ -64,6 +64,11 @@
 <tr>
 <td width="180"><a href="https://aigocode.com/invite/SUB2API"><img src="assets/partners/logos/aigocode.png" alt="AIGoCode" width="150"></a></td>
 <td>AIGoCode のご支援に感謝します！AIGoCode は Claude Code、Codex、最新の Gemini モデルを統合したオールインワンプラットフォームで、安定的かつ効率的でコストパフォーマンスに優れた AI コーディングサービスを提供します。柔軟なサブスクリプションプラン、アカウント停止リスクゼロ、VPN 不要の直接アクセス、超高速レスポンスが特長です。AIGoCode は sub2api ユーザー向けに特別特典を用意しています：<a href="https://aigocode.com/invite/SUB2API">こちらのリンク</a>から登録すると、初回チャージ時に 10% のボーナスクレジットを追加プレゼント！</td>
+</tr>
+
+<tr>
+<td width="180"><a href="https://codex-everywhere.com"><img src="assets/partners/logos/codex-everywhere.jpg" alt="CodexEverywhere" width="150"></a></td>
+<td>OpenAI 公式価格のわずか 3% で本物の GPT-5.6 シリーズを提供 — <a href="https://codex-everywhere.com">CodexEverywhere</a> は世界中の開発者にフロンティアモデルへのアクセスを民主化しています。私たちは透明性と誠実さを信条とし、モデル品質は数か月にわたるアクティブなコミュニティの監視によって検証されています。USD および暗号通貨に対応。<a href="https://codex-everywhere.com">codex-everywhere.com</a> で $20 の無料トライアルから始めましょう。</td>
 </tr>
 
 <tr>

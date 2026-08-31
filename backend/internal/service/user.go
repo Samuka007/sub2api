@@ -29,6 +29,8 @@ type User struct {
 	Concurrency   int
 	Status        string
 	AllowedGroups []int64
+	// RestrictPublicGroups narrows public-group binding to AllowedGroups.
+	RestrictPublicGroups bool
 	TokenVersion  int64 // Incremented on password change to invalidate existing tokens
 	// TokenVersionResolved indicates TokenVersion already contains the fingerprint-derived
 	// value expected in JWT claims and refresh-token state.
@@ -108,6 +110,14 @@ func (u *User) IsActive() bool {
 func (u *User) CanBindGroup(groupID int64, isExclusive bool) bool {
 	// 公开分组（非专属）：所有用户都可以绑定
 	if !isExclusive {
+		if u != nil && u.RestrictPublicGroups {
+			for _, id := range u.AllowedGroups {
+				if id == groupID {
+					return true
+				}
+			}
+			return false
+		}
 		return true
 	}
 	// 专属分组：需要在 AllowedGroups 中

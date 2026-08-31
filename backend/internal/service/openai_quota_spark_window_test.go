@@ -748,6 +748,28 @@ func TestQueryUsageStrictSurfacesResetCreditDetails401(t *testing.T) {
 	require.Contains(t, logs.String(), "upstream returned 401")
 }
 
+func TestCachePostResetSnapshot(t *testing.T) {
+	repo := &stubQuotaAccountRepo{}
+	svc := &OpenAIQuotaService{accountRepo: repo}
+	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
+	usage := &OpenAIQuotaUsage{
+		RateLimitResetCredits: credits,
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 5 * 60 * 60, ResetAfterSeconds: 5 * 60 * 60,
+			},
+			SecondaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 7 * 24 * 60 * 60, ResetAfterSeconds: 7 * 24 * 60 * 60,
+			},
+		},
+	}
+
+	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
+	require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_5h_used_percent"])
+	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_7d_used_percent"])
+}
+
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：
 // 当守卫的 GetByID 发生瞬时错误时，ResetCredit 必须立即返回该错误，
 // 不得旁路进入 prepareUpstreamCall（否则影子账号会借 resolve 路径操作母账号）。

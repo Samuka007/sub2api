@@ -2,7 +2,7 @@
 > **4Sub2 内部仓库说明**
 >
 > 当前仓库为 `Alle-Group/sub2api`。内部开发、发布和部署规则以 [私有项目说明](README.md)
-> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.183`
+> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.184`
 > 中文说明作为功能参考；其中面向上游公开仓库的克隆、安装和发布命令不覆盖本仓库规则。
 
 <div align="center">
@@ -64,6 +64,11 @@
 <tr>
 <td width="180"><a href="https://aigocode.com/invite/SUB2API"><img src="assets/partners/logos/aigocode.png" alt="AIGoCode" width="150"></a></td>
 <td>感谢 AIGoCode 赞助了本项目！AIGoCode 是一站式集成 Claude Code、Codex 以及最新 Gemini 模型的综合平台，为您提供稳定、高效、高性价比的 AI 编程服务。平台提供灵活的订阅方案，零封号风险，免 VPN 直连，响应极速。AIGoCode 为 sub2api 用户准备了专属福利：通过<a href="https://aigocode.com/invite/SUB2API">此链接</a>注册，首次充值可额外获得 10% 赠送额度！</td>
+</tr>
+
+<tr>
+<td width="180"><a href="https://codex-everywhere.com"><img src="assets/partners/logos/codex-everywhere.jpg" alt="CodexEverywhere" width="150"></a></td>
+<td>Real GPT-5.6 series at 3% of OpenAI pricing — <a href="https://codex-everywhere.com">CodexEverywhere</a> is democratizing access to frontier models for developers worldwide. We believe in transparency and honesty, with model quality verified by active community oversight for months. USD and crypto friendly. Start with a free $20 trial at <a href="https://codex-everywhere.com">codex-everywhere.com</a>.</td>
 </tr>
 
 <tr>

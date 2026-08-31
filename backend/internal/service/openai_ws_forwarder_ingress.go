@@ -133,6 +133,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 				return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
 			}
+			if s.shouldBridgeOpenAIWSPassthroughFirstMessage(account, firstClientMessage) {
+				forceHTTPBridge = true
+				break
+			}
 			// 透传 relay 在每个成功接收的 response.create 前回调 BeforeTurn，
 			// 并在 terminal event 后回调 AfterTurn。handler 依赖这组边界按 turn
 			// 重装利润门并冻结 pricingAt，避免长连接跨峰谷沿用旧定价。

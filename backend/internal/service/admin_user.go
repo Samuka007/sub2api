@@ -124,7 +124,11 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 	}
 
 	// 管理员角色集合可由管理员在创建时指定;未提供或为空时默认普通用户。
-	roles, err := normalizeAdminRoles(input.Roles)
+	rolesInput := input.Roles
+	if len(rolesInput) == 0 && input.Role == RoleAdmin {
+		rolesInput = []string{RoleSuperAdmin}
+	}
+	roles, err := normalizeAdminRoles(rolesInput)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +144,7 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 		RPMLimit:      input.RPMLimit,
 		Status:        StatusActive,
 		AllowedGroups: input.AllowedGroups,
+		RestrictPublicGroups: input.RestrictPublicGroups,
 	}
 	if err := user.SetPassword(input.Password); err != nil {
 		return nil, err
@@ -218,6 +223,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	oldRoles := append([]string(nil), user.Roles...)
 	oldRPMLimit := user.RPMLimit
 	oldAllowedGroups := append([]int64(nil), user.AllowedGroups...)
+	oldRestrictPublicGroups := user.RestrictPublicGroups
 
 	// fields 与下面的 input.X 判空条件一一对应：管理员没提交的列不写回，
 	// 避免这份快照回滚并发的扣费、状态变更或批量限额调整。
@@ -267,6 +273,26 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		fields.Role = true
 	}
 
+	if input.Roles == nil && input.Role != "" {
+		var roles []string
+		if input.Role == RoleAdmin {
+			roles = []string{RoleSuperAdmin}
+		}
+		roles, err := normalizeAdminRoles(roles)
+		if err != nil {
+			return nil, err
+		}
+		if user.HasRole(RoleSuperAdmin) && !containsString(roles, RoleSuperAdmin) {
+			if err := s.ensureNotLastAdmin(ctx); err != nil {
+				return nil, err
+			}
+		}
+		user.Roles = roles
+		user.Role = domain.LegacyRoleForRoles(roles)
+		fields.Roles = true
+		fields.Role = true
+	}
+
 	if input.Concurrency != nil {
 		user.Concurrency = *input.Concurrency
 		fields.Concurrency = true
@@ -280,6 +306,11 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	if input.AllowedGroups != nil {
 		user.AllowedGroups = *input.AllowedGroups
 		fields.AllowedGroups = true
+	}
+
+	if input.RestrictPublicGroups != nil {
+		user.RestrictPublicGroups = *input.RestrictPublicGroups
+		fields.RestrictPublicGroups = true
 	}
 
 	if err := s.userRepo.Update(ctx, user, fields); err != nil {
@@ -302,7 +333,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	if s.authCacheInvalidator != nil {
 		// RPMLimit 直接参与 billing_cache_service.checkRPM 的三级级联，
 		// allowed_groups 参与 API Key 专属分组授权判断；不失效缓存会让修改在一个 L2 TTL 内失去效果。
-		if user.Concurrency != oldConcurrency || user.Status != oldStatus || !sameStringSet(user.Roles, oldRoles) || user.RPMLimit != oldRPMLimit || !sameInt64Set(user.AllowedGroups, oldAllowedGroups) {
+		if user.Concurrency != oldConcurrency || user.Status != oldStatus || !sameStringSet(user.Roles, oldRoles) || user.RPMLimit != oldRPMLimit || user.RestrictPublicGroups != oldRestrictPublicGroups || !sameInt64Set(user.AllowedGroups, oldAllowedGroups) {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, user.ID)
 		}
 	}

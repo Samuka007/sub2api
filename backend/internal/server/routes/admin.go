@@ -389,6 +389,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 	accounts := adminGroup(admin, "/accounts", domain.PermissionAccountsManage)
 	{
 		accounts.GET("", h.Admin.Account.List)
+		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
 		accounts.GET("/account-health-candidates", h.Admin.Account.ListAccountHealthCandidates)
 		accounts.POST("/export-notes", h.Admin.Account.ExportNotes)
 		accounts.POST("/one-click-notes/preview", h.Admin.Account.PreviewOneClickAccountNotes)
