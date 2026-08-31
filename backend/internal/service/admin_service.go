@@ -148,10 +148,12 @@ type CreateUserInput struct {
 	Username      string
 	Notes         string
 	Roles         []string // 管理员角色集合;空表示普通用户。合法值见 domain.ValidAdminRoles
+	Role          string // legacy role input; canonical Roles takes precedence
 	Balance       *float64
 	Concurrency   int
 	RPMLimit      int
 	AllowedGroups []int64
+	RestrictPublicGroups bool
 	// ActorAdminID 执行本次操作的管理员ID(来自JWT)，仅用于权限敏感操作的审计日志。
 	ActorAdminID int64
 }
@@ -162,11 +164,13 @@ type UpdateUserInput struct {
 	Username      *string
 	Notes         *string
 	Roles         []string // nil 表示"未提供"(不修改);空切片表示清空为普通用户
+	Role          string // legacy role input; canonical Roles takes precedence
 	Balance       *float64 // 使用指针区分"未提供"和"设置为0"
 	Concurrency   *int     // 使用指针区分"未提供"和"设置为0"
 	RPMLimit      *int     // 使用指针区分"未提供"和"设置为0"
 	Status        string
 	AllowedGroups *[]int64 // 使用指针区分"未提供"和"设置为空数组"
+	RestrictPublicGroups *bool
 	// GroupRates 用户专属分组倍率配置
 	// map[groupID]*rate，nil 表示删除该分组的专属倍率
 	GroupRates map[int64]*float64

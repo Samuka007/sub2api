@@ -29,6 +29,8 @@ type User struct {
 	Concurrency   int
 	Status        string
 	AllowedGroups []int64
+	// RestrictPublicGroups narrows public-group binding to AllowedGroups.
+	RestrictPublicGroups bool
 	TokenVersion  int64 // Incremented on password change to invalidate existing tokens
 	// TokenVersionResolved indicates TokenVersion already contains the fingerprint-derived
 	// value expected in JWT claims and refresh-token state.

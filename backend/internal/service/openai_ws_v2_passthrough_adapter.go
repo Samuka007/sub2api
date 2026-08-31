@@ -1338,6 +1338,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				if eventType == "response.created" {
 					failureAccountSideEffectsApplied = false
 				}
+				if (eventType == "error" || eventType == "response.failed") && markOpenAIWSV2PassthroughCyberPolicy(c, payload) {
+					return nil
+				}
 				transientModel := ""
 				if turnLifecycle.isInFlight() {
 					_, transientModel = usageMeta.turnModels("")

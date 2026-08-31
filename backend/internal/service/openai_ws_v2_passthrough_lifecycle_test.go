@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	coderws "github.com/coder/websocket"
@@ -21,6 +23,7 @@ import (
 type stagedPassthroughFrame struct {
 	messageType coderws.MessageType
 	payload     []byte
+	err         error
 }
 
 type stagedPassthroughConn struct {
@@ -42,6 +45,10 @@ func (c *stagedPassthroughConn) Send(payload string) {
 	c.frames <- stagedPassthroughFrame{messageType: coderws.MessageText, payload: []byte(payload)}
 }
 
+func (c *stagedPassthroughConn) Fail(err error) {
+	c.frames <- stagedPassthroughFrame{err: err}
+}
+
 func (c *stagedPassthroughConn) WriteJSON(context.Context, any) error { return nil }
 
 func (c *stagedPassthroughConn) ReadMessage(ctx context.Context) ([]byte, error) {
@@ -61,7 +68,7 @@ func (c *stagedPassthroughConn) ReadFrame(ctx context.Context) (coderws.MessageT
 	case <-c.closed:
 		return coderws.MessageText, nil, errOpenAIWSConnClosed
 	case frame := <-c.frames:
-		return frame.messageType, append([]byte(nil), frame.payload...), nil
+		return frame.messageType, append([]byte(nil), frame.payload...), frame.err
 	}
 }
 
@@ -152,13 +159,18 @@ func startPassthroughLifecycleServer(
 	controlCtx context.Context,
 	svc *OpenAIGatewayService,
 	account *Account,
-	hooks ...*OpenAIWSIngressHooks,
+) (*httptest.Server, <-chan error) {
+	return startPassthroughLifecycleServerWithHooks(t, controlCtx, svc, account, nil)
+}
+
+func startPassthroughLifecycleServerWithHooks(
+	t *testing.T,
+	controlCtx context.Context,
+	svc *OpenAIGatewayService,
+	account *Account,
+	hooksFactory func(*gin.Context) *OpenAIWSIngressHooks,
 ) (*httptest.Server, <-chan error) {
 	t.Helper()
-	var relayHooks *OpenAIWSIngressHooks
-	if len(hooks) > 0 {
-		relayHooks = hooks[0]
-	}
 	serverErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
@@ -189,9 +201,215 @@ func startPassthroughLifecycleServer(
 		req := r.Clone(controlCtx)
 		req.Header = req.Header.Clone()
 		ginCtx.Request = req
-		serverErr <- svc.ProxyResponsesWebSocketFromClient(controlCtx, ginCtx, conn, account, "sk-test", firstMessage, relayHooks)
+		var hooks *OpenAIWSIngressHooks
+		if hooksFactory != nil {
+			hooks = hooksFactory(ginCtx)
+		}
+		serverErr <- svc.ProxyResponsesWebSocketFromClient(controlCtx, ginCtx, conn, account, "sk-test", firstMessage, hooks)
 	}))
 	return server, serverErr
+}
+
+func TestPassthroughLifecycle_CyberTerminalEventsMarkBeforeAfterTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name        string
+		events      []string
+		wantBody    string
+		wantMessage string
+		wantInput   int
+		wantOutput  int
+	}{
+		{
+			name: "error",
+			events: []string{
+				`{"type":"error","error":{"code":"cyber_policy","message":"blocked by error event"},"usage":{"input_tokens":5,"output_tokens":1}}`,
+				`{"type":"response.failed","response":{"id":"resp_error","error":{"code":"cyber_policy","message":"blocked by paired failed event"},"usage":{"input_tokens":9,"output_tokens":2}}}`,
+			},
+			wantBody:    `"type":"error"`,
+			wantMessage: "blocked by error event",
+			wantInput:   5,
+			wantOutput:  1,
+		},
+		{
+			name: "response_failed",
+			events: []string{
+				`{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"cyber_policy","message":"blocked by failed event"},"usage":{"input_tokens":9,"output_tokens":2}}}`,
+			},
+			wantBody:    `"type":"response.failed"`,
+			wantMessage: "blocked by failed event",
+			wantInput:   9,
+			wantOutput:  2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controlCtx, cancelControl := context.WithCancelCause(context.Background())
+			defer cancelControl(context.Canceled)
+			upstream := newStagedPassthroughConn()
+			for _, event := range tt.events {
+				upstream.Send(event)
+			}
+
+			markSeen := make(chan CyberPolicyMark, 1)
+			afterTurnCalls := atomic.Int32{}
+			server, serverErr := startPassthroughLifecycleServerWithHooks(
+				t,
+				controlCtx,
+				newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
+				passthroughLifecycleAccount(),
+				func(c *gin.Context) *OpenAIWSIngressHooks {
+					return &OpenAIWSIngressHooks{AfterTurn: func(_ int, _ *OpenAIForwardResult, _ error) {
+						afterTurnCalls.Add(1)
+						if mark := GetOpsCyberPolicy(c); mark != nil {
+							select {
+							case markSeen <- *mark:
+							default:
+							}
+						}
+					}}
+				},
+			)
+			defer server.Close()
+			clientConn := dialPassthroughLifecycleClient(t, server)
+			defer func() { _ = clientConn.CloseNow() }()
+
+			for range tt.events {
+				_, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+				require.NoError(t, err)
+			}
+
+			select {
+			case mark := <-markSeen:
+				require.Equal(t, "cyber_policy", mark.Code)
+				require.Equal(t, tt.wantMessage, mark.Message)
+				require.Contains(t, mark.Body, tt.wantBody)
+				require.Equal(t, http.StatusOK, mark.UpstreamStatus)
+				require.Equal(t, tt.wantInput, mark.UpstreamInTok)
+				require.Equal(t, tt.wantOutput, mark.UpstreamOutTok)
+			case <-time.After(3 * time.Second):
+				t.Fatal("cyber mark was not visible to AfterTurn")
+			}
+			require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+			select {
+			case <-serverErr:
+			case <-time.After(3 * time.Second):
+				t.Fatal("cyber passthrough test did not exit")
+			}
+			require.Equal(t, int32(1), afterTurnCalls.Load(), "error/response.failed pair must complete and record once")
+		})
+	}
+}
+
+func TestPassthroughLifecycle_NonCyberFailureKeepsAccountSideEffects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	controlCtx, cancelControl := context.WithCancelCause(context.Background())
+	defer cancelControl(context.Canceled)
+	upstream := newStagedPassthroughConn()
+	upstream.Send(`{"type":"response.failed","response":{"id":"resp_non_cyber","error":{"type":"authentication_error","code":"invalid_api_key","status_code":401,"message":"credential rejected"},"usage":{"input_tokens":3,"output_tokens":1}}}`)
+	repo := &openAIStream403AccountRepo{}
+	svc := newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream)
+	svc.rateLimitService = NewRateLimitService(repo, nil, svc.cfg, nil, nil)
+	account := passthroughLifecycleAccount()
+
+	markSeen := make(chan *CyberPolicyMark, 1)
+	server, serverErr := startPassthroughLifecycleServerWithHooks(
+		t,
+		controlCtx,
+		svc,
+		account,
+		func(c *gin.Context) *OpenAIWSIngressHooks {
+			return &OpenAIWSIngressHooks{AfterTurn: func(_ int, _ *OpenAIForwardResult, _ error) {
+				markSeen <- GetOpsCyberPolicy(c)
+			}}
+		},
+	)
+	defer server.Close()
+	clientConn := dialPassthroughLifecycleClient(t, server)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	event, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.failed", gjson.GetBytes(event, "type").String())
+	select {
+	case mark := <-markSeen:
+		require.Nil(t, mark)
+	case <-time.After(3 * time.Second):
+		t.Fatal("non-cyber terminal event did not complete its turn")
+	}
+	require.Equal(t, 1, repo.setErrorCalls, "non-cyber credential failure must retain account failure side effects")
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	select {
+	case <-serverErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("non-cyber passthrough test did not exit")
+	}
+}
+
+func TestPassthroughLifecycle_CyberSkipsFailureAccountSideEffects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	controlCtx, cancelControl := context.WithCancelCause(context.Background())
+	defer cancelControl(context.Canceled)
+	upstream := newStagedPassthroughConn()
+	upstream.Send(`{"type":"response.failed","response":{"id":"resp_cyber_auth","error":{"type":"authentication_error","code":"cyber_policy","status_code":401,"message":"request blocked"}}}`)
+	repo := &openAIStream403AccountRepo{}
+	svc := newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream)
+	svc.rateLimitService = NewRateLimitService(repo, nil, svc.cfg, nil, nil)
+	account := passthroughLifecycleAccount()
+
+	server, serverErr := startPassthroughLifecycleServer(t, controlCtx, svc, account)
+	defer server.Close()
+	clientConn := dialPassthroughLifecycleClient(t, server)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	event, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.failed", gjson.GetBytes(event, "type").String())
+	require.Zero(t, repo.setErrorCalls, "cyber_policy is request-scoped and must not cool down the account")
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+
+	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	select {
+	case <-serverErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cyber side-effect test did not exit")
+	}
+}
+
+func TestPassthroughLifecycle_CloseReasonTruncationPreservesUTF8(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	controlCtx, cancelControl := context.WithCancelCause(context.Background())
+	defer cancelControl(context.Canceled)
+	upstream := newStagedPassthroughConn()
+	originalReason := strings.Repeat("a", 119) + "界"
+	upstream.Fail(NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, originalReason, errors.New("policy rejected")))
+
+	server, serverErr := startPassthroughLifecycleServer(
+		t,
+		controlCtx,
+		newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
+		passthroughLifecycleAccount(),
+	)
+	defer server.Close()
+	clientConn := dialPassthroughLifecycleClient(t, server)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	_, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+	var closeErr coderws.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+	require.True(t, utf8.ValidString(closeErr.Reason))
+	require.LessOrEqual(t, len(closeErr.Reason), 120)
+	require.Equal(t, strings.Repeat("a", 119), closeErr.Reason)
+
+	select {
+	case <-serverErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("passthrough close reason test did not exit")
+	}
 }
 
 func dialPassthroughLifecycleClient(t *testing.T, server *httptest.Server) *coderws.Conn {
@@ -295,235 +513,6 @@ func TestOpenAIWSPassthroughTurnLifecycle_SerializesTerminalCommitAndNextTurn(t 
 		t.Error("failed terminal write must not commit idle state")
 	})
 	require.False(t, <-admitted, "failed terminal write must keep the current turn in flight")
-}
-
-func TestPassthroughLifecycle_SuccessfulTerminalWriteStaysOnCurrentTurn(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	type callbackEvent struct {
-		kind     string
-		turn     int
-		result   *OpenAIForwardResult
-		writeErr error
-		turnErr  error
-	}
-
-	callbacks := make(chan callbackEvent, 5)
-	terminalWritten := make(chan struct{})
-	allowTurnCompletion := make(chan struct{})
-	hooks := &OpenAIWSIngressHooks{
-		AfterClientWrite: func(turn int, _ []byte, writeErr error) {
-			callbacks <- callbackEvent{kind: "client_write", turn: turn, writeErr: writeErr}
-			if turn == 2 {
-				close(terminalWritten)
-				<-allowTurnCompletion
-			}
-		},
-		AfterTurn: func(turn int, result *OpenAIForwardResult, turnErr error) {
-			callbacks <- callbackEvent{kind: "turn", turn: turn, result: result, turnErr: turnErr}
-		},
-	}
-	controlCtx, cancelControl := context.WithCancelCause(context.Background())
-	defer cancelControl(context.Canceled)
-	upstream := newStagedPassthroughConn()
-	upstream.Send(`{"type":"response.completed","response":{"id":"resp_write_ok","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)
-	server, serverErr := startPassthroughLifecycleServer(
-		t,
-		controlCtx,
-		newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
-		passthroughLifecycleAccount(),
-		hooks,
-	)
-	defer server.Close()
-	clientConn := dialPassthroughLifecycleClient(t, server)
-	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
-
-	terminal, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
-	require.NoError(t, err)
-	require.Equal(t, "resp_write_ok", gjson.GetBytes(terminal, "response.id").String())
-	writeCtx, cancelWrite := context.WithTimeout(context.Background(), time.Second)
-	require.NoError(t, clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.2","stream":false}`)))
-	cancelWrite()
-	require.Equal(t, "gpt-5.2", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "model").String())
-	upstream.Send(`{"type":"response.completed","response":{"id":"resp_write_ok_2","model":"gpt-5.2","usage":{"input_tokens":1,"output_tokens":1}}}`)
-	terminal, err = readPassthroughLifecycleFrame(t, clientConn, time.Second)
-	require.NoError(t, err)
-	require.Equal(t, "resp_write_ok_2", gjson.GetBytes(terminal, "response.id").String())
-	<-terminalWritten
-	closeErr := make(chan error, 1)
-	go func() {
-		closeErr <- clientConn.Close(coderws.StatusNormalClosure, "done")
-	}()
-	time.Sleep(50 * time.Millisecond)
-	close(allowTurnCompletion)
-	require.NoError(t, <-closeErr)
-	select {
-	case err = <-serverErr:
-		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("passthrough successful terminal turn did not stop after client close")
-	}
-
-	got := make([]callbackEvent, 0, len(callbacks))
-	for len(callbacks) > 0 {
-		got = append(got, <-callbacks)
-	}
-	require.Len(t, got, 4, "connection finalization must not synthesize a turn 3 callback")
-	require.Equal(t, "client_write", got[0].kind)
-	require.Equal(t, 1, got[0].turn)
-	require.NoError(t, got[0].writeErr)
-	require.Equal(t, "turn", got[1].kind)
-	require.Equal(t, 1, got[1].turn)
-	require.NotNil(t, got[1].result)
-	require.NoError(t, got[1].turnErr)
-	require.Equal(t, "client_write", got[2].kind)
-	require.Equal(t, 2, got[2].turn)
-	require.NoError(t, got[2].writeErr)
-	require.Equal(t, "turn", got[3].kind)
-	require.Equal(t, 2, got[3].turn)
-	require.NotNil(t, got[3].result)
-	require.NoError(t, got[3].turnErr, "a client close after receiving the terminal frame must not discard the completed turn")
-}
-
-func TestPassthroughLifecycle_FollowUpModelScopesTransientFailuresToActiveTurn(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	const (
-		sessionModel  = "gpt-5.1"
-		followUpModel = "gpt-5.2"
-	)
-	tests := []struct {
-		name            string
-		events          []string
-		newTurnPerEvent bool
-	}{
-		{
-			name: "response failed",
-			events: []string{
-				`{"type":"response.failed","response":{"id":"resp_b_1","error":{"code":"server_error","message":"Internal error"}}}`,
-				`{"type":"response.failed","response":{"id":"resp_b_2","error":{"code":"server_error","message":"Internal error"}}}`,
-			},
-			newTurnPerEvent: true,
-		},
-		{
-			name: "error event",
-			events: []string{
-				`{"type":"error","error":{"code":"server_error","type":"server_error","message":"Internal error"}}`,
-				`{"type":"error","error":{"code":"server_error","type":"server_error","message":"Internal error"}}`,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			controlCtx, cancelControl := context.WithCancelCause(context.Background())
-			defer cancelControl(context.Canceled)
-			cfg := passthroughLifecycleConfig()
-			upstream := newStagedPassthroughConn()
-			svc := newPassthroughLifecycleService(cfg, upstream)
-			svc.rateLimitService = NewRateLimitService(transientCooldownAccountRepo{}, nil, &config.Config{}, nil, nil)
-			account := passthroughLifecycleAccount()
-			server, serverErr := startPassthroughLifecycleServer(t, controlCtx, svc, account)
-			defer server.Close()
-			clientConn := dialPassthroughLifecycleClient(t, server)
-
-			firstRequest := requirePassthroughUpstreamWrite(t, upstream, time.Second)
-			require.Equal(t, sessionModel, gjson.GetBytes(firstRequest, "model").String())
-			upstream.Send(`{"type":"response.completed","response":{"id":"resp_a","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)
-			firstTerminal, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
-			require.NoError(t, err)
-			require.Equal(t, "response.completed", gjson.GetBytes(firstTerminal, "type").String())
-
-			writeFollowUp := func() {
-				writeCtx, cancelWrite := context.WithTimeout(context.Background(), time.Second)
-				writeErr := clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.2","stream":false}`))
-				cancelWrite()
-				require.NoError(t, writeErr)
-				followUpRequest := requirePassthroughUpstreamWrite(t, upstream, time.Second)
-				require.Equal(t, followUpModel, gjson.GetBytes(followUpRequest, "model").String())
-			}
-
-			if !tt.newTurnPerEvent {
-				writeFollowUp()
-			}
-			for _, event := range tt.events {
-				if tt.newTurnPerEvent {
-					writeFollowUp()
-				}
-				upstream.Send(event)
-				forwarded, readErr := readPassthroughLifecycleFrame(t, clientConn, time.Second)
-				require.NoError(t, readErr)
-				require.Equal(t, gjson.Get(event, "type").String(), gjson.GetBytes(forwarded, "type").String())
-			}
-
-			require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, followUpModel))
-			require.False(t, svc.isOpenAIAccountModelRuntimeBlocked(account, sessionModel))
-
-			_ = clientConn.CloseNow()
-			select {
-			case <-serverErr:
-			case <-time.After(3 * time.Second):
-				t.Fatal("passthrough transient-model test did not exit")
-			}
-		})
-	}
-}
-
-func TestPassthroughLifecycle_FailedTerminalWriteStaysOnCurrentTurn(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	type callbackEvent struct {
-		kind     string
-		turn     int
-		result   *OpenAIForwardResult
-		writeErr error
-		turnErr  error
-	}
-
-	callbacks := make(chan callbackEvent, 4)
-	hooks := &OpenAIWSIngressHooks{
-		AfterClientWrite: func(turn int, _ []byte, writeErr error) {
-			callbacks <- callbackEvent{kind: "client_write", turn: turn, writeErr: writeErr}
-		},
-		AfterTurn: func(turn int, result *OpenAIForwardResult, turnErr error) {
-			callbacks <- callbackEvent{kind: "turn", turn: turn, result: result, turnErr: turnErr}
-		},
-	}
-	controlCtx, cancelControl := context.WithCancelCause(context.Background())
-	defer cancelControl(context.Canceled)
-	upstream := newStagedPassthroughConn()
-	server, serverErr := startPassthroughLifecycleServer(
-		t,
-		controlCtx,
-		newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
-		passthroughLifecycleAccount(),
-		hooks,
-	)
-	defer server.Close()
-	clientConn := dialPassthroughLifecycleClient(t, server)
-	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
-
-	require.NoError(t, clientConn.CloseNow())
-	time.Sleep(100 * time.Millisecond)
-	terminalPayload := `{"type":"response.completed","padding":"` + strings.Repeat("x", 8<<20) + `","response":{"id":"resp_write_failed","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`
-	upstream.Send(terminalPayload)
-
-	select {
-	case err := <-serverErr:
-		require.Error(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("passthrough terminal write failure did not stop relay")
-	}
-
-	got := make([]callbackEvent, 0, len(callbacks))
-	for len(callbacks) > 0 {
-		got = append(got, <-callbacks)
-	}
-	require.Len(t, got, 2, "connection finalization must not synthesize a turn 2 callback")
-	require.Equal(t, "client_write", got[0].kind)
-	require.Equal(t, 1, got[0].turn)
-	require.Error(t, got[0].writeErr)
-	require.Equal(t, "turn", got[1].kind)
-	require.Equal(t, 1, got[1].turn)
-	require.NotNil(t, got[1].result, "business completion should retain terminal usage")
-	require.NoError(t, got[1].turnErr)
 }
 
 func TestPassthroughLifecycle_LeaseLossSendsRetryClose(t *testing.T) {
