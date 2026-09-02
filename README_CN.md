@@ -2,7 +2,7 @@
 > **4Sub2 内部仓库说明**
 >
 > 当前仓库为 `Alle-Group/sub2api`。内部开发、发布和部署规则以 [私有项目说明](README.md)
-> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.184`
+> 和 [Git 协作规范](GIT_WORKFLOW.md) 为准。下文保留上游 `Wei-Shaw/sub2api` 的 `v0.1.185`
 > 中文说明作为功能参考；其中面向上游公开仓库的克隆、安装和发布命令不覆盖本仓库规则。
 
 <div align="center">
@@ -180,6 +180,11 @@
 <tr>
 <td width="180"><a href="https://go.apimart.ai/gh-sub2api"><img src="assets/partners/logos/apimart.jpg" alt="APIMart" width="150"></a></td>
 <td>感谢 APIMart 赞助了本项目！<a href="https://go.apimart.ai/gh-sub2api">APIMart</a> 是专注于 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可生成 160+ 张图片。图片、视频一套异步 API 通吃：提交任务获取 ID，通过轮询或回调获取结果；批量生成上万张图片也不会超时，切换模型无需修改代码。按量付费、无月费，通过<a href="https://go.apimart.ai/gh-sub2api">此注册链接</a>注册即可开始使用。</td>
+</tr>
+
+<tr>
+<td width="180"><a href="https://www.axisnow.io/"><img src="assets/partners/logos/axisnow.jpg" alt="AxisNow" width="150"></a></td>
+<td>感谢 AxisNow 赞助了本项目！<a href="https://www.axisnow.io/">AxisNow</a> 正在打造一个云无关的边缘控制层。使用 AxisNow 可以保护并加速网站与 API，兼顾中国大陆及全球的访问体验，并通过客户端 SDK，将加速与安全能力延伸至原生/移动 App — 这些都在您可控的、自由组合的边缘网络。</td>
 </tr>
 
 </table>
