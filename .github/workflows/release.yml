@@ -278,7 +278,6 @@ jobs:
           driver-opts: |
             env.http_proxy=http://10.0.100.240:10808
             env.https_proxy=http://10.0.100.240:10808
-            env.no_proxy=127.0.0.1,localhost,10.0.100.0/24
 
       - name: Login to Docker Hub
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
