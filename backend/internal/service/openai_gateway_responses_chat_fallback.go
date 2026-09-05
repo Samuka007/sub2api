@@ -156,6 +156,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	return &OpenAIForwardResult{
 		RequestID:                     requestID,
 		ResponseID:                    responsesResp.ID,
+		UpstreamHeaders:               resp.Header,
 		Usage:                         usage,
 		Model:                         originalModel,
 		BillingModel:                  billingModel,
@@ -230,6 +231,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		return &OpenAIForwardResult{
 			RequestID:                     requestID,
 			ResponseID:                    state.ResponseID,
+			UpstreamHeaders:               resp.Header,
 			Usage:                         scan.Usage,
 			Model:                         originalModel,
 			BillingModel:                  billingModel,
@@ -246,16 +248,18 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	}
 	if err := state.ValidateToolCallArguments(); err != nil {
 		return &OpenAIForwardResult{
-			RequestID:       requestID,
-			Usage:           scan.Usage,
-			Model:           originalModel,
-			BillingModel:    billingModel,
-			UpstreamModel:   upstreamModel,
-			ReasoningEffort: reasoningEffort,
-			ServiceTier:     resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-			Stream:          true,
-			Duration:        time.Since(startTime),
-			FirstTokenMs:    scan.FirstTokenMs,
+			RequestID:                   requestID,
+			UpstreamHeaders:             resp.Header,
+			Usage:                       scan.Usage,
+			Model:                       originalModel,
+			BillingModel:                billingModel,
+			UpstreamModel:               upstreamModel,
+			ReasoningEffort:             reasoningEffort,
+			UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+			ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+			Stream:                      true,
+			Duration:                    time.Since(startTime),
+			FirstTokenMs:                scan.FirstTokenMs,
 		}, fmt.Errorf("invalid tool call arguments from upstream: %w", err)
 	}
 
@@ -278,6 +282,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	return &OpenAIForwardResult{
 		RequestID:                     requestID,
 		ResponseID:                    state.ResponseID,
+		UpstreamHeaders:               resp.Header,
 		Usage:                         scan.Usage,
 		Model:                         originalModel,
 		BillingModel:                  billingModel,
