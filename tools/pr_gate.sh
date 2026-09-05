@@ -61,6 +61,7 @@ else
 fi
 step "Caddy cache configuration contract" /bin/sh deploy/test-caddyfile-cache.sh
 step "Docker Compose security contract" /bin/sh deploy/tests/docker-compose-security-test.sh
+step "DeepSeek Prompt Audit adapter contract" /bin/sh deploy/tests/prompt-audit-deepseek-adapter-test.sh
 step "Docker runtime resource build diagnostics" /bin/sh deploy/tests/docker-runtime-resources-output-test.sh
 step "Docker runtime resource contract" /bin/sh deploy/tests/docker-runtime-resources-test.sh
 step "Model IQ Compose contract" /bin/bash deploy/tests/model-iq-compose-env-test.sh

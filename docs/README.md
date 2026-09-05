@@ -17,6 +17,8 @@
 
 - [`LANGFUSE_SESSION_GRAPH.md`](LANGFUSE_SESSION_GRAPH.md)：热存储侧 trace 解析、
   history 去重与 session 图输出契约。
+- [`PROMPT_AUDIT_DEEPSEEK.md`](PROMPT_AUDIT_DEEPSEEK.md)：使用官方 DeepSeek
+  `deepseek-v4-flash` 进行提示词影子审计的 Adapter、Secret、验证和回滚契约。
 
 任何新长期文档都必须有明确读者、权威来源、更新触发条件和可验证事实。能更新现有权威文档时，不创建第二份同义说明。
 

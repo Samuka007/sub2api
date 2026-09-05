@@ -97,6 +97,20 @@ Anthropic 路径支持文本、HTTP(S) 图片和最大 8 MiB 的受支持图片�
 - [`frontend/src/api/admin/riskControl.ts`](frontend/src/api/admin/riskControl.ts)
 - [`frontend/src/views/admin/RiskControlView.vue`](frontend/src/views/admin/RiskControlView.vue)
 
+### 2.1 DeepSeek 提示词审计 Adapter
+
+Prompt Audit 可以通过同一发布镜像的 `--prompt-audit-deepseek-adapter` 模式使用官方 DeepSeek `deepseek-v4-flash`。Adapter 把用户内容作为不可信数据交给严格分类 System Prompt，验证 JSON safety/category 枚举后，再转换为现有 Qwen3Guard-compatible `Safety / Categories` 响应；普通聊天回答、非法 JSON、超时和非 2xx 不会被当成安全结论。
+
+部署使用 `deploy/docker-compose.prompt-audit-deepseek.yml`。DeepSeek API Key 与 Adapter Token 必须通过两个独立文件 Secret 提供；服务只加入应用私网、不发布宿主机端口，并以只读文件系统、非 root、cap-drop 和 no-new-privileges 运行。默认使用原生 HTTP/1.1；只有可重复证明出口 HTTP/2 帧异常时才启用 curl HTTP/1.1 兼容模式。
+
+首次只应对测试分组启用异步审计并保持同步阻断关闭。完整 Secret、连接测试、影子验收、隐私和回滚契约见 [`docs/PROMPT_AUDIT_DEEPSEEK.md`](docs/PROMPT_AUDIT_DEEPSEEK.md)。
+
+核心文件：
+
+- [`backend/internal/securityaudit/deepseekadapter/adapter.go`](backend/internal/securityaudit/deepseekadapter/adapter.go)
+- [`deploy/docker-compose.prompt-audit-deepseek.yml`](deploy/docker-compose.prompt-audit-deepseek.yml)
+- [`deploy/tests/prompt-audit-deepseek-adapter-test.sh`](deploy/tests/prompt-audit-deepseek-adapter-test.sh)
+
 ### 3. 分组模型价格展示
 
 用户可以在 API Key 页面查看每个可见分组支持的模型价格。鼠标悬停或键盘聚焦

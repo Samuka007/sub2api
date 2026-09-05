@@ -1,0 +1,47 @@
+services:
+  prompt-audit-deepseek-adapter:
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE must be an immutable release image or digest}
+    pull_policy: never
+    command: ["/app/sub2api", "--prompt-audit-deepseek-adapter"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    user: "1000:1000"
+    environment:
+      PROMPT_AUDIT_DEEPSEEK_LISTEN_ADDR: 0.0.0.0:8787
+      PROMPT_AUDIT_DEEPSEEK_BASE_URL: https://api.deepseek.com/v1/chat/completions
+      PROMPT_AUDIT_DEEPSEEK_MODEL: ${PROMPT_AUDIT_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      PROMPT_AUDIT_DEEPSEEK_TRANSPORT: ${PROMPT_AUDIT_DEEPSEEK_TRANSPORT:-native}
+      PROMPT_AUDIT_DEEPSEEK_TIMEOUT_SECONDS: ${PROMPT_AUDIT_DEEPSEEK_TIMEOUT_SECONDS:-90}
+      PROMPT_AUDIT_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PROMPT_AUDIT_DEEPSEEK_ADAPTER_TOKEN_FILE: /run/secrets/adapter_token
+    secrets:
+      - deepseek_api_key
+      - adapter_token
+    networks:
+      - app-local
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  deepseek_api_key:
+    file: ${PROMPT_AUDIT_DEEPSEEK_API_KEY_FILE:?PROMPT_AUDIT_DEEPSEEK_API_KEY_FILE is required}
+  adapter_token:
+    file: ${PROMPT_AUDIT_DEEPSEEK_ADAPTER_TOKEN_FILE:?PROMPT_AUDIT_DEEPSEEK_ADAPTER_TOKEN_FILE is required}
+
+networks:
+  app-local:
+    external: true
+    name: ${SUB2API_APP_NETWORK:-sub2api-local}

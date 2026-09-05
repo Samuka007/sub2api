@@ -134,16 +134,16 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 	}
 
 	user := &User{
-		Email:         input.Email,
-		Username:      input.Username,
-		Notes:         input.Notes,
-		Roles:         roles,
-		Role:          domain.LegacyRoleForRoles(roles),
-		Balance:       balance,
-		Concurrency:   input.Concurrency,
-		RPMLimit:      input.RPMLimit,
-		Status:        StatusActive,
-		AllowedGroups: input.AllowedGroups,
+		Email:                input.Email,
+		Username:             input.Username,
+		Notes:                input.Notes,
+		Roles:                roles,
+		Role:                 domain.LegacyRoleForRoles(roles),
+		Balance:              balance,
+		Concurrency:          input.Concurrency,
+		RPMLimit:             input.RPMLimit,
+		Status:               StatusActive,
+		AllowedGroups:        input.AllowedGroups,
 		RestrictPublicGroups: input.RestrictPublicGroups,
 	}
 	if err := user.SetPassword(input.Password); err != nil {

@@ -204,25 +204,25 @@ func newPlusQuotaAutomationTestService(
 
 func plusQuotaEligibleTestAccount(id int64) (*Account, *OpenAIQuotaUsage) {
 	return &Account{
-			ID:       id,
-			Name:     "plus-account",
-			Platform: PlatformOpenAI,
-			Type:     AccountTypeOAuth,
-			Status:   StatusActive,
-			Credentials: map[string]any{
-				"email":     "plus@example.com",
-				"plan_type": "plus",
-			},
-			Extra: map[string]any{},
-		}, &OpenAIQuotaUsage{
-			PlanType: "plus",
-			RateLimit: &OpenAIRateLimit{
-				Allowed:       false,
-				LimitReached:  true,
-				PrimaryWindow: &OpenAIRateLimitWindow{UsedPercent: 100},
-			},
-			RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 2},
-		}
+		ID:       id,
+		Name:     "plus-account",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"email":     "plus@example.com",
+			"plan_type": "plus",
+		},
+		Extra: map[string]any{},
+	}, &OpenAIQuotaUsage{
+		PlanType: "plus",
+		RateLimit: &OpenAIRateLimit{
+			Allowed:       false,
+			LimitReached:  true,
+			PrimaryWindow: &OpenAIRateLimitWindow{UsedPercent: 100},
+		},
+		RateLimitResetCredits: &OpenAIRateLimitResetCredits{AvailableCount: 2},
+	}
 }
 
 func TestPlusQuotaAutomationRunResetsEligibleAccount(t *testing.T) {
