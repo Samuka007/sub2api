@@ -61,7 +61,7 @@ func main() {
 	// Parse command line flags
 	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
 	showVersion := flag.Bool("version", false, "Show version information")
-	deepSeekPromptAuditAdapter := flag.Bool("prompt-audit-deepseek-adapter", false, "Run the DeepSeek Prompt Audit adapter")
+	deepSeekPromptAuditAdapter := flag.Bool("prompt-audit-deepseek-adapter", false, "Run the DeepSeek audit adapter")
 	flag.Parse()
 
 	if *showVersion {
@@ -73,7 +73,7 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := deepseekadapter.Run(ctx); err != nil {
-			log.Fatalf("DeepSeek Prompt Audit adapter failed: %v", err)
+			log.Fatalf("DeepSeek audit adapter failed: %v", err)
 		}
 		return
 	}

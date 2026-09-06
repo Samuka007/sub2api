@@ -1,5 +1,5 @@
 // Package deepseekadapter exposes a narrowly scoped OpenAI-compatible adapter
-// for using the official DeepSeek API as a Prompt Audit classifier.
+// for using the official DeepSeek API as a Prompt Audit and content-moderation classifier.
 package deepseekadapter
 
 import (
@@ -159,7 +159,7 @@ func Run(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("DeepSeek Prompt Audit adapter listening on %s model=%s transport=%s", config.ListenAddr, config.Model, config.Transport)
+		log.Printf("DeepSeek audit adapter listening on %s model=%s transport=%s", config.ListenAddr, config.Model, config.Transport)
 		errCh <- httpServer.ListenAndServe()
 	}()
 	select {
@@ -214,6 +214,7 @@ func NewHandler(config Config) (http.Handler, func(), error) {
 	mux.HandleFunc("GET /health", s.health)
 	mux.Handle("GET /v1/models", s.authenticate(http.HandlerFunc(s.models)))
 	mux.Handle("POST /v1/chat/completions", s.authenticate(http.HandlerFunc(s.classify)))
+	mux.Handle("POST /v1/moderations", s.authenticate(http.HandlerFunc(s.moderate)))
 	return mux, cleanup, nil
 }
 

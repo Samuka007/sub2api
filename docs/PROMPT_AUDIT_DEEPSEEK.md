@@ -69,6 +69,22 @@ curl 模式会在容器私有 `/tmp` 中创建 `0600` 临时认证配置；Token
 
 首次只选择测试分组，开启异步审计并关闭同步阻断。连接测试必须返回 2xx，随后至少验证一条普通输入得到 `pass/Allow`，一条越狱输入得到 `critical/Block/Jailbreak`，并确认没有持续 `unavailable`、重试或队列堆积。
 
+## 配置内容审计
+
+同一 Adapter 也提供 OpenAI-compatible `POST /v1/moderations`。在「安全审计 → 内容审计」中配置：
+
+| 字段 | 值 |
+| --- | --- |
+| 审核上游协议 | `OpenAI Moderations` |
+| 上游 Base URL | `http://prompt-audit-deepseek-adapter:8787` |
+| 模型名 | `deepseek-v4-flash` |
+| 上游 API Key | `prompt_audit_adapter_token` 文件内容 |
+| 全局模式 | 首次使用 `仅观察` |
+| 采样率 | 验收期间 `100%` |
+
+Adapter 接受单个文本、文本数组及 OpenAI 文本 part，并返回完整的 `flagged`、`categories` 与 13 项 `category_scores`。每批最多 32 项、每项最多 16384 Unicode 字符，整批共享配置的上游超时。
+
+`deepseek-v4-flash` 是文本模型，不能检查图片。包含 `image_url` 的请求会明确返回 `422`，而不是忽略图片后生成“安全”结果；因此在图片审计覆盖完成前，不得把该 Adapter 作为图片输入的唯一同步阻断器。先保持「仅观察」，用人工标注样本验证误报率、召回率及各类别阈值，再单独审批是否切换「前置拦截」。
 ## 上线门禁
 
 两条 smoke 只证明协议闭环，不代表可以生产阻断。扩大范围前至少需要人工标注的正常与风险样本集，计算误报率、阻断精确率、召回率、可用率和 P95/P99。未达到团队阈值前保持异步；未经故障演练不得启用 fail-closed 同步阻断。

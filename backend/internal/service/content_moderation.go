@@ -2080,14 +2080,18 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("moderation api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		statusErr := fmt.Errorf("moderation api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnprocessableEntity {
+			return nil, fmt.Errorf("%w: %v", errContentModerationUnmoderatableInput, statusErr)
+		}
+		return nil, statusErr
 	}
 	var out moderationAPIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: decode moderation response: %v", errContentModerationUnusableUpstreamResult, err)
 	}
 	if len(out.Results) == 0 {
-		return nil, errors.New("moderation api returned empty results")
+		return nil, fmt.Errorf("%w: moderation api returned empty results", errContentModerationUnusableUpstreamResult)
 	}
 	return &out.Results[0], nil
 }
