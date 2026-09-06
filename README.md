@@ -101,7 +101,7 @@ Anthropic 路径支持文本、HTTP(S) 图片和最大 8 MiB 的受支持图片�
 
 Prompt Audit 可以通过同一发布镜像的 `--prompt-audit-deepseek-adapter` 模式使用官方 DeepSeek `deepseek-v4-flash`。Adapter 把用户内容作为不可信数据交给严格分类 System Prompt，验证 JSON safety/category 枚举后，再转换为现有 Qwen3Guard-compatible `Safety / Categories` 响应；普通聊天回答、非法 JSON、超时和非 2xx 不会被当成安全结论。
 
-同一 Adapter 也暴露 OpenAI-compatible `POST /v1/moderations`，可供「安全审计 → 内容审计」使用。它要求 DeepSeek 返回全部 13 个内容安全类别分数并严格校验响应；文本、文本数组与文本 part 可审计，`deepseek-v4-flash` 无法检查图片，因此图片输入会明确返回 `422`，不会被 Adapter 伪装成安全结果。
+同一 Adapter 也暴露 OpenAI-compatible `POST /v1/moderations`，可供「安全审计 → 内容审计」使用。它要求 DeepSeek 返回严格的 safety/category 分类，拒绝矛盾或未知输出，再确定性映射为全部 13 个内容安全类别分数；文本、文本数组与文本 part 可审计，`deepseek-v4-flash` 无法检查图片，因此图片输入会明确返回 `422`，不会被 Adapter 伪装成安全结果。
 
 部署使用 `deploy/docker-compose.prompt-audit-deepseek.yml`。DeepSeek API Key 与 Adapter Token 必须通过两个独立文件 Secret 提供；服务只加入应用私网、不发布宿主机端口，并以只读文件系统、非 root、cap-drop 和 no-new-privileges 运行。默认使用原生 HTTP/1.1；只有可重复证明出口 HTTP/2 帧异常时才启用 curl HTTP/1.1 兼容模式。
 

@@ -1224,9 +1224,8 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		}
 		if allowBlock && cfg.Mode == ContentModerationModePreBlock &&
 			(errors.Is(err, errContentModerationProxyUnavailable) ||
-				(cfg.UpstreamProtocol == ContentModerationUpstreamProtocolAnthropicMessages &&
-					(errors.Is(err, errContentModerationUnusableUpstreamResult) ||
-						errors.Is(err, errContentModerationUnmoderatableInput)))) {
+				errors.Is(err, errContentModerationUnusableUpstreamResult) ||
+				errors.Is(err, errContentModerationUnmoderatableInput)) {
 			message := "content moderation proxy is unavailable"
 			if errors.Is(err, errContentModerationUnusableUpstreamResult) {
 				message = "content moderation upstream returned an unusable result"
@@ -2082,6 +2081,10 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		statusErr := fmt.Errorf("moderation api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		if resp.StatusCode == http.StatusUnprocessableEntity {
+			var apiErr moderationAPIErrorResponse
+			if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Code == "unusable_upstream_result" {
+				return nil, fmt.Errorf("%w: %v", errContentModerationUnusableUpstreamResult, statusErr)
+			}
 			return nil, fmt.Errorf("%w: %v", errContentModerationUnmoderatableInput, statusErr)
 		}
 		return nil, statusErr
@@ -3067,6 +3070,11 @@ type moderationAPIImageURLRef struct {
 
 type moderationAPIResponse struct {
 	Results []moderationAPIResult `json:"results"`
+}
+type moderationAPIErrorResponse struct {
+	Error struct {
+		Code string `json:"code"`
+	} `json:"error"`
 }
 
 type moderationAPIResult struct {

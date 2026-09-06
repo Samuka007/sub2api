@@ -14,15 +14,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func moderationUpstreamContent(overrides map[string]float64) string {
-	scores := make(map[string]float64, len(moderationCategoryOrder))
-	for _, category := range moderationCategoryOrder {
-		scores[category] = 0.01
+func moderationUpstreamContent(safety string, categories ...string) string {
+	if categories == nil {
+		categories = []string{}
 	}
-	for category, score := range overrides {
-		scores[category] = score
-	}
-	raw, _ := json.Marshal(map[string]any{"category_scores": scores})
+	raw, _ := json.Marshal(map[string]any{"safety": safety, "categories": categories})
 	return string(raw)
 }
 
@@ -33,7 +29,7 @@ func TestModerationsEndpointReturnsOpenAICompatibleScores(t *testing.T) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&seen))
 		writeJSON(w, http.StatusOK, map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{
-				"content": moderationUpstreamContent(map[string]float64{"illicit": 0.97}),
+				"content": moderationUpstreamContent("Unsafe", "illicit"),
 			}}},
 		})
 	}))
@@ -54,7 +50,7 @@ func TestModerationsEndpointReturnsOpenAICompatibleScores(t *testing.T) {
 	require.Len(t, response.Results, 1)
 	require.True(t, response.Results[0].Flagged)
 	require.True(t, response.Results[0].Categories["illicit"])
-	require.Equal(t, 0.97, response.Results[0].CategoryScores["illicit"])
+	require.Equal(t, 1.0, response.Results[0].CategoryScores["illicit"])
 	require.Len(t, response.Results[0].CategoryScores, len(moderationCategoryOrder))
 
 	require.Equal(t, "deepseek-v4-flash", seen["model"])
@@ -67,6 +63,8 @@ func TestModerationsEndpointReturnsOpenAICompatibleScores(t *testing.T) {
 	userMessage, ok := messages[1].(map[string]any)
 	require.True(t, ok)
 	require.Contains(t, systemMessage["content"], "Benign discussion")
+	require.Contains(t, systemMessage["content"], `"safety":"Safe|Controversial|Unsafe"`)
+	require.NotContains(t, systemMessage["content"], "category_scores")
 	require.Contains(t, userMessage["content"], "<BEGIN_UNTRUSTED_TEXT>")
 }
 
@@ -76,7 +74,7 @@ func TestModerationsEndpointSupportsStringArrayAndTextParts(t *testing.T) {
 		requests.Add(1)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{
-				"content": moderationUpstreamContent(nil),
+				"content": moderationUpstreamContent("Safe"),
 			}}},
 		})
 	}))
@@ -122,15 +120,17 @@ func TestModerationsEndpointRejectsImagesWithoutCallingUpstream(t *testing.T) {
 	require.Equal(t, int32(0), requests.Load())
 }
 
-func TestModerationsEndpointRejectsMalformedScoresAndMapsRetryableFailure(t *testing.T) {
+func TestModerationsEndpointRejectsInvalidClassificationAndMapsRetryableFailure(t *testing.T) {
 	tests := []struct {
 		name         string
 		upstreamCode int
 		content      string
 		wantCode     int
 	}{
-		{name: "missing score", upstreamCode: http.StatusOK, content: `{"category_scores":{"violence":0.9}}`, wantCode: http.StatusUnprocessableEntity},
-		{name: "out of range", upstreamCode: http.StatusOK, content: moderationUpstreamContent(map[string]float64{"violence": 1.1}), wantCode: http.StatusUnprocessableEntity},
+		{name: "missing categories", upstreamCode: http.StatusOK, content: `{"safety":"Unsafe"}`, wantCode: http.StatusUnprocessableEntity},
+		{name: "unknown category", upstreamCode: http.StatusOK, content: moderationUpstreamContent("Unsafe", "future"), wantCode: http.StatusUnprocessableEntity},
+		{name: "safe contradiction", upstreamCode: http.StatusOK, content: moderationUpstreamContent("Safe", "violence"), wantCode: http.StatusUnprocessableEntity},
+		{name: "risky without category", upstreamCode: http.StatusOK, content: moderationUpstreamContent("Unsafe"), wantCode: http.StatusUnprocessableEntity},
 		{name: "rate limited", upstreamCode: http.StatusTooManyRequests, wantCode: http.StatusTooManyRequests},
 		{name: "unavailable", upstreamCode: http.StatusServiceUnavailable, wantCode: http.StatusBadGateway},
 	}
@@ -160,7 +160,6 @@ func TestModerationsEndpointRejectsMalformedScoresAndMapsRetryableFailure(t *tes
 		})
 	}
 }
-
 func TestModerationsEndpointValidatesAuthModelAndRequestShape(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("upstream must not be called")
@@ -201,7 +200,7 @@ func TestModerationsEndpointBoundsBatchAndInputRunes(t *testing.T) {
 		requests.Add(1)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{
-				"content": moderationUpstreamContent(nil),
+				"content": moderationUpstreamContent("Safe"),
 			}}},
 		})
 	}))
@@ -260,7 +259,7 @@ func TestModerationsEndpointAppliesOneTotalTimeoutToBatch(t *testing.T) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{
-				"content": moderationUpstreamContent(nil),
+				"content": moderationUpstreamContent("Safe"),
 			}}},
 		})
 	}))
@@ -284,19 +283,15 @@ func TestModerationsEndpointAppliesOneTotalTimeoutToBatch(t *testing.T) {
 	require.Less(t, elapsed, 1500*time.Millisecond)
 }
 
-func TestModerationsEndpointRejectsDuplicateJSONKeys(t *testing.T) {
-	valid := moderationUpstreamContent(nil)
-	duplicateTopLevel := strings.TrimSuffix(valid, "}") + ",\"category_scores\":{\"harassment\":0}}"
-	duplicateCategory := strings.Replace(valid, "\"harassment\":0.01", "\"harassment\":0.01,\"harassment\":0.02", 1)
-	unknownTopLevel := strings.TrimSuffix(valid, "}") + ",\"extra\":true}"
-	unknownCategory := strings.Replace(valid, "\"violence\":0.01", "\"violence\":0.01,\"future\":0.01", 1)
-
-	for name, content := range map[string]string{
-		"duplicate top-level": duplicateTopLevel,
-		"duplicate category":  duplicateCategory,
-		"unknown top-level":   unknownTopLevel,
-		"unknown category":    unknownCategory,
-	} {
+func TestModerationsEndpointRejectsDuplicateAndUnknownClassificationFields(t *testing.T) {
+	tests := map[string]string{
+		"duplicate top-level":  `{"safety":"Safe","safety":"Unsafe","categories":[]}`,
+		"duplicate case field": `{"safety":"Safe","categories":[],"Categories":[]}`,
+		"unknown top-level":    `{"safety":"Safe","categories":[],"extra":true}`,
+		"duplicate category":   moderationUpstreamContent("Unsafe", "illicit", "illicit"),
+		"unknown category":     moderationUpstreamContent("Unsafe", "future"),
+	}
+	for name, content := range tests {
 		t.Run(name, func(t *testing.T) {
 			raw, err := json.Marshal(map[string]any{
 				"choices": []map[string]any{{"message": map[string]string{"content": content}}},
@@ -307,12 +302,12 @@ func TestModerationsEndpointRejectsDuplicateJSONKeys(t *testing.T) {
 		})
 	}
 
+	valid := moderationUpstreamContent("Safe")
 	_, err := parseModerationResponse([]byte("{\"choices\":[{\"message\":{\"content\":\"" +
 		strings.ReplaceAll(valid, "\"", "\\\"") +
 		"\"}},{\"message\":{\"content\":\"unused\"}}]}"))
 	require.Error(t, err)
 }
-
 func TestModerationsEndpointRejectsImageURLNullAndDuplicateRequestFields(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("upstream must not be called")
@@ -448,7 +443,7 @@ func TestContentModerationServiceToDeepSeekAdapterContract(t *testing.T) {
 		upstreamRequests.Add(1)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{
-				"content": moderationUpstreamContent(map[string]float64{"illicit": 0.97}),
+				"content": moderationUpstreamContent("Unsafe", "illicit"),
 			}}},
 		})
 	}))
@@ -475,7 +470,7 @@ func TestContentModerationServiceToDeepSeekAdapterContract(t *testing.T) {
 	require.Equal(t, "ok", result.Items[0].Status)
 	require.Equal(t, http.StatusOK, result.Items[0].LastHTTPStatus)
 	require.NotNil(t, result.AuditResult)
-	require.Equal(t, 0.97, result.AuditResult.CategoryScores["illicit"])
+	require.Equal(t, 1.0, result.AuditResult.CategoryScores["illicit"])
 	require.Equal(t, int32(1), upstreamRequests.Load())
 
 	imageResult, err := svc.TestAPIKeys(context.Background(), service.TestContentModerationAPIKeysInput{
@@ -493,4 +488,94 @@ func TestContentModerationServiceToDeepSeekAdapterContract(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, imageResult.Items[0].LastHTTPStatus)
 	require.Nil(t, imageResult.AuditResult)
 	require.Equal(t, int32(1), upstreamRequests.Load(), "image rejection must not reach DeepSeek")
+}
+
+func TestParseModerationClassificationMapsSafetyAndHierarchy(t *testing.T) {
+	envelope := func(content string) []byte {
+		raw, err := json.Marshal(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": content}}},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	safe, err := parseModerationResponse(envelope(moderationUpstreamContent("Safe")))
+	require.NoError(t, err)
+	require.Len(t, safe, len(moderationCategoryOrder))
+	for _, score := range safe {
+		require.Zero(t, score)
+	}
+
+	controversial, err := parseModerationResponse(envelope(moderationUpstreamContent("Controversial", "self-harm/intent")))
+	require.NoError(t, err)
+	require.Equal(t, 0.49, controversial["self-harm/intent"])
+	require.Equal(t, 0.49, controversial["self-harm"])
+
+	unsafe, err := parseModerationResponse(envelope(moderationUpstreamContent("Unsafe", "illicit/violent", "sexual/minors", "violence/graphic")))
+	require.NoError(t, err)
+	require.Equal(t, 1.0, unsafe["illicit/violent"])
+	require.Equal(t, 1.0, unsafe["illicit"])
+	require.Equal(t, 1.0, unsafe["sexual/minors"])
+	require.Equal(t, 1.0, unsafe["sexual"])
+	require.Equal(t, 1.0, unsafe["violence/graphic"])
+	require.Equal(t, 1.0, unsafe["violence"])
+}
+
+func TestModerationsEndpointControversialIsObservableButNotFlagged(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{
+				"content": moderationUpstreamContent("Controversial", "harassment"),
+			}}},
+		})
+	}))
+	defer upstream.Close()
+	handler, cleanup, err := NewHandler(testConfig(upstream.URL))
+	require.NoError(t, err)
+	defer cleanup()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, testRequest(http.MethodPost, "/v1/moderations",
+		strings.NewReader("{\"input\":\"borderline criticism\"}")))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response moderationResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Len(t, response.Results, 1)
+	require.False(t, response.Results[0].Flagged)
+	require.False(t, response.Results[0].Categories["harassment"])
+	require.Equal(t, 0.49, response.Results[0].CategoryScores["harassment"])
+}
+
+func TestModerationsEndpointReturnsStructuredErrorCodes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{
+				"content": moderationUpstreamContent("Safe", "violence"),
+			}}},
+		})
+	}))
+	defer upstream.Close()
+	handler, cleanup, err := NewHandler(testConfig(upstream.URL))
+	require.NoError(t, err)
+	defer cleanup()
+
+	unusable := httptest.NewRecorder()
+	handler.ServeHTTP(unusable, testRequest(http.MethodPost, "/v1/moderations",
+		strings.NewReader("{\"input\":\"test\"}")))
+	require.Equal(t, http.StatusUnprocessableEntity, unusable.Code)
+	var unusableBody struct {
+		Error map[string]string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(unusable.Body.Bytes(), &unusableBody))
+	require.Equal(t, "unusable_upstream_result", unusableBody.Error["code"])
+
+	unsupported := httptest.NewRecorder()
+	handler.ServeHTTP(unsupported, testRequest(http.MethodPost, "/v1/moderations",
+		strings.NewReader("{\"input\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://example.test/a.png\"}}]}")))
+	require.Equal(t, http.StatusUnprocessableEntity, unsupported.Code)
+	var unsupportedBody struct {
+		Error map[string]string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(unsupported.Body.Bytes(), &unsupportedBody))
+	require.Equal(t, "unsupported_input", unsupportedBody.Error["code"])
 }

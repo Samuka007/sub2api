@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2255,4 +2256,73 @@ func TestContentModerationUpdateConfig_CyberPolicyExcludeFromBanCount(t *testing
 	})
 	require.NoError(t, err)
 	require.False(t, view.CyberPolicyExcludeFromBanCount)
+}
+
+func TestContentModerationOpenAIPreBlockFailsClosedOnStructured422(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        string
+		wantMessage string
+	}{
+		{name: "unusable upstream result", code: "unusable_upstream_result", wantMessage: "content moderation upstream returned an unusable result"},
+		{name: "unsupported input", code: "unsupported_input", wantMessage: "content moderation upstream cannot inspect the request input"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]string{"code": test.code, "message": "redacted test error"},
+				}))
+			}))
+			defer server.Close()
+
+			cfg := defaultContentModerationConfig()
+			cfg.Enabled = true
+			cfg.Mode = ContentModerationModePreBlock
+			cfg.UpstreamProtocol = ContentModerationUpstreamProtocolOpenAIModerations
+			cfg.BaseURL = server.URL
+			cfg.Model = "deepseek-v4-flash"
+			cfg.APIKeys = []string{"adapter-a", "adapter-b", "adapter-c"}
+			cfg.RetryCount = 2
+			rawCfg, err := json.Marshal(cfg)
+			require.NoError(t, err)
+
+			svc := NewContentModerationService(
+				&contentModerationTestSettingRepo{values: map[string]string{
+					SettingKeyRiskControlEnabled:      "true",
+					SettingKeyContentModerationConfig: string(rawCfg),
+				}},
+				&contentModerationTestRepo{},
+				&contentModerationTestHashCache{},
+				nil, nil, nil, nil, nil,
+			)
+			t.Cleanup(func() { svc.Close() })
+
+			decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+				UserID:   1001,
+				Endpoint: "/v1/chat/completions",
+				Provider: "openai",
+				Model:    "gpt-test",
+				Protocol: ContentModerationProtocolOpenAIChat,
+				Body:     []byte(`{"messages":[{"role":"user","content":"classify this"}]}`),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, decision)
+			require.False(t, decision.Allowed)
+			require.True(t, decision.Blocked)
+			require.Equal(t, http.StatusServiceUnavailable, decision.StatusCode)
+			require.Equal(t, ContentModerationActionError, decision.Action)
+			require.Equal(t, test.wantMessage, decision.Message)
+			require.Equal(t, int32(1), requests.Load(), "credential-independent 422 must not rotate keys")
+
+			statuses := svc.apiKeyStatuses(cfg.APIKeys)
+			require.Zero(t, statuses[0].FailureCount)
+			require.Nil(t, statuses[0].FrozenUntil)
+			require.Empty(t, statuses[0].LastError)
+		})
+	}
 }
