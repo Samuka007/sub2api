@@ -318,6 +318,7 @@ func createAccountWithGroups(
 	if err := createAccountRecord(ctx, client, account); err != nil {
 		return err
 	}
+	groupIDs := make([]int64, 0, len(groups))
 	if len(groups) > 0 {
 		builders := make([]*dbent.AccountGroupCreate, 0, len(groups))
 		for i := range groups {
