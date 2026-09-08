@@ -65,7 +65,7 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 		}
 	}
 	ctx, span := tracer.Start(parent, "model.async.execution", options...)
-	policy := capturePolicy{mediaMaxBytes: cfg.MediaMaxBytes, captureMediaContent: cfg.CaptureMediaContent}
+	policy := newCapturePolicy(cfg)
 	recorder := newTraceRecorder(ctx, tracer, metadata.Identity, cfg.PromptMaxBytes, cfg.ResponseMaxBytes, policy, generation)
 	recorder.ctx = recording.WithRecorder(ctx, recorder)
 
@@ -77,13 +77,13 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 	traceCorrelation := map[string]string{}
 	observationCorrelation := map[string]any{}
 	if metadata.TaskID != "" {
-		taskID := scrubURLsInString(metadata.TaskID)
+		taskID := scrubURLsInString(metadata.TaskID, policy)
 		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", taskID))
 		traceCorrelation["task_id"] = taskID
 		observationCorrelation["task_id"] = taskID
 	}
 	if metadata.ItemID != "" {
-		observationCorrelation["item_id"] = scrubURLsInString(metadata.ItemID)
+		observationCorrelation["item_id"] = scrubURLsInString(metadata.ItemID, policy)
 	}
 	if metadata.AccountID > 0 {
 		attrs = append(attrs, attribute.Int64("modeltrace.account.id", metadata.AccountID))
@@ -108,7 +108,7 @@ func (m *Manager) StartAsyncExecution(parent context.Context, continuation recor
 		observationCorrelation["submission_trace_id"] = submissionTraceID
 	}
 	if metadata.Model != "" {
-		attrs = append(attrs, otlpString("gen_ai.request.model", scrubURLsInString(metadata.Model)))
+		attrs = append(attrs, otlpString("gen_ai.request.model", scrubURLsInString(metadata.Model, policy)))
 	}
 	if metadata.Operation != "" {
 		attrs = append(attrs, otlpString("gen_ai.operation.name", metadata.Operation))
@@ -150,7 +150,7 @@ func (e *AsyncExecution) End(status string, output []byte, err error) {
 			otlpString("modeltrace.async.status", status),
 		)
 		if err != nil {
-			sanitized := sanitizeTraceError(err.Error())
+			sanitized := e.policy.traceErrorMessage(err.Error())
 			e.span.RecordError(errors.New(sanitized))
 			e.span.SetStatus(codes.Error, sanitized)
 		} else if status == "cancelled" {

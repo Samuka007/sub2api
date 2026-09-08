@@ -175,6 +175,11 @@ type ModelTracingConfig struct {
 	ResponseMaxBytes    int    `mapstructure:"response_max_bytes"`
 	MediaMaxBytes       int    `mapstructure:"media_max_bytes"`
 	CaptureMediaContent bool   `mapstructure:"capture_media_content"`
+	// SanitizationEnabled 控制捕获内容的凭据脱敏（URL 凭据、Authorization/
+	// Cookie 头、secret 键值）。指针语义：nil/未设置 = 开启（零值结构体与
+	// 运行时快照保持安全默认，向后兼容）；显式 false = 关闭脱敏，凭据可能
+	// 进入 Trace，数据 Owner 须在 Langfuse 侧负责清洗。
+	SanitizationEnabled *bool `mapstructure:"sanitization_enabled"`
 	// ExportTimeoutSeconds 是单批 OTLP 导出（含内部重试）的最大耗时阈值，
 	// 必须覆盖完整重试窗口，否则 Collector 短时拒绝后上游来不及重试即丢弃。
 	// <=0 时采用默认 60s。
@@ -4059,6 +4064,11 @@ func setModelTracingDefaults() {
 	viper.SetDefault("model_tracing.response_max_bytes", 8<<20)
 	viper.SetDefault("model_tracing.media_max_bytes", 16<<20)
 	viper.SetDefault("model_tracing.capture_media_content", false)
+	// Sanitization defaults to ON so credential scrubbing stays backward
+	// compatible; operators may disable it explicitly for local performance.
+	// 环境变量覆盖：MODEL_TRACING_SANITIZATION_ENABLED（AutomaticEnv + 点号
+	// 转下划线的 replacer，与 METRICS_* 同款）。
+	viper.SetDefault("model_tracing.sanitization_enabled", true)
 	viper.SetDefault("model_tracing.export_timeout_seconds", 60)
 	viper.SetDefault("model_tracing.export_retry.enabled", true)
 	viper.SetDefault("model_tracing.export_retry.initial_interval_seconds", 5)

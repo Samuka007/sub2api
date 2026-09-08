@@ -2687,3 +2687,31 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 		t.Fatalf("image stream timeout = %d, want greater than ordinary stream timeout %d", cfg.Gateway.ImageStreamDataIntervalTimeout, cfg.Gateway.StreamDataIntervalTimeout)
 	}
 }
+
+func TestLoadModelTracingSanitizationEnabled(t *testing.T) {
+	t.Run("default keeps sanitization on with pointer semantics", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.NotNil(t, cfg.ModelTracing.SanitizationEnabled)
+		require.True(t, *cfg.ModelTracing.SanitizationEnabled)
+	})
+
+	t.Run("environment override disables sanitization", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		t.Setenv("MODEL_TRACING_SANITIZATION_ENABLED", "false")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.NotNil(t, cfg.ModelTracing.SanitizationEnabled)
+		require.False(t, *cfg.ModelTracing.SanitizationEnabled)
+	})
+
+	t.Run("environment override re-enables sanitization", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		t.Setenv("MODEL_TRACING_SANITIZATION_ENABLED", "true")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.NotNil(t, cfg.ModelTracing.SanitizationEnabled)
+		require.True(t, *cfg.ModelTracing.SanitizationEnabled)
+	})
+}

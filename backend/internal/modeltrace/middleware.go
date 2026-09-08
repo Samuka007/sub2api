@@ -120,10 +120,7 @@ func (s *candidateState) start(c *gin.Context, identity middleware.ResolvedIdent
 		)
 		recorder := newTraceRecorder(ctx, tracer, identity,
 			cfg.PromptMaxBytes, cfg.ResponseMaxBytes,
-			capturePolicy{
-				mediaMaxBytes:       cfg.MediaMaxBytes,
-				captureMediaContent: cfg.CaptureMediaContent,
-			},
+			newCapturePolicy(cfg),
 			s.generation,
 		)
 		recorder.setTraceCorrelation(clientRequestID(c), extractCorrelation(nil, c))
@@ -191,10 +188,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		stream.status = streamStatusCompleted
 	}
 	cfg := s.generation.Config()
-	policy := capturePolicy{
-		mediaMaxBytes:       cfg.MediaMaxBytes,
-		captureMediaContent: cfg.CaptureMediaContent,
-	}
+	policy := newCapturePolicy(cfg)
 	attrs := []attribute.KeyValue{
 		otlpString("langfuse.trace.name", rootSpanName),
 		otlpString("langfuse.observation.input", captureModelContentWithType(clientInput, clientInputBytes, cfg.PromptMaxBytes, c.GetHeader("Content-Type"), policy)),
@@ -213,7 +207,7 @@ func (s *candidateState) finish(c *gin.Context, statusOverride int) {
 		traceTags = append(traceTags, "entry_protocol:"+entry.Protocol)
 	}
 	if entry.ClientModel != "" {
-		model := scrubURLsInString(entry.ClientModel)
+		model := scrubURLsInString(entry.ClientModel, policy)
 		attrs = append(attrs,
 			otlpString("modeltrace.client.request.model", model),
 			otlpString("langfuse.trace.metadata.client_model", model),

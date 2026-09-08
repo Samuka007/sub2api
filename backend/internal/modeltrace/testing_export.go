@@ -40,12 +40,16 @@ var (
 type TestingCapturePolicy struct {
 	MediaMaxBytes       int
 	CaptureMediaContent bool
+	// SanitizationDisabled opts a test out of credential scrubbing. Zero
+	// value keeps sanitization on, matching every pre-existing test.
+	SanitizationDisabled bool
 }
 
 func testingCapturePolicy(p TestingCapturePolicy) capturePolicy {
 	return capturePolicy{
-		mediaMaxBytes:       p.MediaMaxBytes,
-		captureMediaContent: p.CaptureMediaContent,
+		mediaMaxBytes:        p.MediaMaxBytes,
+		captureMediaContent:  p.CaptureMediaContent,
+		sanitizationDisabled: p.SanitizationDisabled,
 	}
 }
 
@@ -63,6 +67,13 @@ func TestingBoundedSizes(cfg config.ModelTracingConfig) (prompt, response, media
 
 func TestingSanitizeTraceError(msg string) string {
 	return sanitizeTraceError(msg)
+}
+
+// TestingSanitizedErrorWithPolicy returns the span-status form of msg under a
+// policy with credential scrubbing disabled, mirroring
+// model_tracing.sanitization_enabled=false.
+func TestingSanitizedErrorWithPolicy(msg string) string {
+	return capturePolicy{sanitizationDisabled: true}.traceErrorMessage(msg)
 }
 
 type TestingEntryFacts struct {

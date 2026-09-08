@@ -409,3 +409,46 @@ func TestModelTraceAsyncEndErrorDoesNotLeakIntoSpanStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestModelTraceSanitizationDisabledPolicyPassthrough mirrors
+// model_tracing.sanitization_enabled=false at the public testing surface:
+// structured content, URL credentials and error messages pass through
+// verbatim while capture (sha256 fingerprint, truncation) still applies.
+func TestModelTraceSanitizationDisabledPolicyPassthrough(t *testing.T) {
+	disabledOn := modeltrace.TestingCapturePolicy{SanitizationDisabled: true}
+
+	// (a) JSON body with an authorization header stays verbatim.
+	authBody := []byte(`{"model":"gpt-4","headers":{"Authorization":"Bearer super-secret-token"}}`)
+	require.Equal(t, string(authBody), modeltrace.TestingCaptureModelContent(authBody, len(authBody), 4096, disabledOn))
+
+	// (b) A string field with URL credentials stays verbatim.
+	urlBody := []byte(`{"download_url":"https://user:pass@cdn.example/file?sig=s3cret"}`)
+	require.Equal(t, string(urlBody), modeltrace.TestingCaptureModelContent(urlBody, len(urlBody), 4096, disabledOn))
+
+	// (c) Media capture still summarizes to a sha256 fingerprint, while a
+	// secret-keyed sibling value is no longer redacted.
+	mediaBody := []byte(`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}`)
+	mediaCaptured := modeltrace.TestingCaptureModelContent(mediaBody, len(mediaBody), 4096, disabledOn)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(mediaCaptured), &parsed))
+	nested, ok := parsed["image_url"].(map[string]any)
+	require.True(t, ok, "expected image_url summary in %s", mediaCaptured)
+	require.NotEmpty(t, nested["fingerprint"], "fingerprint must survive sanitization-off, got %s", mediaCaptured)
+
+	secretBody := []byte(`{"api_key":"super-secret-value"}`)
+	require.Contains(t, string(modeltrace.TestingCaptureModelContent(secretBody, len(secretBody), 4096, disabledOn)), "super-secret-value")
+
+	// Truncation still applies with sanitization off.
+	big := []byte(`{"k":"` + strings.Repeat("x", 8192) + `"}`)
+	truncated := modeltrace.TestingCaptureModelContent(big, len(big), 1024, disabledOn)
+	require.LessOrEqual(t, len(truncated), 1024+128)
+	require.Contains(t, truncated, "[truncated:original_bytes=")
+
+	// (d) Error text passes through verbatim with sanitization off, while
+	// the default (zero-value) policy keeps scrubbing it.
+	errMsg := "Get https://user:err-secret@upstream/?api_key=err-canary: failed"
+	require.Equal(t, errMsg, modeltrace.TestingSanitizedErrorWithPolicy(errMsg))
+	scrubbed := modeltrace.TestingSanitizeTraceError(errMsg)
+	require.NotContains(t, scrubbed, "err-secret")
+	require.NotContains(t, scrubbed, "err-canary")
+}
