@@ -956,7 +956,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			// Anthropic's input_tokens excludes cache_read and cache_creation (billed separately);
 			// OpenAI gateway uses actualInputTokens which also excludes cache_read for the same reason.
 			reportedTokens,
-			cost.TotalCost,
+			cost.TotalCost, pricingAt,
 		)
 	}
 
