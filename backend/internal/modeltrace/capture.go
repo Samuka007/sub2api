@@ -57,7 +57,16 @@ func captureModelContent(raw []byte, originalBytes, limit int, policy capturePol
 	// to an OTLP attribute is serializable. Replacement uses the single fixed
 	// U+FFFD marker (no original bytes leak), performed before truncation so
 	// later rune-boundary slicing never splits a multi-byte sequence.
-	source := []byte(normalizeUTF8(raw))
+	// Fast path (QW-2): utf8.Valid uses the same decoding rules as
+	// strings.ToValidUTF8, so valid input makes the normalization a no-op and
+	// the original slice can be aliased — capture never mutates raw, and the
+	// return path converts to an owned string.
+	var source []byte
+	if utf8.Valid(raw) {
+		source = raw
+	} else {
+		source = []byte(normalizeUTF8(raw))
+	}
 	if len(source) > limit {
 		source = truncateUTF8(source, limit)
 	}
@@ -250,6 +259,21 @@ func marshalMultipartSummary(summary map[string]any) []byte {
 }
 
 func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
+	// QW-1: when credential sanitization is off, the only reason to walk
+	// structured content is media summarization. If the lexer finds no token
+	// that could be (or could decode to) a media payload key or a data: URL
+	// value, the body returns verbatim — skipping the JSON decode + full-tree
+	// walk + DeepEqual + re-encode and the transient memory amplification of
+	// map[string]any. The lexer is a conservative superset of the media
+	// branches in sanitizeJSONValue: it triggers on every media key literal
+	// (case-insensitive), on any string token containing \u00 (escapes can
+	// synthesize ASCII letters the decoded walk would see), and on any token
+	// with case-insensitive prefix "data:". A false positive only costs the
+	// slower path; a false negative would change output, so the token rules
+	// above must be kept in sync with sanitizeJSONValue/isMediaPayloadKey.
+	if policy.sanitizationDisabled && !mayContainMedia(raw) {
+		return raw
+	}
 	// Root JSON objects/arrays always run the structured walk: media
 	// summarization (sha256 fingerprint capture) applies even when credential
 	// sanitization is disabled (sanitizeJSONValue consults the policy), and
@@ -341,6 +365,104 @@ func bytesContainsFold(value, needle []byte) bool {
 
 func bytesHasFoldPrefix(value, prefix []byte) bool {
 	return len(value) >= len(prefix) && bytes.EqualFold(value[:len(prefix)], prefix)
+}
+
+// mediaKeyTokens are the JSON string tokens the media branches can act on:
+// the isMediaPayloadKey literals (keys) plus the parent-type words media
+// keys recurse through ("source", "data", "image", "audio"). Keys and values
+// are indistinguishable to a raw lexer, so a value exactly equal to "data"
+// is an accepted harmless false positive.
+var mediaKeyTokens = [][]byte{
+	[]byte("image_url"), []byte("input_image"), []byte("input_audio"),
+	[]byte("video_url"), []byte("input_video"), []byte("file_url"),
+	[]byte("document_url"), []byte("input_file"), []byte("file_data"),
+	[]byte("b64_json"), []byte("image_data"), []byte("source"),
+	[]byte("data"), []byte("image"), []byte("audio"),
+}
+
+// mayContainMedia lexes raw in a single pass with zero allocations and
+// reports whether any string token could hit a media branch after JSON
+// decoding. Tokens are quote-delimited runs with \x escape pairs skipped; a
+// token containing a \u escape takes the conservative path because
+// \u0000-\u007F decodes into ASCII that could form a media key. Tokens longer
+// than 128 bytes can never match a key literal, so only their escape content
+// matters. An unterminated final token (truncated JSON) stays conservative.
+func mayContainMedia(raw []byte) bool {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '"' {
+			continue
+		}
+		i++
+		tokenStart := i
+		unicodeEscaped := false
+		for i < len(raw) {
+			c := raw[i]
+			if c == '\\' {
+				// Skip the escaped byte pair. If what follows is a \u00xx
+				// escape, the decoded string may differ from the raw bytes.
+				if i+5 < len(raw) && raw[i+1] == 'u' && raw[i+2] == '0' && raw[i+2] <= '7' &&
+					isHexDigit(raw[i+3]) && isHexDigit(raw[i+4]) {
+					unicodeEscaped = true
+				}
+				i += 2
+				continue
+			}
+			if c == '"' {
+				break
+			}
+			i++
+		}
+		if i >= len(raw) {
+			// Unterminated token: truncated JSON. Stay conservative.
+			return true
+		}
+		if unicodeEscaped {
+			return true
+		}
+		token := raw[tokenStart:i]
+		if len(token) == 0 || len(token) > 128 {
+			continue
+		}
+		if tokenHasDataPrefix(token) || tokenMatchesMediaKey(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHexDigit(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+// tokenHasDataPrefix reports whether the token is case-insensitively prefixed
+// with "data:" — the decoded string would take the summarizeMedia branch.
+func tokenHasDataPrefix(token []byte) bool {
+	if len(token) < 5 {
+		return false
+	}
+	return (token[0]|0x20) == 'd' && (token[1]|0x20) == 'a' &&
+		(token[2]|0x20) == 't' && (token[3]|0x20) == 'a' && token[4] == ':'
+}
+
+// tokenMatchesMediaKey compares the token case-insensitively against the
+// media key literals using ASCII folding without allocation.
+func tokenMatchesMediaKey(token []byte) bool {
+	for _, key := range mediaKeyTokens {
+		if len(key) != len(token) {
+			continue
+		}
+		match := true
+		for i := range token {
+			if token[i] != key[i] && (token[i]|0x20) != (key[i]|0x20) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeJSONValue(value any, key, parentType string, policy capturePolicy) any {

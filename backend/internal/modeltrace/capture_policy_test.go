@@ -1,9 +1,11 @@
 package modeltrace
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
@@ -140,5 +142,81 @@ func TestNewCapturePolicyFromConfig(t *testing.T) {
 	}
 	if off.mediaMaxBytes != 4096 || !off.captureMediaContent {
 		t.Fatalf("other policy fields must flow through unchanged: %+v", off)
+	}
+}
+
+// Enforce the QW-1 contract directly: with sanitization disabled, a
+// media-free root JSON body returns byte-identical raw, and a media-bearing
+// body still goes through the walk (media data: payloads always change).
+func TestQW1SkipContract(t *testing.T) {
+	disabled := capturePolicy{sanitizationDisabled: true}
+	for _, fx := range goldenFixtures() {
+		if len(fx.body) == 0 {
+			continue
+		}
+		skip := !mayContainMedia(fx.body)
+		got := sanitizeStructuredContent(fx.body, disabled)
+		if skip {
+			if !bytes.Equal(got, fx.body) {
+				t.Errorf("skip contract violated for %s: output differs from raw", fx.name)
+			}
+			continue
+		}
+		if bytes.Contains(fx.body, []byte("data:image")) && bytes.Equal(got, fx.body) {
+			t.Errorf("media payload %s must be summarized even with sanitization off", fx.name)
+		}
+	}
+}
+
+func TestQW2ValidUTF8FastPath(t *testing.T) {
+	valid := []byte(`{"k":"v"}`)
+	if !utf8.Valid(valid) {
+		t.Fatalf("test fixture must be valid utf8")
+	}
+	invalid := []byte{0xff, 0xfe}
+	if utf8.Valid(invalid) {
+		t.Fatalf("test fixture must be invalid utf8")
+	}
+	for _, policy := range []capturePolicy{{}, {sanitizationDisabled: true}} {
+		gotValid := captureModelContent(valid, len(valid), 4096, policy)
+		if gotValid != string(valid) {
+			t.Errorf("valid utf8 media-free body must round-trip verbatim with policy %+v, got %q", policy, gotValid)
+		}
+	}
+	gotInvalid := captureModelContent(invalid, len(invalid), 4096, capturePolicy{})
+	if !strings.ContainsRune(gotInvalid, '\uFFFD') {
+		t.Errorf("invalid utf8 must still be normalized, got %q", gotInvalid)
+	}
+}
+
+// QW-1 lexer unit checks: conservative superset over the media branches.
+func TestMayContainMediaLexer(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "plain_object", in: `{"model":"gpt-4","content":"hi"}`, want: false},
+		{name: "media_words_in_values", in: `{"text":"file image data source"}`, want: false},
+		{name: "media_key", in: `{"image_url":"https://x/y.png"}`, want: true},
+		{name: "uppercase_media_key", in: `{"IMAGE_URL":"x"}`, want: true},
+		{name: "data_value", in: `{"source":"base64"}`, want: true},
+		{name: "exact_data_value", in: `{"t":"data"}`, want: true},
+		{name: "data_colon_value", in: `{"t":"data:image/png;base64,AA"}`, want: true},
+		{name: "escaped_key", in: `{"\u0069mage_url":"x"}`, want: true},
+		{name: "escaped_value", in: `{"c":"\u0064ata:text/plain;base64,AAAA"}`, want: true},
+		{name: "escaped_quote_then_key", in: `{"t":"say \"hi\"","image_url":"x"}`, want: true},
+		{name: "escaped_escape_not_unicode", in: `{"t":"backslash\\u0041","other":"x"}`, want: false},
+		{name: "parent_type_words", in: `{"type":"image","data":"AAAA"}`, want: true},
+		{name: "metadata_word_only", in: `{"metadata":"user"}`, want: false},
+		{name: "file_in_path_value", in: `{"path":"/usr/local/file.txt"}`, want: false},
+		{name: "sse_not_json", in: "data: {\"delta\":\"x\"}\ndata: [DONE]", want: false},
+		{name: "empty", in: "", want: false},
+		{name: "long_token_over_128", in: `{"` + strings.Repeat("a", 200) + `":"x"}`, want: false},
+	}
+	for _, tc := range cases {
+		if got := mayContainMedia([]byte(tc.in)); got != tc.want {
+			t.Errorf("%s: mayContainMedia=%v want %v", tc.name, got, tc.want)
+		}
 	}
 }
