@@ -1,0 +1,182 @@
+[
+  {
+    "fixture": "media_free_root_json_with_media_words",
+    "policy": "sanitization_on",
+    "output": "{\"model\":\"gpt-4\",\"metadata\":{\"user\":\"metadata\"},\"text\":\"the file with image and data words\",\"other\":\"source of data\"}"
+  },
+  {
+    "fixture": "media_free_root_json_with_media_words",
+    "policy": "sanitization_off",
+    "output": "{\"model\":\"gpt-4\",\"metadata\":{\"user\":\"metadata\"},\"text\":\"the file with image and data words\",\"other\":\"source of data\"}"
+  },
+  {
+    "fixture": "media_free_root_json_pure",
+    "policy": "sanitization_on",
+    "output": "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]}"
+  },
+  {
+    "fixture": "media_free_root_json_pure",
+    "policy": "sanitization_off",
+    "output": "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]}"
+  },
+  {
+    "fixture": "anthropic_source_base64_block",
+    "policy": "sanitization_on",
+    "output": "{\"messages\":[{\"content\":[{\"source\":{\"approx_bytes\":3,\"fingerprint\":\"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c\",\"media_type\":\"image/png\"},\"type\":\"image\"}],\"role\":\"user\"}],\"model\":\"claude\"}"
+  },
+  {
+    "fixture": "anthropic_source_base64_block",
+    "policy": "sanitization_off",
+    "output": "{\"messages\":[{\"content\":[{\"source\":{\"approx_bytes\":3,\"fingerprint\":\"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c\",\"media_type\":\"image/png\"},\"type\":\"image\"}],\"role\":\"user\"}],\"model\":\"claude\"}"
+  },
+  {
+    "fixture": "responses_input_image",
+    "policy": "sanitization_on",
+    "output": "{\"input\":[{\"image_url\":{\"fingerprint\":\"sha256:6c068f1c3fd732c87187eeb3f910ba12b3a4ab2795d424a56f1319208c1df584\",\"media_type\":\"image/*\",\"url\":\"https://host/p\"},\"type\":\"input_image\"}],\"model\":\"gpt-4o\"}"
+  },
+  {
+    "fixture": "responses_input_image",
+    "policy": "sanitization_off",
+    "output": "{\"input\":[{\"image_url\":{\"fingerprint\":\"sha256:6c068f1c3fd732c87187eeb3f910ba12b3a4ab2795d424a56f1319208c1df584\",\"media_type\":\"image/*\",\"url\":\"https://host/p\"},\"type\":\"input_image\"}],\"model\":\"gpt-4o\"}"
+  },
+  {
+    "fixture": "escaped_key_image_url",
+    "policy": "sanitization_on",
+    "output": "{\"image_url\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"},\"model\":\"gpt-4\"}"
+  },
+  {
+    "fixture": "escaped_key_image_url",
+    "policy": "sanitization_off",
+    "output": "{\"image_url\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"},\"model\":\"gpt-4\"}"
+  },
+  {
+    "fixture": "escaped_value_data_prefix",
+    "policy": "sanitization_on",
+    "output": "{\"c\":{\"approx_bytes\":3,\"fingerprint\":\"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c\",\"media_type\":\"text/plain\"}}"
+  },
+  {
+    "fixture": "escaped_value_data_prefix",
+    "policy": "sanitization_off",
+    "output": "{\"c\":{\"approx_bytes\":3,\"fingerprint\":\"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c\",\"media_type\":\"text/plain\"}}"
+  },
+  {
+    "fixture": "escaped_quote_then_media_key",
+    "policy": "sanitization_on",
+    "output": "{\"image_url\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"},\"t\":\"say \\\"hi\\\"\"}"
+  },
+  {
+    "fixture": "escaped_quote_then_media_key",
+    "policy": "sanitization_off",
+    "output": "{\"image_url\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"},\"t\":\"say \\\"hi\\\"\"}"
+  },
+  {
+    "fixture": "uppercase_image_url_key",
+    "policy": "sanitization_on",
+    "output": "{\"IMAGE_URL\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"}}"
+  },
+  {
+    "fixture": "uppercase_image_url_key",
+    "policy": "sanitization_off",
+    "output": "{\"IMAGE_URL\":{\"fingerprint\":\"sha256:f5e805522fe1c7d5c7b38f6b621db3543d75d9338a9d75b0b530d8065b6dde35\",\"media_type\":\"image/*\",\"url\":\"https://host/x.png\"}}"
+  },
+  {
+    "fixture": "value_exactly_data",
+    "policy": "sanitization_on",
+    "output": "{\"t\":\"data\",\"other\":\"file\"}"
+  },
+  {
+    "fixture": "value_exactly_data",
+    "policy": "sanitization_off",
+    "output": "{\"t\":\"data\",\"other\":\"file\"}"
+  },
+  {
+    "fixture": "sse_nonjson_with_data_lines",
+    "policy": "sanitization_on",
+    "output": "data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n"
+  },
+  {
+    "fixture": "sse_nonjson_with_data_lines",
+    "policy": "sanitization_off",
+    "output": "data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n"
+  },
+  {
+    "fixture": "invalid_utf8_with_media",
+    "policy": "sanitization_on",
+    "output": "{\"image_url\":{\"approx_bytes\":2,\"fingerprint\":\"sha256:83d544ccc223c057d2bf80d3f2a32982c32c3c0db8e2674820da5064783fb097\",\"media_type\":\"image/*\"}}"
+  },
+  {
+    "fixture": "invalid_utf8_with_media",
+    "policy": "sanitization_off",
+    "output": "{\"image_url\":{\"approx_bytes\":2,\"fingerprint\":\"sha256:83d544ccc223c057d2bf80d3f2a32982c32c3c0db8e2674820da5064783fb097\",\"media_type\":\"image/*\"}}"
+  },
+  {
+    "fixture": "invalid_utf8_media_free",
+    "policy": "sanitization_on",
+    "output": "{\"k\":\"�\"}"
+  },
+  {
+    "fixture": "invalid_utf8_media_free",
+    "policy": "sanitization_off",
+    "output": "{\"k\":\"�\"}"
+  },
+  {
+    "fixture": "truncated_json_over_limit",
+    "policy": "sanitization_on",
+    "output": "{\"model\":\"gpt-4\",\"payload\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[truncated:original_bytes=4124,captured_bytes=4096]"
+  },
+  {
+    "fixture": "truncated_json_over_limit",
+    "policy": "sanitization_off",
+    "output": "{\"model\":\"gpt-4\",\"payload\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[truncated:original_bytes=4124,captured_bytes=4096]"
+  },
+  {
+    "fixture": "valid_json_then_garbage",
+    "policy": "sanitization_on",
+    "output": "{\"model\":\"gpt-4\"} trailing garbage"
+  },
+  {
+    "fixture": "valid_json_then_garbage",
+    "policy": "sanitization_off",
+    "output": "{\"model\":\"gpt-4\"} trailing garbage"
+  },
+  {
+    "fixture": "bom_prefixed_json",
+    "policy": "sanitization_on",
+    "output": "﻿{\"model\":\"gpt-4\"}"
+  },
+  {
+    "fixture": "bom_prefixed_json",
+    "policy": "sanitization_off",
+    "output": "﻿{\"model\":\"gpt-4\"}"
+  },
+  {
+    "fixture": "empty_body",
+    "policy": "sanitization_on",
+    "output": ""
+  },
+  {
+    "fixture": "empty_body",
+    "policy": "sanitization_off",
+    "output": ""
+  },
+  {
+    "fixture": "secret_key_and_url",
+    "policy": "sanitization_on",
+    "output": "{\"Authorization\":\"[REDACTED]\",\"download_url\":\"https://host/p\"}"
+  },
+  {
+    "fixture": "secret_key_and_url",
+    "policy": "sanitization_off",
+    "output": "{\"Authorization\":\"Bearer super-secret-token\",\"download_url\":\"https://user:pass@host/p?token=s3cret\"}"
+  },
+  {
+    "fixture": "media_url_credentials_non_media_key",
+    "policy": "sanitization_on",
+    "output": "{\"download_url\":\"https://host/file\"}"
+  },
+  {
+    "fixture": "media_url_credentials_non_media_key",
+    "policy": "sanitization_off",
+    "output": "{\"download_url\":\"https://user:pass@host/file?sig=s3cret\"}"
+  }
+]
