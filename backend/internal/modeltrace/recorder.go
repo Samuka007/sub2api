@@ -76,14 +76,14 @@ func (r *traceRecorder) setTraceCorrelation(requestID string, correlation Correl
 	}
 	r.correlationMu.Lock()
 	defer r.correlationMu.Unlock()
-	if requestID = scrubURLsInString(requestID); requestID != "" {
+	if requestID = scrubURLsInString(requestID, r.capturePolicy); requestID != "" {
 		r.requestID = requestID
 	}
-	if correlation.SessionID = scrubURLsInString(correlation.SessionID); correlation.SessionID != "" {
+	if correlation.SessionID = scrubURLsInString(correlation.SessionID, r.capturePolicy); correlation.SessionID != "" {
 		r.correlation.SessionID = correlation.SessionID
 		r.correlation.SessionSource = correlation.SessionSource
 	}
-	if correlation.ThreadID = scrubURLsInString(correlation.ThreadID); correlation.ThreadID != "" {
+	if correlation.ThreadID = scrubURLsInString(correlation.ThreadID, r.capturePolicy); correlation.ThreadID != "" {
 		r.correlation.ThreadID = correlation.ThreadID
 		r.correlation.ThreadSource = correlation.ThreadSource
 	}
@@ -190,12 +190,12 @@ func (r *traceRecorder) RecordAsyncSubmission(taskID string, itemIDs []string) {
 	span := trace.SpanFromContext(r.ctx)
 	attrs := []attribute.KeyValue{attribute.Int("modeltrace.async.item_count", len(itemIDs))}
 	if taskID != "" {
-		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", scrubURLsInString(taskID)))
+		attrs = append(attrs, otlpString("langfuse.trace.metadata.task_id", scrubURLsInString(taskID, r.capturePolicy)))
 	}
 	if len(itemIDs) > 0 {
 		scrubbedIDs := make([]string, len(itemIDs))
 		for i, id := range itemIDs {
-			scrubbedIDs[i] = scrubURLsInString(id)
+			scrubbedIDs[i] = scrubURLsInString(id, r.capturePolicy)
 		}
 		attrs = append(attrs, otlpStringSlice("langfuse.trace.metadata.item_ids", scrubbedIDs))
 	}
@@ -213,7 +213,7 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		AttemptIndex: index,
 		AccountID:    metadata.AccountID,
 		Provider:     metadata.Provider,
-		ClientModel:  scrubURLsInString(metadata.ClientModel),
+		ClientModel:  scrubURLsInString(metadata.ClientModel, r.capturePolicy),
 		Endpoint:     sanitizeAttemptEndpoint(metadata.Endpoint),
 		RequestID:    requestID,
 		SessionID:    sessionID,
@@ -251,7 +251,7 @@ func (r *traceRecorder) BeginAttempt(metadata recording.AttemptMetadata, input [
 		attrs = append(attrs, otlpString("gen_ai.provider.name", metadata.Provider))
 	}
 	if metadata.UpstreamModel != "" {
-		model := scrubURLsInString(metadata.UpstreamModel)
+		model := scrubURLsInString(metadata.UpstreamModel, r.capturePolicy)
 		attrs = append(attrs,
 			otlpString("gen_ai.request.model", model),
 			otlpString("langfuse.observation.model.name", model),
@@ -376,10 +376,10 @@ func (r *traceRecorder) usageAttributes(facts recording.UsageFacts) []attribute.
 		otlpString("langfuse.observation.cost_details", string(costJSON)),
 	}
 	if facts.RequestID != "" {
-		attrs = append(attrs, otlpString("gen_ai.response.id", scrubURLsInString(facts.RequestID)))
+		attrs = append(attrs, otlpString("gen_ai.response.id", scrubURLsInString(facts.RequestID, r.capturePolicy)))
 	}
 	if facts.Model != "" {
-		model := scrubURLsInString(facts.Model)
+		model := scrubURLsInString(facts.Model, r.capturePolicy)
 		attrs = append(attrs,
 			otlpString("gen_ai.response.model", model),
 			otlpString("langfuse.observation.model.name", model),
@@ -569,7 +569,7 @@ func (a *traceAttempt) endCaptured(result recording.AttemptResult, originalOutpu
 
 		switch {
 		case result.Err != nil:
-			a.span.SetStatus(codes.Error, sanitizeTraceError(result.Err.Error()))
+			a.span.SetStatus(codes.Error, a.capturePolicy.traceErrorMessage(result.Err.Error()))
 		case result.HTTPStatus >= http.StatusBadRequest:
 			a.span.SetStatus(codes.Error, httpStatusText(result.HTTPStatus))
 		default:

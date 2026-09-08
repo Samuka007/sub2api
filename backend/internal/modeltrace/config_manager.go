@@ -51,16 +51,20 @@ type ConfigSnapshot struct {
 
 // RuntimeConfig is the single settings JSON document. SecretKeyEncrypted never leaves storage APIs.
 type RuntimeConfig struct {
-	Configured          bool      `json:"configured"`
-	Enabled             bool      `json:"enabled"`
-	Destination         string    `json:"destination"`
-	Endpoint            string    `json:"endpoint"`
-	PublicKey           string    `json:"public_key"`
-	SecretKeyEncrypted  string    `json:"secret_key_encrypted,omitempty"`
-	PromptMaxBytes      int       `json:"prompt_max_bytes"`
-	ResponseMaxBytes    int       `json:"response_max_bytes"`
-	MediaMaxBytes       int       `json:"media_max_bytes"`
-	CaptureMediaContent bool      `json:"capture_media_content"`
+	Configured          bool   `json:"configured"`
+	Enabled             bool   `json:"enabled"`
+	Destination         string `json:"destination"`
+	Endpoint            string `json:"endpoint"`
+	PublicKey           string `json:"public_key"`
+	SecretKeyEncrypted  string `json:"secret_key_encrypted,omitempty"`
+	PromptMaxBytes      int    `json:"prompt_max_bytes"`
+	ResponseMaxBytes    int    `json:"response_max_bytes"`
+	MediaMaxBytes       int    `json:"media_max_bytes"`
+	CaptureMediaContent bool   `json:"capture_media_content"`
+	// SanitizationEnabled 是指针：缺省/nil = 开启脱敏（与 deployment 默认一致），
+	// 显式 false 表示运行时快照关闭了脱敏。旧快照 JSON 无此字段，unmarshal 后
+	// 保持 nil，行为向后兼容。
+	SanitizationEnabled *bool     `json:"sanitization_enabled,omitempty"`
 	ConfigVersion       int64     `json:"config_version"`
 	UpdatedAt           time.Time `json:"updated_at"`
 	UpdatedBy           int64     `json:"updated_by"`
@@ -78,6 +82,7 @@ type PublicConfig struct {
 	ResponseMaxBytes    int       `json:"response_max_bytes"`
 	MediaMaxBytes       int       `json:"media_max_bytes"`
 	CaptureMediaContent bool      `json:"capture_media_content"`
+	SanitizationEnabled *bool     `json:"sanitization_enabled,omitempty"`
 	Source              string    `json:"source"`
 	ConfigVersion       int64     `json:"config_version"`
 	UpdatedAt           time.Time `json:"updated_at,omitempty"`
@@ -97,6 +102,8 @@ type UpdateConfigRequest struct {
 	ResponseMaxBytes      int     `json:"response_max_bytes"`
 	MediaMaxBytes         int     `json:"media_max_bytes"`
 	CaptureMediaContent   bool    `json:"capture_media_content"`
+	// SanitizationEnabled nil = keep sanitization on (backward compatible).
+	SanitizationEnabled *bool `json:"sanitization_enabled,omitempty"`
 }
 
 // ConfigManager resolves runtime settings over deployment defaults and serializes updates.
@@ -267,6 +274,7 @@ func (m *ConfigManager) loadRuntime(ctx context.Context) (ConfigSnapshot, bool, 
 		PublicKey: stored.PublicKey, SecretKey: secret,
 		PromptMaxBytes: stored.PromptMaxBytes, ResponseMaxBytes: stored.ResponseMaxBytes,
 		MediaMaxBytes: stored.MediaMaxBytes, CaptureMediaContent: stored.CaptureMediaContent,
+		SanitizationEnabled: stored.SanitizationEnabled,
 	})
 	if !ok {
 		return ConfigSnapshot{}, false, nil
@@ -311,6 +319,7 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 		PublicKey: strings.TrimSpace(request.PublicKey), SecretKey: secretPlaintext,
 		PromptMaxBytes: request.PromptMaxBytes, ResponseMaxBytes: request.ResponseMaxBytes,
 		MediaMaxBytes: request.MediaMaxBytes, CaptureMediaContent: request.CaptureMediaContent,
+		SanitizationEnabled: request.SanitizationEnabled,
 	})
 	if !ok {
 		return PublicConfig{}, infraerrors.BadRequest("MODEL_TRACE_CONFIG_INVALID", "enabled model tracing requires a supported destination and valid endpoint; Langfuse also requires public and secret keys")
@@ -320,7 +329,8 @@ func (m *ConfigManager) Save(ctx context.Context, request UpdateConfigRequest, a
 		Endpoint: value.Endpoint, PublicKey: value.PublicKey, SecretKeyEncrypted: secretCiphertext,
 		PromptMaxBytes: value.PromptMaxBytes, ResponseMaxBytes: value.ResponseMaxBytes,
 		MediaMaxBytes: value.MediaMaxBytes, CaptureMediaContent: value.CaptureMediaContent,
-		ConfigVersion: current.ConfigVersion + 1, UpdatedAt: m.now().UTC(), UpdatedBy: actorID,
+		SanitizationEnabled: value.SanitizationEnabled,
+		ConfigVersion:       current.ConfigVersion + 1, UpdatedAt: m.now().UTC(), UpdatedBy: actorID,
 	}
 	var prepared *generation
 	if m.runtime != nil {
@@ -440,7 +450,8 @@ func publicFromSnapshot(snapshot ConfigSnapshot) PublicConfig {
 		PublicKey: value.PublicKey, HasSecret: value.SecretKey != "",
 		PromptMaxBytes: value.PromptMaxBytes, ResponseMaxBytes: value.ResponseMaxBytes,
 		MediaMaxBytes: value.MediaMaxBytes, CaptureMediaContent: value.CaptureMediaContent,
-		Source: snapshot.Source, ConfigVersion: snapshot.ConfigVersion,
+		SanitizationEnabled: value.SanitizationEnabled,
+		Source:              snapshot.Source, ConfigVersion: snapshot.ConfigVersion,
 		UpdatedAt: snapshot.UpdatedAt, UpdatedBy: snapshot.UpdatedBy,
 	}
 }
@@ -451,8 +462,9 @@ func publicFromRuntime(stored RuntimeConfig) PublicConfig {
 		Endpoint: sanitizeEndpointForDisplay(stored.Endpoint), PublicKey: stored.PublicKey,
 		HasSecret: stored.SecretKeyEncrypted != "", PromptMaxBytes: stored.PromptMaxBytes,
 		ResponseMaxBytes: stored.ResponseMaxBytes, MediaMaxBytes: stored.MediaMaxBytes,
-		CaptureMediaContent: stored.CaptureMediaContent, Source: ConfigSourceRuntime,
-		ConfigVersion: stored.ConfigVersion, UpdatedAt: stored.UpdatedAt, UpdatedBy: stored.UpdatedBy,
+		CaptureMediaContent: stored.CaptureMediaContent, SanitizationEnabled: stored.SanitizationEnabled,
+		Source: ConfigSourceRuntime, ConfigVersion: stored.ConfigVersion,
+		UpdatedAt: stored.UpdatedAt, UpdatedBy: stored.UpdatedBy,
 	}
 }
 

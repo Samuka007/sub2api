@@ -49,6 +49,12 @@ type ResponsesWSTurn struct {
 	attempt     recording.Attempt
 }
 
+// scrub applies the turn's capture policy to client-controlled identifier
+// strings before they enter Trace attributes.
+func (t *ResponsesWSTurn) scrub(value string) string {
+	return scrubURLsInString(value, t.policy)
+}
+
 // StartResponsesWSTurn starts a new root for one accepted response.create. A
 // disabled manager returns nil without allocating capture buffers.
 func (m *Manager) StartResponsesWSTurn(parent context.Context, metadata ResponsesWSTurnMetadata, input []byte) *ResponsesWSTurn {
@@ -66,10 +72,7 @@ func (m *Manager) StartResponsesWSTurn(parent context.Context, metadata Response
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithNewRoot(),
 	)
-	policy := capturePolicy{
-		mediaMaxBytes:       cfg.MediaMaxBytes,
-		captureMediaContent: cfg.CaptureMediaContent,
-	}
+	policy := newCapturePolicy(cfg)
 	inputBytes := len(input)
 	if cfg.PromptMaxBytes <= 0 {
 		input = nil
@@ -168,8 +171,8 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 		requestID, correlation := t.recorder.traceCorrelation()
 		sessionID := correlation.SessionID
 		metadataJSON, _ := json.Marshal(map[string]any{
-			"connection_request_id": scrubURLsInString(t.metadata.ConnectionRequestID),
-			"turn_request_id":       scrubURLsInString(t.metadata.TurnRequestID),
+			"connection_request_id": t.scrub(t.metadata.ConnectionRequestID),
+			"turn_request_id":       t.scrub(t.metadata.TurnRequestID),
 			"request_id":            requestID,
 			"turn_index":            t.metadata.TurnIndex,
 			"api_key_id":            t.metadata.Identity.APIKeyID,
@@ -186,8 +189,8 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			otlpString("langfuse.observation.input", captureModelContent(t.input, t.inputBytes, t.recorder.promptMaxBytes, t.policy)),
 			otlpString("langfuse.observation.output", captureModelContent(output, outputBytes, t.limit, t.policy)),
 			otlpString("langfuse.trace.metadata", string(metadataJSON)),
-			otlpString("langfuse.trace.metadata.connection_request_id", scrubURLsInString(t.metadata.ConnectionRequestID)),
-			otlpString("langfuse.trace.metadata.turn_request_id", scrubURLsInString(t.metadata.TurnRequestID)),
+			otlpString("langfuse.trace.metadata.connection_request_id", t.scrub(t.metadata.ConnectionRequestID)),
+			otlpString("langfuse.trace.metadata.turn_request_id", t.scrub(t.metadata.TurnRequestID)),
 			attribute.Int("langfuse.trace.metadata.turn_index", t.metadata.TurnIndex),
 			otlpString("http.request.method", http.MethodGet),
 			otlpString("url.path", t.metadata.Path),
@@ -197,7 +200,7 @@ func (t *ResponsesWSTurn) End(status, errorStage string, err error) {
 			attrs = append(attrs, otlpString("langfuse.trace.metadata.request_id", requestID))
 		}
 		if t.metadata.Model != "" {
-			attrs = append(attrs, otlpString("modeltrace.client.request.model", scrubURLsInString(t.metadata.Model)))
+			attrs = append(attrs, otlpString("modeltrace.client.request.model", t.scrub(t.metadata.Model)))
 		}
 		if t.metadata.Identity.UserID > 0 {
 			attrs = append(attrs, otlpString("langfuse.user.id", strconv.FormatInt(t.metadata.Identity.UserID, 10)))

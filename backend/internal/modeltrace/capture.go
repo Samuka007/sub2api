@@ -20,6 +20,11 @@ import (
 
 const redactedValue = "[REDACTED]"
 
+// maxErrorBytes bounds the span-status form of an error message. It applies
+// with sanitization on (after scrubbing) and off (verbatim passthrough), so
+// disabling sanitization never unbounds the error payload.
+const maxErrorBytes = 512
+
 var (
 	textSecretPattern  = regexp.MustCompile(`(?i)["']([A-Za-z0-9_.-]*(?:authorization|proxy[_-]?authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret|credential|set[_-]?cookie|session[_-]?cookie|cookie))["']\s*:\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
 	authorizationLine  = regexp.MustCompile(`(?im)\b(proxy-authorization|authorization)\s*:\s*[^\r\n]*`)
@@ -30,8 +35,9 @@ var (
 )
 
 type capturePolicy struct {
-	mediaMaxBytes       int
-	captureMediaContent bool
+	mediaMaxBytes        int
+	captureMediaContent  bool
+	sanitizationDisabled bool
 }
 
 // captureModelContent returns a deterministic, bounded trace representation.
@@ -244,7 +250,14 @@ func marshalMultipartSummary(summary map[string]any) []byte {
 }
 
 func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
-	if needsStructuredSanitization(raw) {
+	// Root JSON objects/arrays always run the structured walk: media
+	// summarization (sha256 fingerprint capture) applies even when credential
+	// sanitization is disabled (sanitizeJSONValue consults the policy), and
+	// with sanitization on the JSON decoder normalizes escape sequences
+	// (\u002f, \/) into literal characters the URL pattern can match.
+	trimmed := bytes.TrimSpace(raw)
+	isRootJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+	if isRootJSON || needsStructuredSanitization(raw) {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.UseNumber()
 		var value any
@@ -261,6 +274,15 @@ func sanitizeStructuredContent(raw []byte, policy capturePolicy) []byte {
 				}
 			}
 		}
+	}
+	if policy.sanitizationDisabled {
+		// Sanitization disabled by policy (model_tracing.sanitization_enabled=false):
+		// non-JSON content is returned verbatim — Authorization headers,
+		// secret keys and URL credentials may enter the Trace. This is an
+		// intentional semantic change; the data owner must scrub on the
+		// Langfuse side.
+		// 脱敏关闭为有意的语义变更，数据 Owner 须在 Langfuse 侧清洗。
+		return raw
 	}
 	// Always run the unstructured sanitizer as fallback. This ensures
 	// plain-text and non-JSON content (text/plain responses, SSE, etc.)
@@ -322,7 +344,9 @@ func bytesHasFoldPrefix(value, prefix []byte) bool {
 }
 
 func sanitizeJSONValue(value any, key, parentType string, policy capturePolicy) any {
-	if isSecretKey(key) {
+	// Credential redaction is a sanitization concern and is skipped when the
+	// policy disables sanitization; media summarization below still runs.
+	if !policy.sanitizationDisabled && isSecretKey(key) {
 		return redactedValue
 	}
 	if isMediaPayloadKey(key, parentType) {
@@ -347,7 +371,7 @@ func sanitizeJSONValue(value any, key, parentType string, policy capturePolicy) 
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(typed)), "data:") {
 			return summarizeMedia(typed, key, parentType, policy)
 		}
-		return scrubURLsInString(typed)
+		return scrubURLsInString(typed, policy)
 	default:
 		return value
 	}
@@ -539,6 +563,12 @@ func approximateBase64Bytes(value string) int {
 }
 
 func sanitizeUnstructuredText(value string, policy capturePolicy) string {
+	// Sanitization disabled by policy: unstructured text is returned verbatim
+	// (URL credentials, auth headers and cookies are no longer scrubbed — an
+	// intentional semantic change; data owner must scrub on the Langfuse side).
+	if policy.sanitizationDisabled {
+		return value
+	}
 	// Normalize JSON escape sequences (\u002f → /, \/ → /) so that URL and
 	value = strings.ReplaceAll(value, `\u002f`, "/")
 	value = strings.ReplaceAll(value, `\u002F`, "/")
@@ -628,8 +658,13 @@ func isURLStart(b byte) bool {
 // every absolute URL embedded in a free-form string value. This closes the
 // gap where a JSON field such as {"url":"https://user:pass@host?token=x"}
 // bypasses sanitization because "url" is neither a secret key nor a media
-// payload key.
-func scrubURLsInString(value string) string {
+// payload key. With sanitization disabled by policy the value is returned
+// verbatim — credentials may enter the Trace (intentional semantic change;
+// data owner must scrub on the Langfuse side).
+func scrubURLsInString(value string, policy capturePolicy) string {
+	if policy.sanitizationDisabled {
+		return value
+	}
 	if !strings.Contains(value, "://") && !strings.Contains(value, "//") {
 		return value
 	}
@@ -641,6 +676,8 @@ func scrubURLsInString(value string) string {
 // request URLs (including userinfo credentials), proxy-auth headers or
 // upstream response bodies; the model tracing security contract mandates that
 // authentication material never enters any Trace field, including errors.
+// Policy-aware callers use capturePolicy.traceErrorMessage, which honors
+// model_tracing.sanitization_enabled=false.
 func sanitizeTraceError(msg string) string {
 	if msg == "" {
 		return ""
@@ -666,8 +703,23 @@ func sanitizeTraceError(msg string) string {
 		}
 		return match[:separator+1] + redactedValue
 	})
-	const maxErrorBytes = 512
 	return truncateUTF8String(scrubbed, maxErrorBytes)
+}
+
+// traceErrorMessage returns the span-status-safe form of an error message
+// under this policy. With sanitization enabled, URLs with credentials, auth
+// headers and cookies are scrubbed. With sanitization disabled the message is
+// passed through verbatim (only length-bounded) — credentials may enter the
+// Trace; the data owner must scrub on the Langfuse side.
+// 脱敏关闭为有意的语义变更，数据 Owner 须在 Langfuse 侧清洗。
+func (p capturePolicy) traceErrorMessage(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	if p.sanitizationDisabled {
+		return truncateUTF8String(msg, maxErrorBytes)
+	}
+	return sanitizeTraceError(msg)
 }
 
 // sanitizeFormURLEncosed parses an application/x-www-form-urlencoded body,
@@ -676,12 +728,19 @@ func sanitizeTraceError(msg string) string {
 // "api_key=client-secret&model=gpt-4" bypasses redaction because it has no
 // JSON quoting or colon-delimited headers that the regex sanitizers match.
 func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capturePolicy) string {
+	if policy.sanitizationDisabled {
+		// Sanitization disabled: the form body is only bounded, never
+		// redacted — secret fields and URL credentials may enter the Trace
+		// (intentional semantic change; data owner must scrub on the
+		// Langfuse side).
+		return boundCapture(raw, originalBytes, limit)
+	}
 	values, err := url.ParseQuery(string(raw))
 	if err != nil {
 		// ParseQuery rejects some malformed forms (e.g. raw `;` separators).
 		// Fall back to conservative redaction of form-style key=value pairs
 		// so secret fields are never exported raw even on parse failure.
-		return boundCapture([]byte(redactFormKV(string(raw))), originalBytes, limit)
+		return boundCapture([]byte(redactFormKV(string(raw), policy)), originalBytes, limit)
 	}
 	for field := range values {
 		if isSecretKey(field) {
@@ -692,7 +751,7 @@ func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capture
 			// ParseQuery already URL-decoded the values, so scrub them.
 			scrubbed := make([]string, len(values[field]))
 			for i, v := range values[field] {
-				scrubbed[i] = scrubURLsInString(v)
+				scrubbed[i] = scrubURLsInString(v, policy)
 			}
 			values[field] = scrubbed
 		}
@@ -706,7 +765,7 @@ func sanitizeFormURLEncoded(raw []byte, originalBytes, limit int, policy capture
 // splits on & and = and replaces the value of any field whose name matches
 // isSecretKey with [REDACTED]. This ensures malformed form bodies cannot
 // leak credentials through the ParseQuery fallback path.
-func redactFormKV(body string) string {
+func redactFormKV(body string, policy capturePolicy) string {
 	// Split on both & and ; since ParseQuery treats both as separators and
 	// the failure path may receive bodies using either delimiter.
 	normalized := strings.ReplaceAll(body, ";", "&")
@@ -731,7 +790,7 @@ func redactFormKV(body string) string {
 			if decVErr != nil {
 				decodedValue = rawValue
 			}
-			pairs[i] = rawKey + "=" + scrubURLsInString(decodedValue)
+			pairs[i] = rawKey + "=" + scrubURLsInString(decodedValue, policy)
 		}
 	}
 	return strings.Join(pairs, "&")

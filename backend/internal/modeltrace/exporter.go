@@ -65,6 +65,18 @@ type exportEventCounts struct {
 	failedOther            atomic.Uint64
 }
 
+// newCapturePolicy builds the capture policy from the effective model tracing
+// config. Sanitization (credential scrubbing) stays enabled unless the config
+// explicitly disables it via SanitizationEnabled=false; a nil pointer (zero
+// value, absent config key, legacy runtime snapshots) keeps sanitization on.
+func newCapturePolicy(cfg config.ModelTracingConfig) capturePolicy {
+	return capturePolicy{
+		mediaMaxBytes:        cfg.MediaMaxBytes,
+		captureMediaContent:  cfg.CaptureMediaContent,
+		sanitizationDisabled: cfg.SanitizationEnabled != nil && !*cfg.SanitizationEnabled,
+	}
+}
+
 type exportStats struct {
 	exportEventCounts
 	// totals is owned by Manager and survives active-generation replacement.

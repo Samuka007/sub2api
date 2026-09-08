@@ -46,6 +46,17 @@ func startConversationTrackWorker() {
 	})
 }
 
+// Conversation-event enrichment runs outside the request's capturePolicy, so
+// it uses a dedicated scrubber that always sanitizes. If a future policy needs
+// to flow here, thread capturePolicy through conversationTrackJob.
+func sanitizeConversationString(value string) string {
+	return scrubURLsInString(value, capturePolicy{})
+}
+
+func sanitizeConversationContent(value string) string {
+	return sanitizeConversationString(value)
+}
+
 // enqueueConversationTrack schedules optional conversation enrichment without
 // delaying the completed model request. The fixed worker and bounded queue make
 // overload a deliberate drop rather than a goroutine or memory leak.
@@ -62,7 +73,7 @@ func enqueueConversationTrack(parent context.Context, generation *GenerationSnap
 		parent:     parent,
 		tracer:     generation.Tracer(),
 		generation: retained,
-		sessionID:  scrubURLsInString(sessionID),
+		sessionID:  sanitizeConversationString(sessionID),
 		input:      boundedConversationPayload(input),
 		output:     boundedConversationPayload(output),
 		headers:    headers.Clone(),
@@ -131,14 +142,14 @@ func WriteConversationEvents(ctx context.Context, tracer trace.Tracer, events []
 		_, span := tracer.Start(ctx, event.Name, trace.WithSpanKind(trace.SpanKindInternal))
 		// Normalize stream/tool content to valid UTF-8 at the capture boundary
 		// so a corrupted upstream sequence cannot break OTLP serialization.
-		content := scrubURLsInString(normalizeUTF8([]byte(event.Content)))
+		content := sanitizeConversationContent(normalizeUTF8([]byte(event.Content)))
 		attrs := []attribute.KeyValue{
 			otlpString("langfuse.observation.type", "span"),
 			otlpString("langfuse.observation.name", event.Name),
 			otlpString("langfuse.observation.metadata", string(metadata)),
 		}
 		if event.SessionID != "" {
-			attrs = append(attrs, otlpString("langfuse.session.id", scrubURLsInString(event.SessionID)))
+			attrs = append(attrs, otlpString("langfuse.session.id", sanitizeConversationString(event.SessionID)))
 		}
 		switch event.Name {
 		case "chat.user", "chat.system", "chat.tool_result", "chat.compact", "chat.fork":
