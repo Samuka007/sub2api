@@ -46,6 +46,10 @@ func RegisterGatewayRoutes(
 			modelTrace = value
 		case *service.CompositeRouteResolver:
 			compositeResolver = value
+		case *config.Config:
+			// Upstream callers/tests pass cfg positionally into the dependency
+			// slot; production (router.go) already passes it as the fixed param.
+			cfg = value
 		}
 	}
 	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
