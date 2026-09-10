@@ -49,7 +49,7 @@ func TestApplyCodexOAuthTransform_ToolContinuationPreservesInput(t *testing.T) {
 // TestCompactCodexCallIDDeploymentHMACKey 验证 call-id 压缩从公开盐改为部署级
 // HMAC 密钥后的行为契约：确定性不变、随部署密钥分化、形状与配对语义保持。
 func TestCompactCodexCallIDDeploymentHMACKey(t *testing.T) {
-	const oversizedID = "toolu_" + strings.Repeat("z", 96)
+	oversizedID := "toolu_" + strings.Repeat("z", 96)
 
 	t.Cleanup(func() { codexCallIDHMACKey.Store([]byte(nil)) })
 
