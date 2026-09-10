@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,6 +44,47 @@ func TestApplyCodexOAuthTransform_ToolContinuationPreservesInput(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "o1", second["id"])
 	require.Equal(t, "fc_1", second["call_id"])
+}
+
+// TestCompactCodexCallIDDeploymentHMACKey 验证 call-id 压缩从公开盐改为部署级
+// HMAC 密钥后的行为契约：确定性不变、随部署密钥分化、形状与配对语义保持。
+func TestCompactCodexCallIDDeploymentHMACKey(t *testing.T) {
+	oversizedID := "toolu_" + strings.Repeat("z", 96)
+
+	t.Cleanup(func() { codexCallIDHMACKey.Store([]byte(nil)) })
+
+	// 未注入部署密钥（回退键）：仍必须确定性。
+	fallback1 := compactCodexCallIDForItemType("function_call", oversizedID)
+	fallback2 := compactCodexCallIDForItemType("function_call", oversizedID)
+	require.Equal(t, fallback1, fallback2)
+
+	SetCodexCallIDHMACKey([]byte("deployment-key-A"))
+	withA1 := compactCodexCallIDForItemType("function_call", oversizedID)
+	withA2 := compactCodexCallIDForItemType("function_call", oversizedID)
+	require.Equal(t, withA1, withA2, "同一部署密钥下压缩必须确定性")
+	require.Len(t, withA1, codexCallIDMaxLength)
+	require.True(t, strings.HasPrefix(withA1, codexCallIDPrefix))
+	require.NotEqual(t, withA1, fallback1, "注入部署密钥后压缩值必须与回退键不同")
+
+	// 配对语义：同一 key 下，同一原始 id 在 call 侧与 output 侧压缩一致。
+	require.Equal(t, withA1, compactCodexCallIDForItemType("function_call", oversizedID))
+
+	// 不同部署密钥必须产生不同压缩值（每部署不可关联）。
+	SetCodexCallIDHMACKey([]byte("deployment-key-B"))
+	withB := compactCodexCallIDForItemType("function_call", oversizedID)
+	require.NotEqual(t, withA1, withB)
+
+	// 密钥无法从压缩值反推原始 id 的存在性：压缩值不包含原始 id 子串。
+	require.NotContains(t, withA1, oversizedID)
+
+	// 构造期接线：从部署 JWT 密钥派生的 key 与任意手填 key 均不同且确定。
+	SetCodexCallIDHMACKeyFromConfig(&config.Config{JWT: config.JWTConfig{Secret: "deployment-jwt-secret"}})
+	fromCfg1 := compactCodexCallIDForItemType("function_call", oversizedID)
+	fromCfg2 := compactCodexCallIDForItemType("function_call", oversizedID)
+	require.Equal(t, fromCfg1, fromCfg2)
+	require.NotEqual(t, fromCfg1, withA1)
+	require.NotEqual(t, fromCfg1, withB)
+	require.NotEqual(t, fromCfg1, fallback1)
 }
 
 func TestApplyCodexOAuthTransform_MessagesBridgePromptCacheKeyIsHeaderOnly(t *testing.T) {
