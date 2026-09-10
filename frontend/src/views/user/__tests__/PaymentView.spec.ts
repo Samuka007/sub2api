@@ -316,7 +316,7 @@ async function mountSubscriptionPlanList(planCount: number) {
 }
 
 describe('PaymentView redeem-code recharge entry', () => {
-  it('opens the external store, hides the configured help image, and links to redemption', async () => {
+  it('opens the external store, renders the configured help image, and links to redemption', async () => {
     const helpImageUrl = 'https://example.com/recharge-qr.png'
     const wrapper = await mountRechargeView({
       help_text: 'Recharge help',
@@ -327,7 +327,8 @@ describe('PaymentView redeem-code recharge entry', () => {
     expect(storeLink.attributes('href')).toBe('https://catfk.com/shop/3CUH5OLT')
     expect(storeLink.attributes('target')).toBe('_blank')
     expect(storeLink.attributes('rel')).toBe('noopener noreferrer')
-    expect(wrapper.find(`img[src="${helpImageUrl}"]`).exists()).toBe(false)
+    // v0.2.4 renders the configured help image in the select-phase help card.
+    expect(wrapper.find(`img[src="${helpImageUrl}"]`).exists()).toBe(true)
 
     await wrapper.get('[data-testid="redeem-entry-button"]').trigger('click')
     expect(routerPush).toHaveBeenCalledWith('/redeem')
