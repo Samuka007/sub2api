@@ -87,7 +87,8 @@ func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string
 		return isolateOpenAISessionID(apiKeyID, raw)
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("u%d:a%s:%s", apiKeyID, namespace, raw)))
-	return fmt.Sprintf("%x", sum[:8])
+	// 与无命名空间路径一致，输出 UUIDv4 形态（见 isolateOpenAISessionID）。
+	return generateSessionUUID(fmt.Sprintf("%x", sum[:8]))
 }
 
 func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw string) string {

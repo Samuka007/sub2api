@@ -530,6 +530,7 @@ func NewOpenAIGatewayService(
 	if cfg != nil {
 		SetCodexIdentityEnforcementEnabled(!cfg.Gateway.DisableCodexIdentityEnforcement)
 		SetCodexOriginatorNormalizationEnabled(!cfg.Gateway.DisableCodexOriginatorNormalization)
+		SetCodexCallIDHMACKeyFromConfig(cfg)
 	}
 	svc := &OpenAIGatewayService{
 		accountRepo:         accountRepo,
@@ -1090,6 +1091,9 @@ func getAPIKeyIDFromContext(c *gin.Context) int64 {
 // isolateOpenAISessionID 将 apiKeyID 混入 session 标识符，
 // 确保不同 API Key 的用户即使使用相同的原始 session_id/conversation_id，
 // 到达上游的标识符也不同，防止跨用户会话碰撞。
+// 输出统一为 UUIDv4 形态：真实 Codex 客户端的 session/conversation 标识均为
+// UUID，16-hex 截断形状本身可被上游单请求识别为网关流量。确定性派生不变，
+// 会话收敛、failover 隔离与 prompt cache 粘性均不受影响。
 func isolateOpenAISessionID(apiKeyID int64, raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1098,7 +1102,7 @@ func isolateOpenAISessionID(apiKeyID int64, raw string) string {
 	h := xxhash.New()
 	_, _ = fmt.Fprintf(h, "k%d:", apiKeyID)
 	_, _ = h.WriteString(raw)
-	return fmt.Sprintf("%016x", h.Sum64())
+	return generateSessionUUID(fmt.Sprintf("%016x", h.Sum64()))
 }
 
 func logCodexCLIOnlyDetection(ctx context.Context, c *gin.Context, account *Account, apiKeyID int64, result CodexClientRestrictionDetectionResult, body []byte) {

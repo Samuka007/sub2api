@@ -1,12 +1,15 @@
 package service
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
@@ -116,10 +119,57 @@ func normalizeCodexCallIDForItemType(itemType, id string) string {
 	return compactCodexCallIDForItemType(itemType, candidate)
 }
 
+// codexCallIDHMACKey 每部署随机的 call-id 压缩密钥。旧实现用公开常量盐做
+// sha256，上游可按源码算法离线复算：只要见过原始超长 id，多轮对话即被
+// 密码学级实锤为中转流量。改为部署级 HMAC 密钥后，压缩值对外只剩不可验证
+// 的形状。密钥由 NewOpenAIGatewayService 从部署 JWT 密钥域分隔派生注入，
+// 生命周期与部署一致：重启不变（对话内 call_id 配对依赖跨轮稳定），换部署即不同。
+var codexCallIDHMACKey atomic.Value // []byte
+
+// codexCallIDHMACKeyDerivationLabel 派生域分隔标签，避免与 JWT 密钥的其他用途交叉。
+const codexCallIDHMACKeyDerivationLabel = "sub2api:codex-call-id:v2:hmac-key"
+
+// SetCodexCallIDHMACKey 注入每部署 call-id 压缩密钥（构造期调用；空键忽略）。
+func SetCodexCallIDHMACKey(key []byte) {
+	if len(key) == 0 {
+		return
+	}
+	codexCallIDHMACKey.Store(append([]byte(nil), key...))
+}
+
+// SetCodexCallIDHMACKeyFromConfig 从部署 JWT 密钥派生压缩密钥。jwt.secret
+// 首启随机生成并持久化，天然满足"每部署随机、重启稳定"。轮换 jwt.secret
+// 会改变压缩形态，仅影响轮换瞬间在途对话的 call_id 配对。
+func SetCodexCallIDHMACKeyFromConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	secret := strings.TrimSpace(cfg.JWT.Secret)
+	if secret == "" {
+		return
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(codexCallIDHMACKeyDerivationLabel))
+	SetCodexCallIDHMACKey(mac.Sum(nil))
+}
+
+// resolveCodexCallIDHMACKey 返回生效压缩密钥。未注入（单测/接线回归）时
+// 退化为固定派生键，可验证性等同旧公开盐，仅应存在于非生产路径。
+func resolveCodexCallIDHMACKey() []byte {
+	if v := codexCallIDHMACKey.Load(); v != nil {
+		if key, ok := v.([]byte); ok && len(key) > 0 {
+			return key
+		}
+	}
+	sum := sha256.Sum256([]byte("sub2api:codex-call-id:v2:unset-deployment-key"))
+	return sum[:]
+}
+
 func compactCodexCallIDForItemType(itemType, id string) string {
 	prefix := openAIResponsesToolCallIDPrefix(itemType) + "_"
-	digest := sha256.Sum256([]byte("sub2api:codex-call-id:v1:" + id))
-	encoded := hex.EncodeToString(digest[:])
+	mac := hmac.New(sha256.New, resolveCodexCallIDHMACKey())
+	_, _ = mac.Write([]byte(id))
+	encoded := hex.EncodeToString(mac.Sum(nil))
 	return prefix + encoded[:codexCallIDMaxLength-len(prefix)]
 }
 
