@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -62,45 +61,62 @@ func allowlistGroup(platform string, enabled bool, models ...string) *service.Gr
 // TestGatewayRoutesGroupModelAllowlistMountedOnEveryGatewayRoute follows the
 // source-level route assertion convention of prompt_audit_route_coverage_test.go:
 // every gateway chain must mount groupModelAllowlist after api key auth and
-// before the composite rewrite (gateway.go + rootRoute helper).
+// before the composite rewrite. The fork keeps inline per-route chains (model
+// trace candidates interleave with upstream's chain shape), so the assertions
+// are chain-fragment based instead of upstream's rootRoute helper form.
 func TestGatewayRoutesGroupModelAllowlistMountedOnEveryGatewayRoute(t *testing.T) {
 	routeSource, err := os.ReadFile("gateway.go")
 	require.NoError(t, err)
 	source := string(routeSource)
 
-	// rootRoute helper：apiKeyAuth 之后、compositeTarget 之前。
-	rootHelper := regexp.MustCompile(regexp.QuoteMeta(`r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, handler)`))
-	require.Regexp(t, rootHelper, source,
-		"root alias helper must place the allowlist between apiKeyAuth and compositeTarget")
-
-	chains := []struct {
-		group     string
-		auth      string
-		marker    string
-		composite string
-	}{
-		{group: "gateway", auth: "gin.HandlerFunc(apiKeyAuth)", marker: "gateway.Use(groupModelAllowlist)", composite: "gateway.Use(compositeTarget)"},
-		{group: "gemini", auth: "middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg)", marker: "gemini.Use(groupModelAllowlist)", composite: "gemini.Use(compositeGeminiTarget)"},
-		{group: "antigravityV1", auth: "gin.HandlerFunc(apiKeyAuth)", marker: "antigravityV1.Use(groupModelAllowlist)", composite: "antigravityV1.Use(requireGroupAnthropic)"},
-		{group: "antigravityV1Beta", auth: "middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg)", marker: "antigravityV1Beta.Use(groupModelAllowlist)", composite: "antigravityV1Beta.Use(requireGroupGoogle)"},
+	// 每一类执行链：apiKeyAuth 之后、composite 改写之前。
+	mounted := []string{
+		// Anthropic 兼容执行链。
+		"apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic",
+		// Gemini 原生兼容链。
+		"googleAPIKeyAuth, groupModelAllowlist, compositeGeminiTarget, requireGroupGoogle",
+		// Antigravity 链没有合成路由改写。
+		"apiKeyAuthHandler, groupModelAllowlist, requireGroupAnthropic",
 	}
-	for _, chain := range chains {
-		re := regexp.MustCompile(
-			regexp.QuoteMeta(chain.group+".Use("+chain.auth) +
-				`[\s\S]{0,400}?` + regexp.QuoteMeta(chain.marker) +
-				`[\s\S]{0,400}?` + regexp.QuoteMeta(chain.composite))
-		require.Regexp(t, re, source,
-			"%s chain must mount groupModelAllowlist after auth and before %s", chain.group, chain.composite)
+	for _, fragment := range mounted {
+		require.Contains(t, source, fragment,
+			"chain must mount groupModelAllowlist after auth and before the composite rewrite: %s", fragment)
 	}
 
-	// codexDirect 链是一条 Use 调用，直接断言顺序。
-	codexDirect := regexp.MustCompile(regexp.QuoteMeta(`codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic)`))
-	require.Regexp(t, codexDirect, source, "codexDirect chain must mount the allowlist after auth and before compositeTarget")
+	// 不允许跳过白名单直接进入合成路由改写。
+	skipped := []string{
+		"apiKeyAuthHandler, compositeTarget",
+		"googleAPIKeyAuth, compositeGeminiTarget",
+	}
+	for _, fragment := range skipped {
+		require.NotContains(t, source, fragment,
+			"chain must not skip the groupModelAllowlist admission step: %s", fragment)
+	}
 
-	// 所有带 apiKeyAuth 的根路径路由必须收敛到 rootRoute，避免漏挂。
-	stray := regexp.MustCompile(`\br\.(GET|POST|PUT|PATCH|DELETE)\("[^"]+",[^(]*apiKeyAuth`)
-	require.NotRegexp(t, stray, source,
-		"root alias routes must use rootRoute so the allowlist cannot be forgotten")
+	// 逐行兜底：带鉴权的路由行必须挂载白名单，模型无关的控制面路由除外。
+	controlPlaneMarkers := []string{
+		`"/v1/sub2api/billing"`, // Key billing info: no model admission.
+		`"/antigravity/models"`, // Control-plane model listing.
+	}
+	for _, line := range strings.Split(source, "\n") {
+		for _, auth := range []string{"apiKeyAuthHandler", "googleAPIKeyAuth"} {
+			if !strings.Contains(line, auth) || strings.Contains(line, auth+" :=") {
+				continue
+			}
+			if strings.Contains(line, auth+", groupModelAllowlist") {
+				continue
+			}
+			controlPlane := false
+			for _, marker := range controlPlaneMarkers {
+				if strings.Contains(line, marker) {
+					controlPlane = true
+					break
+				}
+			}
+			require.True(t, controlPlane,
+				"authenticated route line must mount groupModelAllowlist or be a known model-free control-plane route: %s", strings.TrimSpace(line))
+		}
+	}
 }
 
 // TestGatewayRoutesGroupModelAllowlistBlocksCompositeModelBeforeRewrite asserts
