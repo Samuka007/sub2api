@@ -71,6 +71,7 @@ func TestCreateShadowWaitsBehindPlus401DeleteAndLeavesNoOrphan(t *testing.T) {
 	adminService := service.NewAdminService(
 		nil,
 		nil,
+		nil,
 		signalingRepo,
 		nil,
 		nil,

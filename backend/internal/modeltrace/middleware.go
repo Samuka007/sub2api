@@ -23,7 +23,12 @@ const rootSpanName = "model.request"
 
 // CandidateMiddleware marks an explicit model-execution route without doing
 // any tracing work until API-key resolution establishes a real identity.
+// A nil Manager yields a pass-through: routes built without tracing (tests,
+// embeddings-only binaries) stay constructible.
 func (m *Manager) CandidateMiddleware() gin.HandlerFunc {
+	if m == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
 	return m.candidateMiddleware(false)
 }
 
@@ -31,6 +36,9 @@ func (m *Manager) CandidateMiddleware() gin.HandlerFunc {
 // creating a model Trace until ActivateDeferredCandidate confirms that the
 // request will execute a model upstream. Local-only/control paths stay no-op.
 func (m *Manager) DeferredCandidateMiddleware() gin.HandlerFunc {
+	if m == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
 	return m.candidateMiddleware(true)
 }
 

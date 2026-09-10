@@ -1702,8 +1702,8 @@ func TestNewAdminServiceSharesHostLimitAcrossDistinctGroupRequests(t *testing.T)
 		},
 	}}
 	adminService := NewAdminService(
-		nil, groupRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, groupRepo, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	implementation, ok := adminService.(*adminServiceImpl)
 	require.True(t, ok)

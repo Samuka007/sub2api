@@ -519,6 +519,7 @@ func requireOneClickAccountNotesOversizedSentinel(
 
 func newOneClickAccountNotesIntegrationAdminService(repo *accountRepository) service.AdminService {
 	return service.NewAdminService(
+		nil,                  // cfg
 		nil,                  // userRepo
 		nil,                  // groupRepo
 		repo,                 // accountRepo
