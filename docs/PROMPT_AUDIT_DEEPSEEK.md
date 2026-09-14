@@ -1,6 +1,6 @@
 # DeepSeek Prompt Audit Adapter
 
-本文面向部署和维护 Prompt Audit 的管理员，定义如何使用官方 DeepSeek `deepseek-v4-flash` 作为安全分类器。行为真源位于 `backend/internal/securityaudit/deepseekadapter/`，部署入口为 `deploy/docker-compose.prompt-audit-deepseek.yml`。
+本文面向部署和维护 Prompt Audit 的管理员，定义如何使用官方 DeepSeek `deepseek-v4-flash` 或视觉模型 `deepseek-v4-flash-vision-exp` 作为安全分类器。行为真源位于 `backend/internal/securityaudit/deepseekadapter/`，部署入口为 `deploy/docker-compose.prompt-audit-deepseek.yml`。
 
 ## 架构与契约
 
@@ -11,12 +11,13 @@ Safety: Safe|Controversial|Unsafe
 Categories: None|<Qwen3Guard category list>
 ```
 
-普通通用模型不会自然遵守该格式。Adapter 将待审文本放入显式的 `BEGIN_UNTRUSTED_TEXT` 边界，注入不可执行用户指令的分类 System Prompt，要求 DeepSeek 返回严格 JSON，再校验 `safety` 和已知类别，最后转换成 Scanner 现有格式。上游 429 保持 429，瞬时网络/超时/5xx 返回 502；永久上游 4xx、非法或矛盾 JSON、未知 safety/category、空响应和超大响应返回 422，使现有 Scanner 区分可重试与终态失败。所有错误都使用脱敏正文，上游响应正文和待审提示词不会写入 Adapter 日志。
+普通通用模型不会自然遵守该格式。Adapter 将待审文本（以及视觉模型允许的图片）放入显式边界，注入不可执行用户指令的分类 System Prompt，要求 DeepSeek 返回严格 JSON，再校验 `safety` 和已知类别，最后转换成 Scanner 现有格式。上游 429 保持 429，瞬时网络/超时/5xx 返回 502；永久上游 4xx、非法或矛盾 JSON、未知 safety/category、空响应和超大响应返回 422，使现有 Scanner 区分可重试与终态失败。所有错误都使用脱敏正文，上游响应正文、待审提示词和用户图片 URL 不会写入 Adapter 日志。
 
 支持模型：
 
 - `deepseek-v4-flash`：默认，适合低延迟影子审计。
 - `deepseek-v4-pro`：可选，成本与延迟更高。
+- `deepseek-v4-flash-vision-exp`：显式启用图片输入；成本、延迟和图片数据出站风险更高。
 
 上游地址固定限制为官方 `https://api.deepseek.com`，避免把审计凭据发送到任意管理员输入的主机。
 
@@ -62,7 +63,7 @@ curl 模式会在容器私有 `/tmp` 中创建 `0600` 临时认证配置；Token
 | --- | --- |
 | Protocol | `openai_compatible` |
 | Base URL | `http://prompt-audit-deepseek-adapter:8787` |
-| Model | `deepseek-v4-flash` |
+| Model | `deepseek-v4-flash`（纯文本）或 `deepseek-v4-flash-vision-exp`（文本+图片） |
 | Token | `prompt_audit_adapter_token` 文件内容 |
 | Timeout | 建议先使用 `15000`–`30000` ms |
 | Input limit | `4000` |
@@ -77,14 +78,18 @@ curl 模式会在容器私有 `/tmp` 中创建 `0600` 临时认证配置；Token
 | --- | --- |
 | 审核上游协议 | `OpenAI Moderations` |
 | 上游 Base URL | `http://prompt-audit-deepseek-adapter:8787` |
-| 模型名 | `deepseek-v4-flash` |
+| 模型名 | `deepseek-v4-flash`（纯文本）或 `deepseek-v4-flash-vision-exp`（启用图片） |
 | 上游 API Key | `prompt_audit_adapter_token` 文件内容 |
 | 全局模式 | 首次使用 `仅观察` |
 | 采样率 | 验收期间 `100%` |
 
-Adapter 接受单个文本、文本数组及 OpenAI 文本 part。DeepSeek 只返回严格的 `Safe|Controversial|Unsafe` 与已知类别；Adapter 校验无矛盾后，将 `Safe` 映射为 0、`Controversial` 映射为 0.49、`Unsafe` 映射为 1.0，并返回完整的 `flagged`、`categories` 与 13 项 `category_scores`。每批最多 32 项、每项最多 16384 Unicode 字符，整批共享配置的上游超时。
+Adapter 接受单个文本、文本数组及 OpenAI 文本 part。选择视觉模型时，文本 part 可以与一个 `image_url` part 混合；支持 JPEG/PNG/GIF/WebP 的 base64 data URL 或 HTTPS URL（明文 HTTP 仅供回环测试）。`image_url.detail` 支持 `auto`、`low`、`high` 及兼容客户端的 `original`，并原样转发给视觉上游。每个输入最多一张图片，图片原始字节最多 8 MiB、data URL 最多 12 MiB、请求体最多 16 MiB、URL 最多 8192 字节、宽高最多 8192、总像素最多 16,777,216；动画 GIF 最多 32 帧且累计帧像素不超过 16,777,216。图片实际字节会先解码校验并重新编码为 canonical data URL。远程图片不跟随重定向，生产环境只允许解析到公开 global-unicast 地址，且禁用环境代理；原始远程 URL 不会发送到 DeepSeek。非视觉模型收到图片、永久无效格式/尺寸/URL、重定向或远端永久 4xx 时，统一返回结构化 `422 unsupported_input`；远端 DNS/连接/读取超时、临时网络失败或 5xx 返回 `502 image_source_unavailable`，远端 `429` 返回 `429 image_source_unavailable`。这些错误的日志只使用脱敏摘要，不包含原始 URL 或 token。
 
-`deepseek-v4-flash` 是文本模型，不能检查图片。包含 `image_url` 的请求会明确返回结构化 `422 unsupported_input`，而不是忽略图片后生成“安全”结果；非法、未知或矛盾的分类输出返回 `422 unusable_upstream_result`。在「仅观察」模式下这些错误只记录；在「前置拦截」模式下调用方统一 fail-closed 为 `503`，且不会轮换或冻结健康 Key。因此在图片审计覆盖完成前，不得把该 Adapter 作为图片输入的唯一同步阻断器。先保持「仅观察」，用人工标注样本验证误报率、召回率及各类别阈值，再单独审批是否切换「前置拦截」。
+这里的“一张”是当前内容审计产品边界，不代表多图请求已获得完整覆盖：`ContentModerationService` 的真实链路会保留 `ContentModerationInput.Images`，但 `ModerationInput()` 在一次上游调用前从多图中随机采样一张，不会拆分成多个 moderation 请求；因此服务路径不会因多图直接触发 Adapter 的多图 `422`，但其余图片不会被本次 DeepSeek 审计覆盖。直接调用 Adapter 发送同一个 input 的两张图片会显式返回 `422 unsupported_input`，绝不静默删除图片。需要逐图保证覆盖时，调用方必须先拆分请求；在该服务边界改变前，不应宣称视觉审计覆盖了所有图片。由于远程 URL 的内容可能在审核抓取与业务上游抓取之间变化，`pre_block` 模式会拒绝含远程 URL 的请求；需要前置阻断时必须使用内联 data URL，远程 URL 只在 observe 模式提供检测信号。
+
+DeepSeek 只返回严格的 `Safe|Controversial|Unsafe` 与已知类别；Adapter 校验无矛盾后，将 `Safe` 映射为 0、`Controversial` 映射为 0.49、`Unsafe` 映射为 1.0，并返回完整的 `flagged`、`categories` 与 13 项 `category_scores`。每批最多 32 项、每项最多 16384 Unicode 字符，整批共享配置的上游超时。Adapter 在读取请求体前使用单槽准入，并对图片下载、完整解码和分类链路继续保持单槽；容量已占用时返回 `429 adapter_capacity_unavailable`。服务不会把该错误计入 Key 健康，并在 `pre_block` 模式下 fail-closed。
+
+`deepseek-v4-flash` 是文本模型，不能检查图片；只有 `deepseek-v4-flash-vision-exp` 会处理图片。包含 `image_url` 的请求在不支持的模型或图片永久不可审计时会明确返回结构化 `422 unsupported_input`，而不是忽略图片后生成“安全”结果；非法、未知或矛盾的分类输出返回 `422 unusable_upstream_result`。在「仅观察」模式下这些结构化输入/结果错误只记录并放行；在「前置拦截」模式下调用方统一 fail-closed 为 `503`，且不会轮换或冻结健康 Key。远程图片的 DNS/连接/读取失败、超时、429、5xx 或图片并发容量耗尽保留网络失败语义（`image_source_unavailable`，状态为 429 或 502），observe/pre_block 继续沿用既有网络错误策略，不将其误报为永久输入错误，也不冻结或轮换健康 Key。视觉模型上线前仍应先保持「仅观察」，用人工标注样本验证误报率、召回率及各类别阈值，再单独审批是否切换「前置拦截」。
 ## 上线门禁
 
 两条 smoke 只证明协议闭环，不代表可以生产阻断。扩大范围前至少需要人工标注的正常与风险样本集，计算误报率、阻断精确率、召回率、可用率和 P95/P99。未达到团队阈值前保持异步；未经故障演练不得启用 fail-closed 同步阻断。

@@ -1297,14 +1297,14 @@ func TestExtractContentModerationInput_OpenAIChatUsesLastUserMessage(t *testing.
 			{"role":"system","content":"system prompt"},
 			{"role":"user","content":"old user"},
 			{"role":"assistant","content":"ok"},
-			{"role":"user","content":[{"type":"text","text":"latest user"},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}
+			{"role":"user","content":[{"type":"text","text":"latest user"},{"type":"image_url","image_url":{"url":"HTTPS://example.com/a.png"}}]}
 		]
 	}`)
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
 
 	require.Equal(t, "latest user", input.Text)
-	require.Equal(t, []string{"https://example.com/a.png"}, input.Images)
+	require.Equal(t, []string{"HTTPS://example.com/a.png"}, input.Images)
 	require.NotContains(t, input.Text, "old user")
 	require.NotContains(t, input.Text, "system prompt")
 }

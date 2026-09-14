@@ -270,7 +270,8 @@ func addModerationImage(images *[]string, image string) {
 	if image == "" {
 		return
 	}
-	if strings.HasPrefix(image, "data:") || strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") {
+	lowerImage := strings.ToLower(image)
+	if strings.HasPrefix(lowerImage, "data:") || strings.HasPrefix(lowerImage, "http://") || strings.HasPrefix(lowerImage, "https://") {
 		*images = append(*images, image)
 	}
 }

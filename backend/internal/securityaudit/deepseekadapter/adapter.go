@@ -85,6 +85,9 @@ type server struct {
 	apiKey         string
 	adapterToken   string
 	client         *http.Client
+	imageClient    *http.Client
+	imageSlots     chan struct{}
+	requestSlots   chan struct{}
 	curlPath       string
 	curlConfigFile string
 }
@@ -195,7 +198,15 @@ func NewHandler(config Config) (http.Handler, func(), error) {
 	if subtle.ConstantTimeCompare([]byte(apiKey), []byte(adapterToken)) == 1 {
 		return nil, func() {}, errors.New("DeepSeek API key and adapter token must differ")
 	}
-	s := &server{config: config, apiKey: apiKey, adapterToken: adapterToken, client: newHTTP1Client(config.Timeout)}
+	s := &server{
+		config:       config,
+		apiKey:       apiKey,
+		adapterToken: adapterToken,
+		client:       newHTTP1Client(config.Timeout),
+		imageClient:  newModerationImageClient(config.Timeout, config.allowHTTPForTests),
+		imageSlots:   make(chan struct{}, maxConcurrentModerationImages),
+		requestSlots: make(chan struct{}, maxConcurrentModerationRequests),
+	}
 	cleanup := func() {}
 	if config.Transport == "curl" {
 		curlPath, err := exec.LookPath("curl")
@@ -234,9 +245,9 @@ func (c Config) validate() error {
 		}
 	}
 	switch strings.TrimSpace(c.Model) {
-	case "deepseek-v4-flash", "deepseek-v4-pro":
+	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp":
 	default:
-		return errors.New("DeepSeek model must be deepseek-v4-flash or deepseek-v4-pro")
+		return errors.New("DeepSeek model must be deepseek-v4-flash, deepseek-v4-pro, or deepseek-v4-flash-vision-exp")
 	}
 	switch strings.TrimSpace(c.Transport) {
 	case "native", "curl":

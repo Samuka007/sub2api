@@ -113,6 +113,8 @@ var (
 	errContentModerationProxyUnavailable       = errors.New("content moderation proxy unavailable")
 	errContentModerationUnusableUpstreamResult = errors.New("content moderation upstream returned an unusable result")
 	errContentModerationUnmoderatableInput     = errors.New("content moderation upstream cannot inspect the request input")
+	errContentModerationImageSourceUnavailable = errors.New("content moderation image source unavailable")
+	errContentModerationCapacityUnavailable    = errors.New("content moderation adapter capacity unavailable")
 )
 
 var contentModerationCategoryOrder = []string{
@@ -403,6 +405,15 @@ func (in ContentModerationInput) Hash() string {
 		_, _ = h.Write([]byte(hex.EncodeToString(imageHash[:])))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func hasRemoteModerationImage(images []string) bool {
+	for _, image := range images {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(image)), "data:image/") {
+			return true
+		}
+	}
+	return false
 }
 
 type ContentModerationDecision struct {
@@ -915,7 +926,9 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		keyHash := moderationAPIKeyHash(key)
 		if err != nil {
 			if !errors.Is(err, errContentModerationUnusableUpstreamResult) &&
-				!errors.Is(err, errContentModerationUnmoderatableInput) {
+				!errors.Is(err, errContentModerationUnmoderatableInput) &&
+				!errors.Is(err, errContentModerationImageSourceUnavailable) &&
+				!errors.Is(err, errContentModerationCapacityUnavailable) {
 				s.markAPIKeyError(key, err.Error(), latency, httpStatus)
 			}
 		} else {
@@ -927,7 +940,9 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		status := s.apiKeyStatusForHash(idx, keyHash, maskSecretTail(key), configured)
 		status.LastTested = true
 		if err != nil && (errors.Is(err, errContentModerationUnusableUpstreamResult) ||
-			errors.Is(err, errContentModerationUnmoderatableInput)) {
+			errors.Is(err, errContentModerationUnmoderatableInput) ||
+			errors.Is(err, errContentModerationImageSourceUnavailable) ||
+			errors.Is(err, errContentModerationCapacityUnavailable)) {
 			// Surface content/model-specific failures in this test response without
 			// persisting them as credential health failures.
 			status.Status = "error"
@@ -1186,6 +1201,15 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		s.enqueueAsync(ctx, input, cfg, content, hashText)
 		return allow, nil
 	}
+	if cfg.Mode == ContentModerationModePreBlock && hasRemoteModerationImage(content.Images) {
+		return &ContentModerationDecision{
+			Allowed:    false,
+			Blocked:    true,
+			Message:    "remote image cannot be byte-bound for pre-block moderation",
+			StatusCode: http.StatusServiceUnavailable,
+			Action:     ContentModerationActionError,
+		}, nil
+	}
 
 	return s.checkSync(ctx, input, cfg, content, hashText, nil, true), nil
 }
@@ -1225,12 +1249,15 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		if allowBlock && cfg.Mode == ContentModerationModePreBlock &&
 			(errors.Is(err, errContentModerationProxyUnavailable) ||
 				errors.Is(err, errContentModerationUnusableUpstreamResult) ||
-				errors.Is(err, errContentModerationUnmoderatableInput)) {
+				errors.Is(err, errContentModerationUnmoderatableInput) ||
+				errors.Is(err, errContentModerationCapacityUnavailable)) {
 			message := "content moderation proxy is unavailable"
 			if errors.Is(err, errContentModerationUnusableUpstreamResult) {
 				message = "content moderation upstream returned an unusable result"
 			} else if errors.Is(err, errContentModerationUnmoderatableInput) {
 				message = "content moderation upstream cannot inspect the request input"
+			} else if errors.Is(err, errContentModerationCapacityUnavailable) {
+				message = "content moderation adapter capacity unavailable"
 			}
 			return &ContentModerationDecision{
 				Allowed:    false,
@@ -1989,9 +2016,11 @@ func (s *ContentModerationService) callModeration(ctx context.Context, cfg *Cont
 		}
 		unusableUpstreamResult := errors.Is(err, errContentModerationUnusableUpstreamResult)
 		unmoderatableInput := errors.Is(err, errContentModerationUnmoderatableInput)
-		credentialIndependentError := unusableUpstreamResult || unmoderatableInput
+		imageSourceUnavailable := errors.Is(err, errContentModerationImageSourceUnavailable)
+		capacityUnavailable := errors.Is(err, errContentModerationCapacityUnavailable)
+		credentialIndependentError := unusableUpstreamResult || unmoderatableInput || imageSourceUnavailable || capacityUnavailable
 		if trackLoad {
-			if unmoderatableInput {
+			if unmoderatableInput || imageSourceUnavailable || capacityUnavailable {
 				s.cancelModerationAPIKeyCall(key)
 			} else {
 				s.finishModerationAPIKeyCall(key, latency, false)
@@ -2080,8 +2109,15 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		statusErr := fmt.Errorf("moderation api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		var apiErr moderationAPIErrorResponse
+		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Code == "image_source_unavailable" &&
+			(resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusBadGateway) {
+			return nil, fmt.Errorf("%w: %v", errContentModerationImageSourceUnavailable, statusErr)
+		}
+		if apiErr.Error.Code == "adapter_capacity_unavailable" && resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("%w: %v", errContentModerationCapacityUnavailable, statusErr)
+		}
 		if resp.StatusCode == http.StatusUnprocessableEntity {
-			var apiErr moderationAPIErrorResponse
 			if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Code == "unusable_upstream_result" {
 				return nil, fmt.Errorf("%w: %v", errContentModerationUnusableUpstreamResult, statusErr)
 			}

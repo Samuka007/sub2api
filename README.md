@@ -101,7 +101,9 @@ Anthropic 路径支持文本、HTTP(S) 图片和最大 8 MiB 的受支持图片�
 
 Prompt Audit 可以通过同一发布镜像的 `--prompt-audit-deepseek-adapter` 模式使用官方 DeepSeek `deepseek-v4-flash`。Adapter 把用户内容作为不可信数据交给严格分类 System Prompt，验证 JSON safety/category 枚举后，再转换为现有 Qwen3Guard-compatible `Safety / Categories` 响应；普通聊天回答、非法 JSON、超时和非 2xx 不会被当成安全结论。
 
-同一 Adapter 也暴露 OpenAI-compatible `POST /v1/moderations`，可供「安全审计 → 内容审计」使用。它要求 DeepSeek 返回严格的 safety/category 分类，拒绝矛盾或未知输出，再确定性映射为全部 13 个内容安全类别分数；文本、文本数组与文本 part 可审计，`deepseek-v4-flash` 无法检查图片，因此图片输入会明确返回 `422`，不会被 Adapter 伪装成安全结果。
+同一 Adapter 也暴露 OpenAI-compatible `POST /v1/moderations`，可供「安全审计 → 内容审计」使用。它要求 DeepSeek 返回严格的 safety/category 分类，拒绝矛盾或未知输出，再确定性映射为全部 13 个内容安全类别分数；文本、文本数组与文本 part 可审计。默认的 `deepseek-v4-flash` 是文本模型，图片输入会明确返回 `422 unsupported_input`；选择 `deepseek-v4-flash-vision-exp` 时才会检查一张 JPEG/PNG/GIF/WebP 图片，并把远程 HTTPS 图片先在 Adapter 内下载、校验和转成 data URL，不会把原始 URL 发送给 DeepSeek。图片 `detail` 支持 `auto`、`low`、`high` 和兼容客户端的 `original`，并原样传给视觉上游。单图原始字节最多 8 MiB、data URL 最多 12 MiB、请求体最多 16 MiB，宽高最多 8192、总像素最多 16,777,216，动画 GIF 最多 32 帧且累计帧像素不超过 16,777,216，URL 最多 8192 字节；图片格式/尺寸/URL 永久不可审计时返回 `422 unsupported_input`。远程图片 DNS、超时、读取失败或 5xx 返回 `502 image_source_unavailable`，远程 `429` 保留 `429 image_source_unavailable`，不会伪装成输入错误或冻结健康审核 Key；Adapter 容量耗尽返回独立的 `429 adapter_capacity_unavailable`，并在 `pre_block` 模式下 fail-closed。由于远程 URL 内容无法绑定到业务上游的第二次抓取，网关 `pre_block` 只接受内联 data URL，远程 URL 仅用于 observe。日志不包含原始 URL 或 token。
+
+当前内容审计服务对多图输入仍按既有产品契约随机采样一张发送给上游，并非逐图拆分；因此视觉接入不宣称覆盖一次请求中的全部图片。直接 Adapter 请求若包含两张图片会显式 `422`，不会吞图伪装成安全结果。
 
 部署使用 `deploy/docker-compose.prompt-audit-deepseek.yml`。DeepSeek API Key 与 Adapter Token 必须通过两个独立文件 Secret 提供；服务只加入应用私网、不发布宿主机端口，并以只读文件系统、非 root、cap-drop 和 no-new-privileges 运行。默认使用原生 HTTP/1.1；只有可重复证明出口 HTTP/2 帧异常时才启用 curl HTTP/1.1 兼容模式。
 
