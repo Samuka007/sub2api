@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.26 - 2026-09-15
+
+### Added
+
+- Add DeepSeek Vision content moderation for JPEG, PNG, GIF, and WebP inputs with bounded image decoding and SSRF-safe remote image handling.
+
+### Fixed
+
+- Preserve image-source and adapter-capacity failures without freezing healthy moderation keys.
+- Reject remote images in pre-block mode when the audited bytes cannot be bound to the downstream request.
+
 ## 2026-07-31
 
 ### Changed
