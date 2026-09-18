@@ -674,7 +674,12 @@ func (s *SubscriptionService) extendSubscription(ctx context.Context, subscripti
 		}
 
 		now := time.Now()
+		if s.now != nil {
+			now = s.now()
+		}
 		isExpired := !sub.ExpiresAt.After(now)
+
+		// 如果订阅已过期，不允许负向调整
 		if isExpired && days < 0 {
 			return infraerrors.BadRequest("CANNOT_SHORTEN_EXPIRED", "cannot shorten an expired subscription")
 		}
@@ -702,6 +707,14 @@ func (s *SubscriptionService) extendSubscription(ctx context.Context, subscripti
 			}
 			status = SubscriptionStatusActive
 		}
+		// Re-read inside the same transaction: bulk callers roll the whole item
+		// back when a post-write refresh fails, and the returned row reflects
+		// every write of this transaction, not just our own view.
+		refreshed, err := s.userSubRepo.GetByID(txCtx, subscriptionID)
+		if err != nil {
+			return err
+		}
+		sub = refreshed
 		copy := *sub
 		copy.ExpiresAt = newExpiresAt
 		copy.Status = status

@@ -67,6 +67,7 @@ vi.mock('@/utils/featureFlags', () => ({
     channelMonitor: { key: 'channel_monitor_enabled' },
     pluginManagement: { key: 'plugin_management_enabled' },
     payment: {},
+    subscription: { key: 'subscription_enabled' },
     availableChannels: {},
     affiliate: {},
     riskControl: {},
@@ -74,6 +75,8 @@ vi.mock('@/utils/featureFlags', () => ({
   makeSidebarFlag: (flag: { key?: string }) => () =>
     flag.key !== 'channel_monitor_enabled' ||
     mocks.appStore.cachedPublicSettings?.channel_monitor_enabled !== false,
+  resolveFeatureFlag: (settings: Record<string, unknown> | null | undefined, flag: { key?: string }) =>
+    settings?.[flag.key ?? ''] !== false,
 }))
 
 vi.mock('@/composables/useBatchImageAccess', () => ({

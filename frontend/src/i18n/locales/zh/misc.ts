@@ -62,6 +62,8 @@ export default {
   purchase: {
     title: '兑换码直购',
     description: '购买 API 额度兑换码并自动充入当前账户',
+    rechargeDescription: '通过内嵌页面完成充值',
+    subscriptionDescription: '通过内嵌页面完成订阅',
     openInNewTab: '新窗口打开',
     notEnabledTitle: '该功能未开启',
     notEnabledDesc: '管理员暂未开启充值/订阅入口，请联系管理员。',
@@ -414,6 +416,7 @@ export default {
     redeemEntryTitle: '兑换入口',
     redeemEntryHint: '已经购买兑换码？前往兑换页面，将兑换码兑换为 API 额度。',
     redeemEntryAction: '兑换入口',
+    billingUnavailable: '充值与订阅均暂未开放，请联系管理员。',
     confirmSubscription: '确认订阅',
     confirmCancel: '确定要取消此订单吗？',
     amountTooLow: '最低金额为 {min}',

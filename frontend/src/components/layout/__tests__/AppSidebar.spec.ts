@@ -70,20 +70,28 @@ describe('AppSidebar header styles', () => {
 })
 
 describe('AppSidebar payment entry', () => {
-  it('keeps recharge and subscription visible for every user mode', () => {
-    const purchaseItem = componentSource
-      .split('\n')
-      .find(line => line.includes("path: '/purchase'"))
-
-    expect(purchaseItem).toContain("label: t('nav.buySubscription')")
-    expect(purchaseItem).not.toContain('hideInSimpleMode')
-    expect(purchaseItem).not.toContain('featureFlag')
-  })
-
   it('allows the payment page to render its unavailable state', () => {
     const purchaseRoute = routerSource.match(/path: '\/purchase',[\s\S]*?\n {2}},/)
 
     expect(purchaseRoute).not.toBeNull()
     expect(purchaseRoute?.[0]).toContain('requiresPayment: false')
+  })
+})
+
+describe('AppSidebar subscription feature flag', () => {
+  it('gates the My Subscriptions entry behind the subscription public-settings flag', () => {
+    expect(componentSource).toContain('const flagSubscription = makeSidebarFlag(FeatureFlags.subscription)')
+    expect(componentSource).toMatch(/path: '\/subscriptions'[^\n]*featureFlag: flagSubscription/)
+  })
+
+  it('also hides the admin Subscription Management entry on recharge-only sites', () => {
+    expect(componentSource).toMatch(/path: '\/admin\/subscriptions'[^\n]*featureFlag: flagSubscription/)
+  })
+
+  it('derives the purchase entry label from the site billing mode', () => {
+    expect(componentSource).toContain("import { resolveSiteBillingMode } from '@/utils/siteBillingMode'")
+    expect(componentSource).toMatch(/case 'recharge_only':\s*return t\('nav\.recharge'\)/)
+    expect(componentSource).toMatch(/case 'subscription_only':\s*return t\('nav\.subscribe'\)/)
+    expect(componentSource).toMatch(/path: '\/purchase'[^\n]*label: purchaseNavLabel\.value/)
   })
 })

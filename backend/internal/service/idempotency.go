@@ -100,6 +100,9 @@ type IdempotencyExecuteOptions struct {
 	Payload        any
 	TTL            time.Duration
 	RequireKey     bool
+	// ExecutionTimeout opts into bounded execution independent of client cancellation,
+	// with lease renewal and a separate short window to persist the final result.
+	ExecutionTimeout time.Duration
 }
 
 type IdempotencyExecuteResult struct {
@@ -243,6 +246,11 @@ func (c *IdempotencyCoordinator) execute(
 	execute func(context.Context) (any, error),
 	transactional bool,
 ) (*IdempotencyExecuteResult, error) {
+	if opts.ExecutionTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), opts.ExecutionTimeout)
+		defer cancel()
+	}
 	if execute == nil {
 		return nil, infraerrors.InternalServer("IDEMPOTENCY_EXECUTOR_NIL", "idempotency executor is nil")
 	}
@@ -470,6 +478,12 @@ func (c *IdempotencyCoordinator) execute(
 		return nil, ErrIdempotencyStoreUnavail
 	}
 
+	leaseState := &idempotencyLeaseState{until: *record.LockedUntil}
+	if opts.ExecutionTimeout > 0 {
+		stopRenewal := c.renewProcessingLease(ctx, record, leaseState, ttl)
+		defer stopRenewal()
+	}
+
 	execStart := time.Now()
 	defer func() {
 		recordIdempotencyProcessingDuration(opts.Route, opts.Scope, time.Since(execStart), nil)
@@ -493,6 +507,12 @@ func (c *IdempotencyCoordinator) execute(
 	}
 
 	data, execErr := execute(ctx)
+	if opts.ExecutionTimeout > 0 {
+		// The execution deadline can expire after some items have completed.
+		// Store those outcomes even then: the terminal writes below use a
+		// fresh bounded context, and the stored result gets a full fresh TTL.
+		expiresAt = time.Now().Add(ttl)
+	}
 	if execErr != nil {
 		backoffUntil := time.Now().Add(c.retryableFailureBackoff(execErr))
 		reason := infraerrors.Reason(execErr)
@@ -504,7 +524,10 @@ func (c *IdempotencyCoordinator) execute(
 			"reason": reason,
 		})
 		terminalCtx, cancel := idempotencyTerminalWriteContext(ctx)
-		markErr := c.repo.MarkFailedRetryable(terminalCtx, record.ID, *record.LockedUntil, reason, backoffUntil, expiresAt)
+		leaseState.mu.Lock()
+		expectedLock := leaseState.until
+		leaseState.mu.Unlock()
+		markErr := c.repo.MarkFailedRetryable(terminalCtx, record.ID, expectedLock, reason, backoffUntil, expiresAt)
 		cancel()
 		if markErr != nil {
 			RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "mark_failed_retryable_error")
@@ -524,7 +547,10 @@ func (c *IdempotencyCoordinator) execute(
 		return nil, ErrIdempotencyStoreUnavail.WithCause(marshalErr)
 	}
 	terminalCtx, cancel := idempotencyTerminalWriteContext(ctx)
-	markErr := c.repo.MarkSucceeded(terminalCtx, record.ID, *record.LockedUntil, 200, storedBody, expiresAt)
+	leaseState.mu.Lock()
+	expectedLock := leaseState.until
+	leaseState.mu.Unlock()
+	markErr := c.repo.MarkSucceeded(terminalCtx, record.ID, expectedLock, 200, storedBody, expiresAt)
 	cancel()
 	if markErr != nil {
 		RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "mark_succeeded_error")
@@ -816,6 +842,66 @@ func idempotencyTerminalWriteContext(ctx context.Context) (context.Context, cont
 // fencing without relying on driver-specific timestamp rounding.
 func idempotencyLeaseDeadline(now time.Time, lease time.Duration) time.Time {
 	return now.Add(lease).UTC().Truncate(time.Microsecond)
+}
+
+// idempotencyLeaseState tracks the latest CAS lease token for an in-flight
+// execution. The renewal goroutine and the terminal writes both consume it,
+// so access is serialized.
+type idempotencyLeaseState struct {
+	mu    sync.Mutex
+	until time.Time
+}
+
+// renewProcessingLease extends the processing lease while a bounded execution
+// is still running, using the same repository lease primitive as system
+// operations. Renewal continues through slow batches and stops before Execute
+// exits.
+func (c *IdempotencyCoordinator) renewProcessingLease(ctx context.Context, record *IdempotencyRecord, leaseState *idempotencyLeaseState, ttl time.Duration) func() {
+	lease := c.cfg.ProcessingTimeout
+	if lease <= 0 {
+		lease = DefaultIdempotencyConfig().ProcessingTimeout
+	}
+	interval := min(lease/3, ttl/3)
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	renewCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				newLockedUntil := idempotencyLeaseDeadline(now, lease)
+				newExpiresAt := now.Add(ttl)
+				callCtx, callCancel := context.WithTimeout(renewCtx, min(2*time.Second, interval))
+				leaseState.mu.Lock()
+				expected := leaseState.until
+				ok, err := c.repo.ExtendProcessingLock(callCtx, record.ID, record.RequestFingerprint, expected, newLockedUntil, newExpiresAt)
+				if err == nil && ok {
+					leaseState.until = newLockedUntil
+				}
+				leaseState.mu.Unlock()
+				callCancel()
+				if err != nil {
+					RecordIdempotencyStoreUnavailable("", record.Scope, "renew_processing_lock_error")
+					continue
+				}
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func (c *IdempotencyCoordinator) conflictWithRetryAfter(base *infraerrors.ApplicationError, lockedUntil *time.Time, now time.Time) error {

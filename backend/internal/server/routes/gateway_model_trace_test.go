@@ -116,6 +116,8 @@ func TestModelTraceRouteMatrixClassifiesEveryGatewayRoute(t *testing.T) {
 				{http.MethodGet, "/v1beta/models"},
 				{http.MethodGet, "/v1beta/models/:model"},
 				{http.MethodGet, "/models"},
+				{http.MethodGet, "/v1/models/:model"},
+				{http.MethodGet, "/models/:model"},
 				{http.MethodGet, "/backend-api/codex/:call_id"},
 				{http.MethodGet, "/backend-api/codex/models"},
 				{http.MethodGet, "/images/tasks/:task_id"},
