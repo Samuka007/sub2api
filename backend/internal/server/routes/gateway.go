@@ -76,7 +76,8 @@ func RegisterGatewayRoutes(
 	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
 		switch getGroupPlatform(c) {
 		case service.PlatformOpenAI, service.PlatformGrok,
-			service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax:
+			service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek,
+			service.PlatformMiniMax, service.PlatformOpenCodeGo:
 			// 国产 OpenAI 兼容供应商与 openai/grok 一样经 OpenAI 网关转发。
 			return true
 		default:
@@ -85,7 +86,7 @@ func RegisterGatewayRoutes(
 	}
 	countTokensHandler := func(c *gin.Context) {
 		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax:
+		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOpenCodeGo:
 			h.OpenAIGateway.CountTokens(c)
 		case service.PlatformGrok:
 			// Grok token counting is a local estimate and must not create a model Trace.
@@ -349,6 +350,8 @@ func RegisterGatewayRoutes(
 		// Control-plane routes retain their previous middleware order and never install Candidate.
 		gateway := r.Group("/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic)
 		gateway.GET("/models", modelsHandler)
+		// Single-model discovery never selects the Codex client_version manifest.
+		gateway.GET("/models/:model", h.Gateway.Models)
 		gateway.GET("/usage", h.Gateway.Usage)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		gateway.GET("/responses", responsesWebSocketHandler)
@@ -399,6 +402,8 @@ func RegisterGatewayRoutes(
 	r.POST("/videos/extensions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoExtensionHandler)
 	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, responsesWebSocketHandler)
 	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, modelsHandler)
+	// Single-model discovery never selects the Codex client_version manifest.
+	r.GET("/models/:model", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.Gateway.Models)
 	r.POST("/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, countTokensHandler)
 	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.AsyncImage.Get)
 	r.GET("/videos/generations/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoContentHandler)

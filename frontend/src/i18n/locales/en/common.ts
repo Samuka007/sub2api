@@ -205,6 +205,8 @@ export default {
     github: 'GitHub',
     mySubscriptions: 'My Subscriptions',
     buySubscription: 'Redeem Code Store',
+    recharge: 'Recharge',
+    subscribe: 'Subscription',
     docs: 'Docs',
     myOrders: 'My Orders',
     orderManagement: 'Orders',
