@@ -290,6 +290,7 @@ func RegisterGatewayRoutes(
 		gateway.POST("/images/generations/async", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
 		gateway.POST("/images/edits/async", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
 		gateway.POST("/images/batches", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.BatchImage.Submit)
+		gateway.POST("/contents/generations/tasks", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
 		gateway.POST("/videos", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
 		gateway.POST("/videos/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
 		gateway.POST("/videos/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoEditHandler)
@@ -371,8 +372,10 @@ func RegisterGatewayRoutes(
 		gateway.GET("/videos/edits/:request_id/content", videoContentHandler)
 		gateway.GET("/videos/extensions/:request_id", videoStatusHandler)
 		gateway.GET("/videos/extensions/:request_id/content", videoContentHandler)
+		gateway.GET("/contents/generations/tasks/:task_id", h.OpenAIGateway.SeedanceTasks)
 		gateway.GET("/videos/:request_id", videoStatusHandler)
 		gateway.GET("/videos/:request_id/content", videoContentHandler)
+		gateway.DELETE("/contents/generations/tasks/:task_id", h.OpenAIGateway.SeedanceTasks)
 	}
 
 	// Gemini native API compatibility layer.
@@ -400,6 +403,13 @@ func RegisterGatewayRoutes(
 	r.POST("/videos/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoGenerationHandler)
 	r.POST("/videos/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoEditHandler)
 	r.POST("/videos/extensions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, videoExtensionHandler)
+	// Seedance task aliases: /api/v3 and /v3 prefix mirrors plus the bare root,
+	// same auth and routing invariants as the /v1 registration above.
+	for _, prefix := range []string{"/api/v3", "/v3", ""} {
+		r.POST(prefix+"/contents/generations/tasks", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+		r.GET(prefix+"/contents/generations/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+		r.DELETE(prefix+"/contents/generations/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	}
 	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, responsesWebSocketHandler)
 	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, modelsHandler)
 	// Single-model discovery never selects the Codex client_version manifest.
