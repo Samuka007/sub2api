@@ -214,18 +214,18 @@ const maxRefundable = computed(() => {
 
 const balanceInsufficient = computed(() => {
   if (props.userBalance == null || !props.order) return false
-  return props.userBalance < props.order.amount
+  return props.userBalance < form.amount
 })
 
 watch(() => props.show, (val) => {
   if (val && props.order) {
-    // For REFUND_REQUESTED, pre-fill with the requested amount
-    if (props.order.status === 'REFUND_REQUESTED' && props.order.refund_amount) {
+    const isPendingFinalization = props.order.status === 'REFUNDING' || props.order.status === 'REFUND_PENDING'
+    if ((props.order.status === 'REFUND_REQUESTED' || isPendingFinalization) && props.order.refund_amount) {
       form.amount = props.order.refund_amount
     } else {
       form.amount = maxRefundable.value
     }
-    form.reason = props.order.refund_request_reason || ''
+    form.reason = (isPendingFinalization ? props.order.refund_reason : props.order.refund_request_reason) || props.order.refund_request_reason || ''
     form.deduct_balance = true
     form.force = false
   }

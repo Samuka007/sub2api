@@ -31,10 +31,13 @@
       </div>
       <div>
         <label class="input-label">{{ t('admin.users.form.roleLabel') }}</label>
-        <select v-model="form.role" class="input">
-          <option value="user">{{ t('admin.users.roles.user') }}</option>
-          <option value="admin">{{ t('admin.users.roles.admin') }}</option>
-        </select>
+        <div class="flex flex-wrap gap-4 pt-1">
+          <label v-for="r in adminRoles" :key="r" class="flex items-center gap-1.5 text-sm">
+            <input v-model="form.roles" type="checkbox" :value="r" class="rounded border-gray-300 dark:border-dark-600" />
+            {{ t('admin.users.roles.' + r) }}
+          </label>
+        </div>
+        <p class="input-hint">{{ t('admin.users.form.rolesHint') }}</p>
       </div>
       <div>
         <label class="input-label">{{ t('admin.users.notes') }}</label>
@@ -42,7 +45,16 @@
       </div>
       <div>
         <label class="input-label">{{ t('admin.users.columns.concurrency') }}</label>
-        <input v-model.number="form.concurrency" type="number" class="input" />
+        <input
+          v-model.number="form.concurrency"
+          type="number"
+          min="0"
+          step="1"
+          class="input"
+          :placeholder="t('admin.users.form.concurrencyPlaceholder')"
+          data-test="concurrency-input"
+        />
+        <p class="input-hint">{{ t('admin.users.form.concurrencyHint') }}</p>
       </div>
       <div>
         <label class="input-label">{{ t('admin.users.form.rpmLimit') }}</label>
@@ -84,17 +96,20 @@ import UserAttributeForm from '@/components/user/UserAttributeForm.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
+import type { AdminRole } from '@/types'
+import { ALL_ADMIN_ROLES } from '@/utils/adminPermissions'
 
 const props = defineProps<{ show: boolean, user: AdminUser | null }>()
 const emit = defineEmits(['close', 'success'])
 const { t } = useI18n(); const appStore = useAppStore(); const { copyToClipboard } = useClipboard()
 
 const submitting = ref(false); const passwordCopied = ref(false)
-const form = reactive({ email: '', password: '', username: '', notes: '', role: 'user', concurrency: 1, rpm_limit: 0, customAttributes: {} as UserAttributeValuesMap })
+const form = reactive({ email: '', password: '', username: '', notes: '', roles: [] as AdminRole[], concurrency: 1, rpm_limit: 0, customAttributes: {} as UserAttributeValuesMap })
+const adminRoles = ALL_ADMIN_ROLES
 
 watch(() => props.user, (u) => {
   if (u) {
-    Object.assign(form, { email: u.email, password: '', username: u.username || '', notes: u.notes || '', role: u.role || 'user', concurrency: u.concurrency, rpm_limit: u.rpm_limit ?? 0, customAttributes: {} })
+    Object.assign(form, { email: u.email, password: '', username: u.username || '', notes: u.notes || '', roles: u.roles ?? [], concurrency: u.concurrency, rpm_limit: u.rpm_limit ?? 0, customAttributes: {} })
     passwordCopied.value = false
   }
 }, { immediate: true })
@@ -117,14 +132,15 @@ const handleUpdateUser = async () => {
     appStore.showError(t('admin.users.emailRequired'))
     return
   }
-  if (form.concurrency < 1) {
-    appStore.showError(t('admin.users.concurrencyMin'))
+  // 0 = 不限制，与网关 (AcquireUserSlot: maxConcurrency <= 0) 和批量改限额一致
+  if (!Number.isInteger(form.concurrency) || form.concurrency < 0) {
+    appStore.showError(t('admin.users.concurrencyNonNegative'))
     return
   }
   const userId = props.user.id
   submitting.value = true
   try {
-    const data: any = { email: form.email, username: form.username, notes: form.notes, role: form.role, concurrency: form.concurrency, rpm_limit: form.rpm_limit }
+    const data: any = { email: form.email, username: form.username, notes: form.notes, roles: form.roles, concurrency: form.concurrency, rpm_limit: form.rpm_limit }
     if (form.password.trim()) data.password = form.password.trim()
     // 提升为管理员属敏感操作：后端返回 STEP_UP_REQUIRED 时弹 TOTP 验证并重试
     await stepUp.run(() => adminAPI.users.update(userId, data))

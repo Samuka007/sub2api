@@ -1,0 +1,244 @@
+name: langfuse
+
+x-clickhouse-read-env: &clickhouse-read-env
+  CLICKHOUSE_READ_PASSWORD: ${CLICKHOUSE_READ_PASSWORD:?CLICKHOUSE_READ_PASSWORD is required}
+  CLICKHOUSE_READ_MAX_CONCURRENT: ${CLICKHOUSE_READ_MAX_CONCURRENT:-8}
+  CLICKHOUSE_READ_MAX_EXECUTION_SECONDS: ${CLICKHOUSE_READ_MAX_EXECUTION_SECONDS:-10}
+  CLICKHOUSE_READ_MAX_MEMORY_BYTES: ${CLICKHOUSE_READ_MAX_MEMORY_BYTES:-4294967296}
+  CLICKHOUSE_READ_MAX_MEMORY_FOR_USER_BYTES: ${CLICKHOUSE_READ_MAX_MEMORY_FOR_USER_BYTES:-34359738368}
+  CLICKHOUSE_READ_MAX_ROWS: ${CLICKHOUSE_READ_MAX_ROWS:-100000000}
+  CLICKHOUSE_READ_MAX_BYTES: ${CLICKHOUSE_READ_MAX_BYTES:-10000000000}
+  CLICKHOUSE_READ_MAX_RESULT_ROWS: ${CLICKHOUSE_READ_MAX_RESULT_ROWS:-100000}
+  CLICKHOUSE_READ_MAX_RESULT_BYTES: ${CLICKHOUSE_READ_MAX_RESULT_BYTES:-100000000}
+  CLICKHOUSE_READ_MAX_THREADS: ${CLICKHOUSE_READ_MAX_THREADS:-4}
+  CLICKHOUSE_READ_MAX_TEMPORARY_DATA_BYTES: ${CLICKHOUSE_READ_MAX_TEMPORARY_DATA_BYTES:-8589934592}
+  CLICKHOUSE_READ_EXTERNAL_SORT_BYTES: ${CLICKHOUSE_READ_EXTERNAL_SORT_BYTES:-536870912}
+  CLICKHOUSE_READ_EXTERNAL_GROUP_BY_BYTES: ${CLICKHOUSE_READ_EXTERNAL_GROUP_BY_BYTES:-536870912}
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: ${NEXTAUTH_URL}
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  SALT: ${SALT}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+  CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_SKIP_FINAL_FOR_OTEL_PROJECTS: ${LANGFUSE_SKIP_FINAL_FOR_OTEL_PROJECTS:-true}
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${MINIO_EXTERNAL_ENDPOINT}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_AUTH: ${REDIS_AUTH}
+  REDIS_TLS_ENABLED: "false"
+
+x-langfuse-depends: &langfuse-depends
+  postgres:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+services:
+  langfuse-web:
+    image: ${LANGFUSE_WEB_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      <<: *langfuse-depends
+      clickhouse-read-proxy:
+        condition: service_healthy
+    ports:
+      - "${LANGFUSE_BIND_IP:-127.0.0.1}:${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-env
+      CLICKHOUSE_READ_ONLY_URL: http://clickhouse-read-proxy:8080
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+    healthcheck: &langfuse-web-healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://' + require('os').hostname() + ':3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # OTLP ingestion runs separately from the UI and starts only after the Web
+  # process has completed PostgreSQL and ClickHouse migrations.
+  langfuse-ingest:
+    image: ${LANGFUSE_WEB_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      <<: *langfuse-depends
+      langfuse-web:
+        condition: service_healthy
+    expose:
+      - "3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      LANGFUSE_AUTO_POSTGRES_MIGRATION_DISABLED: "true"
+      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: "true"
+    healthcheck: *langfuse-web-healthcheck
+
+  langfuse-worker:
+    image: ${LANGFUSE_WORKER_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      <<: *langfuse-depends
+      langfuse-web:
+        condition: service_healthy
+    environment:
+      <<: *langfuse-env
+      LANGFUSE_SKIP_INGESTION_CLICKHOUSE_READ_MIN_PROJECT_CREATE_DATE: "2026-07-25"
+
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE}
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      <<: *clickhouse-read-env
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      - ./clickhouse-config.d/resource-logging.xml:/etc/clickhouse-server/config.d/resource-logging.xml:ro
+      - ./clickhouse-users.d/resource-profile.xml:/etc/clickhouse-server/users.d/resource-profile.xml:ro
+      - ./clickhouse-users.d/langfuse-read.xml:/etc/clickhouse-server/users.d/langfuse-read.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  clickhouse-read-proxy:
+    image: ${CLICKHOUSE_READ_PROXY_IMAGE}
+    restart: unless-stopped
+    user: "101:101"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    expose:
+      - "8080"
+    environment:
+      CLICKHOUSE_READ_PASSWORD: ${CLICKHOUSE_READ_PASSWORD:?CLICKHOUSE_READ_PASSWORD is required}
+      CLICKHOUSE_READ_MAX_CONCURRENT: ${CLICKHOUSE_READ_MAX_CONCURRENT:-8}
+      CLICKHOUSE_READ_RATE: ${CLICKHOUSE_READ_RATE:-20}
+      CLICKHOUSE_READ_RATE_BURST: ${CLICKHOUSE_READ_RATE_BURST:-40}
+      CLICKHOUSE_READ_PROXY_TIMEOUT_SECONDS: ${CLICKHOUSE_READ_PROXY_TIMEOUT_SECONDS:-12}
+      NGINX_ENVSUBST_FILTER: ^CLICKHOUSE_READ_
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+    volumes:
+      - ./clickhouse-read-proxy-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./clickhouse-read-proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
+    tmpfs:
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0755
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m,uid=101,gid=101,mode=0755
+      - /var/run:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0755
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  minio:
+    image: ${MINIO_IMAGE}
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: ${REDIS_IMAGE}
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_AUTH}",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_AUTH}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+
+  xray-bridge:
+    image: ${XRAY_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      langfuse-ingest:
+        condition: service_healthy
+    volumes:
+      - ./.xray/bridge.json:/usr/local/etc/xray/config.json:ro
+    command: ["run", "-config", "/usr/local/etc/xray/config.json"]
+volumes:
+
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  minio_data:
+  redis_data:

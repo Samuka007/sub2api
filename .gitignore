@@ -1,5 +1,4 @@
 docs/claude-relay-service/
-.codex
 
 # ===================
 # Go 后端
@@ -14,6 +13,11 @@ backend/bin/
 backend/server
 backend/sub2api
 backend/main
+# e2e 测试本地产物
+.e2e-bin/
+.e2e-tmp/
+config.e2e.yaml
+/config.yaml
 
 # Go 测试二进制
 *.test
@@ -27,6 +31,10 @@ vendor/
 
 # Go 编译缓存
 backend/.gocache/
+
+# Python 生成缓存
+__pycache__/
+*.py[cod]
 
 # ===================
 # Node.js / Vue 前端
@@ -52,6 +60,7 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 *.env
+/secrets/
 !.env.example
 docker-compose.override.yml
 
@@ -111,6 +120,8 @@ backend/data/
 backend/config.yaml
 deploy/config.yaml
 backend/.installed
+.local-deploy/.env
+.local-deploy/data/config.yaml
 
 # ===================
 # 其他
@@ -118,28 +129,65 @@ backend/.installed
 tests
 !deploy/tests/
 !deploy/tests/**
+!backend/internal/modeltrace/tests/
+!backend/internal/modeltrace/tests/**
 CLAUDE.md
-.claude
+.claude/*
+!.claude/skills
 scripts
+!.agent/
+!.agent/skills/
+!.agent/skills/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
+!scripts/
 .code-review-state
-#openspec/
+/openspec/changes/
 code-reviews/
-AGENTS.md
 backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/README.md
+!docs/deployments/
+!docs/deployments/*.md
+!docs/ANTIGRAVITY_ATTRIBUTION_429.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
 !docs/ASYNC_IMAGE_TASKS.md
+!docs/BATCH_IMAGE_MVP.md
+!docs/LANGFUSE_SESSION_GRAPH.md
+!docs/PROMPT_AUDIT_DEEPSEEK.md
+!docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
+!docs/COMPOSITE_GROUPS.md
+!docs/PLUGIN_DEVELOPMENT.md
+!docs/channel-monitor-v2-safe-defaults.md
+!docs/codex-credits.md
 !docs/legal/
 !docs/legal/*.md
+!docs/screenshots/
+docs/screenshots/*
+!docs/screenshots/mobile-account-actions-menu.png
+!docs/screenshots/codex-referral-dialog.png
+!docs/screenshots/codex-referral-success.png
 .serena/
-.codex/
+.codex/*
+!.codex/skills
+/skills/
 frontend/coverage/
 aicodex
 output/
+exports/
+
+# Local archives and frontend tool caches
+/archives/
+/frontend/history/
+/.pnpm-store/
+/.vite/
+.codegraph/
+issues/
+
+# Vitest / Vite cache at repo root
+.vite/

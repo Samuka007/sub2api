@@ -131,6 +131,25 @@ func TestSecurityHeaders(t *testing.T) {
 		assert.Contains(t, csp, CloudflareInsightsDomain)
 	})
 
+	t.Run("old_custom_policy_dynamically_allows_same_origin_frames", func(t *testing.T) {
+		cfg := config.CSPConfig{
+			Enabled: true,
+			Policy:  "default-src 'self'; frame-src https://checkout.example.com",
+		}
+		middleware := SecurityHeaders(cfg, nil)
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/admin/plugins", nil)
+
+		middleware(c)
+
+		csp := w.Header().Get("Content-Security-Policy")
+		assert.Equal(t, 1, countDirectiveValue(csp, "frame-src", "'self'"))
+		assert.Equal(t, 1, countDirectiveValue(csp, "frame-src", "https://checkout.example.com"))
+		assert.Equal(t, "DENY", w.Header().Get("X-Frame-Options"))
+	})
+
 	t.Run("api_route_skips_csp_nonce_generation", func(t *testing.T) {
 		cfg := config.CSPConfig{
 			Enabled: true,
@@ -192,6 +211,7 @@ func TestSecurityHeaders(t *testing.T) {
 		assert.NotEmpty(t, csp)
 		// Default policy should contain these elements
 		assert.Contains(t, csp, "default-src 'self'")
+		assert.Contains(t, csp, TencentCaptchaDomain)
 	})
 
 	t.Run("uses_default_policy_when_whitespace_only", func(t *testing.T) {
@@ -296,6 +316,21 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 		assert.Contains(t, enhanced, CloudflareInsightsDomain)
 	})
 
+	t.Run("allows_only_same_origin_plugin_frames", func(t *testing.T) {
+		policy := "default-src 'self'; frame-src https://checkout.example.com"
+		enhanced := enhanceCSPPolicy(policy)
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "frame-src", "'self'"))
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "frame-src", "https://checkout.example.com"))
+		assert.NotContains(t, enhanced, "frame-src *")
+	})
+
+	t.Run("adds_same_origin_frame_source_once_when_directive_is_missing", func(t *testing.T) {
+		enhanced := enhanceCSPPolicy("default-src 'self'; script-src 'self'")
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "frame-src", "'self'"))
+	})
+
 	t.Run("does_not_duplicate_nonce_placeholder", func(t *testing.T) {
 		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__"
 		enhanced := enhanceCSPPolicy(policy)
@@ -311,6 +346,89 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 
 		count := strings.Count(enhanced, CloudflareInsightsDomain)
 		assert.Equal(t, 1, count)
+	})
+
+	t.Run("adds_tencent_captcha_domains_for_web_sdk", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		for _, required := range []struct {
+			directive string
+			domain    string
+		}{
+			{"script-src", TencentCaptchaDomain},
+			{"script-src", TencentCaptchaStaticDomain},
+			{"style-src", TencentCaptchaStaticDomain},
+			{"frame-src", TencentCaptchaDomain},
+			{"frame-src", TencentCaptchaStaticDomain},
+			{"connect-src", TencentCaptchaDomain},
+			{"connect-src", TencentCaptchaStaticDomain},
+			{"script-src", TencentCaptchaCDNDomain},
+			{"script-src", TencentCaptchaGlobalDomain},
+			{"script-src", TencentCaptchaGlobalCDNDomain},
+			{"script-src", TencentCaptchaPrehandleDomain},
+			{"script-src", TencentCaptchaJQueryDomain},
+			{"connect-src", TencentCaptchaPrehandleDomain},
+			{"connect-src", TencentCaptchaRceDomain},
+			{"frame-src", TencentCaptchaGlobalDomain},
+			{"frame-src", TencentCaptchaPrehandleDomain},
+			{"worker-src", TencentCaptchaWorkerSource},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
+		}
+	})
+
+	t.Run("adds_aliyun_captcha_domains_for_web_sdk", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__; style-src 'self'"
+		enhanced := enhanceCSPPolicy(policy)
+
+		for _, required := range []struct {
+			directive string
+			domain    string
+		}{
+			{"script-src", AliyunCaptchaStaticDomain},
+			{"style-src", AliyunCaptchaStaticDomain},
+			{"script-src", AliyunCaptchaCNStaticDomain},
+			{"style-src", AliyunCaptchaCNStaticDomain},
+			{"frame-src", AliyunCaptchaCNStaticDomain},
+			{"script-src", AliyunCaptchaSGPStaticDomain},
+			{"style-src", AliyunCaptchaSGPStaticDomain},
+			{"frame-src", AliyunCaptchaSGPStaticDomain},
+			{"connect-src", AliyunCaptchaAPIDomain},
+			{"connect-src", AliyunCaptchaAPIBackup},
+			{"connect-src", AliyunCaptchaDualAPIDomain},
+			{"connect-src", AliyunCaptchaDualAPIBackup},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(enhanced, required.directive, required.domain))
+		}
+	})
+
+	t.Run("does_not_duplicate_tencent_captcha_worker_source", func(t *testing.T) {
+		policy := "default-src 'self'; worker-src 'self' blob:; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "worker-src", TencentCaptchaWorkerSource))
+	})
+
+	t.Run("default_policy_carries_tencent_captcha_dynamic_domains", func(t *testing.T) {
+		for _, required := range []struct {
+			directive string
+			value     string
+		}{
+			{"script-src", TencentCaptchaCDNDomain},
+			{"script-src", TencentCaptchaGlobalDomain},
+			{"script-src", TencentCaptchaGlobalCDNDomain},
+			{"script-src", TencentCaptchaPrehandleDomain},
+			{"script-src", TencentCaptchaJQueryDomain},
+			{"connect-src", TencentCaptchaPrehandleDomain},
+			{"connect-src", TencentCaptchaRceDomain},
+			{"frame-src", TencentCaptchaGlobalDomain},
+			{"frame-src", TencentCaptchaPrehandleDomain},
+			{"worker-src", TencentCaptchaWorkerSource},
+		} {
+			assert.Equal(t, 1, countDirectiveValue(config.DefaultCSPPolicy, required.directive, required.value),
+				"DefaultCSPPolicy missing %s %s", required.directive, required.value)
+		}
 	})
 
 	t.Run("handles_policy_without_script_src", func(t *testing.T) {
@@ -359,6 +477,7 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 		assert.Equal(t, 1, countDirectiveValue(enhanced, "style-src", AirwallexDemoCheckoutDomain))
 		assert.Equal(t, 1, countDirectiveValue(enhanced, "frame-src", AirwallexDemoCheckoutDomain))
 	})
+
 }
 
 func countDirectiveValue(policy, directive, value string) int {
@@ -407,6 +526,15 @@ func TestAddToDirective(t *testing.T) {
 
 		assert.Contains(t, result, "script-src")
 		assert.Contains(t, result, "https://example.com")
+	})
+
+	t.Run("does_not_match_a_directive_name_suffix", func(t *testing.T) {
+		policy := "default-src 'none'; child-frame-src https://legacy.example.com"
+		result := addToDirective(policy, "frame-src", "'self'")
+
+		assert.Equal(t, 1, countDirectiveValue(result, "frame-src", "'self'"))
+		assert.Equal(t, 0, countDirectiveValue(result, "child-frame-src", "'self'"))
+		assert.Equal(t, 1, countDirectiveValue(result, "child-frame-src", "https://legacy.example.com"))
 	})
 }
 

@@ -4,12 +4,15 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/textproto"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -32,7 +35,7 @@ const (
 
 // DefaultCSPPolicy is the default Content-Security-Policy with nonce support
 // __CSP_NONCE__ will be replaced with actual nonce at request time by the SecurityHeaders middleware
-const DefaultCSPPolicy = "default-src 'self'; script-src 'self' __CSP_NONCE__ https://challenges.cloudflare.com https://static.cloudflareinsights.com https://*.stripe.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https:; frame-src https://challenges.cloudflare.com https://*.stripe.com https://checkout.airwallex.com https://checkout-demo.airwallex.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+const DefaultCSPPolicy = "default-src 'self'; worker-src 'self' blob:; script-src 'self' __CSP_NONCE__ https://challenges.cloudflare.com https://*.alicdn.com https://static.cloudflareinsights.com https://turing.captcha.qcloud.com https://turing.captcha.gtimg.com https://ca.turing.captcha.qcloud.com https://global.turing.captcha.gtimg.com https://www.tycaptcha.com https://cloudcache.tencentcs.com https://*.stripe.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; style-src 'self' 'unsafe-inline' https://*.captcha.gtimg.com https://fonts.googleapis.com https://*.alicdn.com https://static.airwallex.com https://checkout.airwallex.com https://static-demo.airwallex.com https://checkout-demo.airwallex.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://turing.captcha.qcloud.com https://www.tycaptcha.com https://rce.tencentrio.com https:; frame-src 'self' https://challenges.cloudflare.com https://turing.captcha.qcloud.com https://ca.turing.captcha.qcloud.com https://www.tycaptcha.com https://*.stripe.com https://checkout.airwallex.com https://checkout-demo.airwallex.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
 // UMQ（用户消息队列）模式常量
 const (
@@ -61,6 +64,10 @@ const (
 // 可通过 gateway.upstream_response_read_max_bytes 配置项覆盖。
 const DefaultUpstreamResponseReadMaxBytes int64 = 128 * 1024 * 1024
 
+// DefaultModelsListReadMaxBytes 上游模型列表响应体的默认读取上限。
+// 可通过 gateway.models_list_read_max_bytes 配置项覆盖。
+const DefaultModelsListReadMaxBytes int64 = 8 * 1024 * 1024
+
 type Config struct {
 	Server                  ServerConfig                  `mapstructure:"server"`
 	Log                     LogConfig                     `mapstructure:"log"`
@@ -73,6 +80,7 @@ type Config struct {
 	Ops                     OpsConfig                     `mapstructure:"ops"`
 	JWT                     JWTConfig                     `mapstructure:"jwt"`
 	Totp                    TotpConfig                    `mapstructure:"totp"`
+	WebAuthn                WebAuthnConfig                `mapstructure:"webauthn"`
 	LinuxDo                 LinuxDoConnectConfig          `mapstructure:"linuxdo_connect"`
 	WeChat                  WeChatConnectConfig           `mapstructure:"wechat_connect"`
 	OIDC                    OIDCConnectConfig             `mapstructure:"oidc_connect"`
@@ -84,6 +92,7 @@ type Config struct {
 	Pricing                 PricingConfig                 `mapstructure:"pricing"`
 	Gateway                 GatewayConfig                 `mapstructure:"gateway"`
 	APIKeyAuth              APIKeyAuthCacheConfig         `mapstructure:"api_key_auth_cache"`
+	APIKeyCreate            APIKeyCreateConfig            `mapstructure:"api_key_create"`
 	SubscriptionCache       SubscriptionCacheConfig       `mapstructure:"subscription_cache"`
 	SubscriptionMaintenance SubscriptionMaintenanceConfig `mapstructure:"subscription_maintenance"`
 	Dashboard               DashboardCacheConfig          `mapstructure:"dashboard_cache"`
@@ -91,13 +100,133 @@ type Config struct {
 	UsageCleanup            UsageCleanupConfig            `mapstructure:"usage_cleanup"`
 	Concurrency             ConcurrencyConfig             `mapstructure:"concurrency"`
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
+	SimpleMode              SimpleModeConfig              `mapstructure:"simple_mode" yaml:"simple_mode"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
+	CodexRadar              CodexRadarConfig              `mapstructure:"codex_radar"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	ModelTracing            ModelTracingConfig            `mapstructure:"model_tracing"`
+	Metrics                 MetricsConfig                 `mapstructure:"metrics"`
+	QuotaRecovery           QuotaRecoveryConfig           `mapstructure:"quota_recovery"`
+	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+
+	// Enforce only API-key spending windows in simple mode.
+	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
+}
+
+// SimpleModeConfig controls startup behavior in simple mode.
+type SimpleModeConfig struct {
+	AutoCreateDefaultGroups bool `mapstructure:"auto_create_default_groups" yaml:"auto_create_default_groups"`
+}
+
+// MetricsConfig controls the optional private Prometheus listener.
+type MetricsConfig struct {
+	Enabled      bool   `mapstructure:"enabled"`
+	PprofEnabled bool   `mapstructure:"pprof_enabled"`
+	Host         string `mapstructure:"host"`
+	Port         int    `mapstructure:"port"`
+	Path         string `mapstructure:"path"`
+}
+
+func (c MetricsConfig) Address() string {
+	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+}
+
+const (
+	ModelTracingDestinationLangfuse      = "langfuse"
+	ModelTracingDestinationOTLPCollector = "otlp_collector"
+	ModelTracingLangfuseDefaultPath      = "/api/public/otel/v1/traces"
+	ModelTracingOTLPCollectorDefaultPath = "/v1/traces"
+)
+
+func NormalizeModelTracingDestination(raw string) string {
+	destination := strings.ToLower(strings.TrimSpace(raw))
+	if destination == "" {
+		return ModelTracingDestinationLangfuse
+	}
+	return destination
+}
+
+func IsSupportedModelTracingDestination(destination string) bool {
+	return destination == ModelTracingDestinationLangfuse || destination == ModelTracingDestinationOTLPCollector
+}
+func ModelTracingDefaultPath(destination string) string {
+	if NormalizeModelTracingDestination(destination) == ModelTracingDestinationOTLPCollector {
+		return ModelTracingOTLPCollectorDefaultPath
+	}
+	return ModelTracingLangfuseDefaultPath
+}
+
+// NormalizeModelTracingEndpoint adds the destination's standard OTLP trace path
+// only when the administrator supplied an origin without a path. Explicit custom
+// paths, including "/", remain unchanged.
+func NormalizeModelTracingEndpoint(destination, raw string) string {
+	endpoint := strings.TrimSpace(raw)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.Path != "" {
+		return endpoint
+	}
+	u.Path = ModelTracingDefaultPath(destination)
+	return u.String()
+}
+
+// ModelTracingConfig 模型请求 OTLP 追踪配置（默认关闭）。
+type ModelTracingConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	Destination         string `mapstructure:"destination"`
+	Endpoint            string `mapstructure:"endpoint"`
+	PublicKey           string `mapstructure:"public_key"`
+	SecretKey           string `mapstructure:"secret_key"`
+	PromptMaxBytes      int    `mapstructure:"prompt_max_bytes"`
+	ResponseMaxBytes    int    `mapstructure:"response_max_bytes"`
+	MediaMaxBytes       int    `mapstructure:"media_max_bytes"`
+	CaptureMediaContent bool   `mapstructure:"capture_media_content"`
+	// SanitizationEnabled 控制捕获内容的凭据脱敏（URL 凭据、Authorization/
+	// Cookie 头、secret 键值）。指针语义：nil/未设置 = 开启（零值结构体与
+	// 运行时快照保持安全默认，向后兼容）；显式 false = 关闭脱敏，凭据可能
+	// 进入 Trace，数据 Owner 须在 Langfuse 侧负责清洗。
+	SanitizationEnabled *bool `mapstructure:"sanitization_enabled"`
+	// ExportTimeoutSeconds 是单批 OTLP 导出（含内部重试）的最大耗时阈值，
+	// 必须覆盖完整重试窗口，否则 Collector 短时拒绝后上游来不及重试即丢弃。
+	// <=0 时采用默认 60s。
+	ExportTimeoutSeconds int `mapstructure:"export_timeout_seconds"`
+	// ExportRetry 控制 OTLP exporter 对可重试错误的指数退避。这些阈值受
+	// ExportTimeoutSeconds 上界约束；超限后整批明确计入最终失败，保留有界。
+	ExportRetry ModelTracingExportRetryConfig `mapstructure:"export_retry"`
+	// ExportQueueSize 是 BatchSpanProcessor 的最大排队 spans 数；溢出后
+	// 最早入队的 spans 被丢弃并在 pending_or_dropped 中体现。<=0 采用默认。
+	ExportQueueSize int `mapstructure:"export_queue_size"`
+	// ExportBatchSize 是单批导出的最大 spans 数。<=0 采用默认。
+	ExportBatchSize int `mapstructure:"export_batch_size"`
+	// ExportBatchTimeoutMs 是 BatchSpanProcessor 强制 flush 间隔（毫秒）。<=0 采用默认。
+	ExportBatchTimeoutMs int `mapstructure:"export_batch_timeout_ms"`
+}
+
+// ModelTracingExportRetryConfig 描述 OTLP exporter 的有界指数退避。
+type ModelTracingExportRetryConfig struct {
+	// Enabled 关闭后单个 export 请求失败即计入最终失败，不再重试。
+	Enabled bool `mapstructure:"enabled"`
+	// InitialIntervalSeconds 首次失败后退避秒数。<=0 采用默认。
+	InitialIntervalSeconds int `mapstructure:"initial_interval_seconds"`
+	// MaxIntervalSeconds 退避上限秒数。<=0 采用默认。
+	MaxIntervalSeconds int `mapstructure:"max_interval_seconds"`
+	// MaxElapsedTimeSeconds 整批最多重试总耗时秒数，超出即丢弃。<=0 采用默认。
+	MaxElapsedTimeSeconds int `mapstructure:"max_elapsed_time_seconds"`
+}
+
+// PluginConfig 控制管理员手动上传的本地进程插件。
+// 默认不包含插件，也不允许安装未签名插件；TrustedPublishers 用于追加第三方发布者。
+type PluginConfig struct {
+	DataDir              string            `mapstructure:"data_dir"`
+	AllowUnsigned        bool              `mapstructure:"allow_unsigned"`
+	TrustedPublishers    map[string]string `mapstructure:"trusted_publishers"`
+	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
+	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
+	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
 }
 
 type LogConfig struct {
@@ -154,6 +283,16 @@ type GeminiTierQuotaConfig struct {
 	CooldownMinutes *int   `mapstructure:"cooldown_minutes" json:"cooldown_minutes"`
 }
 
+// CodexRadarConfig controls the server-side Codex Radar model IQ proxy.
+// API tokens are read only by the backend and are never exposed to clients.
+type CodexRadarConfig struct {
+	Enabled  bool          `mapstructure:"enabled"`
+	BaseURL  string        `mapstructure:"base_url"`
+	APIToken string        `mapstructure:"api_token"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
+}
+
 type UpdateConfig struct {
 	// ProxyURL 用于访问 GitHub 的代理地址
 	// 支持 http/https/socks5/socks5h 协议
@@ -179,6 +318,26 @@ type IdempotencyConfig struct {
 	// CleanupBatchSize 每次清理的最大记录数。
 	CleanupBatchSize int `mapstructure:"cleanup_batch_size"`
 }
+
+// QuotaRecoveryConfig controls the Hermes account-level quota reconciliation
+// runner in both standard and simple run modes. It is disabled by default
+// because checks call upstream APIs with real credentials. Hermes is supported
+// only in single-application-process deployments: its PostgreSQL advisory lock
+// prevents duplicate runners but cannot invalidate runtime blocks across
+// application processes.
+type QuotaRecoveryConfig struct {
+	Enabled         bool `mapstructure:"enabled"`
+	IntervalSeconds int  `mapstructure:"interval_seconds"`
+	BatchSize       int  `mapstructure:"batch_size"` // Database page size; a cycle scans all pages.
+	Concurrency     int  `mapstructure:"concurrency"`
+	TimeoutSeconds  int  `mapstructure:"timeout_seconds"`
+	JitterSeconds   int  `mapstructure:"jitter_seconds"`
+}
+
+// minQuotaRecoveryTimeoutSeconds leaves enough time for the complete OpenAI
+// recovery chain, which can make up to five serial upstream requests. A lower
+// deadline can expire after a reset credit is consumed but before verification.
+const minQuotaRecoveryTimeoutSeconds = 75
 
 type BatchImageConfig struct {
 	Enabled                           bool   `mapstructure:"enabled"`
@@ -650,6 +809,8 @@ type PricingConfig struct {
 	DataDir string `mapstructure:"data_dir"`
 	// 回退文件路径
 	FallbackFile string `mapstructure:"fallback_file"`
+	// 覆盖补丁文件路径（可选）：条目按字段浅合并覆盖目录/回退数据，优先级最高
+	OverrideFile string `mapstructure:"override_file"`
 	// 更新间隔（小时）
 	UpdateIntervalHours int `mapstructure:"update_interval_hours"`
 	// 哈希校验间隔（分钟）
@@ -684,6 +845,16 @@ type H2CConfig struct {
 type CORSConfig struct {
 	AllowedOrigins   []string `mapstructure:"allowed_origins"`
 	AllowCredentials bool     `mapstructure:"allow_credentials"`
+}
+
+// WebAuthnConfig configures this deployment as a WebAuthn relying party.
+// RPID and RPOrigins are security boundaries and must never be inferred from
+// untrusted request Host or Origin headers.
+type WebAuthnConfig struct {
+	Enabled       bool     `mapstructure:"enabled"`
+	RPDisplayName string   `mapstructure:"rp_display_name"`
+	RPID          string   `mapstructure:"rp_id"`
+	RPOrigins     []string `mapstructure:"rp_origins"`
 }
 
 const MaxForwardedClientIPHeaders = 16
@@ -819,6 +990,53 @@ type ProxyFallbackConfig struct {
 
 type ProxyProbeConfig struct {
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"` // 已禁用：禁止跳过 TLS 证书验证
+	// URLs 按优先级排列的自定义探测 URL 列表。
+	// 留空时使用内置默认列表（ip-api → ipify）。
+	// 某些 AI API 专用代理只允许访问特定域名，配置多个备选可提高探测成功率。
+	URLs []ProbeURLConfig `mapstructure:"urls"`
+}
+
+// ProbeURLConfig 描述一个探测端点及其响应解析方式。
+type ProbeURLConfig struct {
+	URL    string `mapstructure:"url"`
+	Parser string `mapstructure:"parser"` // "ip-api" / "ipify" / "chatgpt-trace"
+}
+
+func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	normalized := make([]ProbeURLConfig, 0, len(targets))
+	for i, target := range targets {
+		rawURL := strings.TrimSpace(target.URL)
+		parser := strings.ToLower(strings.TrimSpace(target.Parser))
+		if rawURL == "" {
+			return nil, fmt.Errorf("entry %d: url is required", i)
+		}
+		if parser == "" {
+			return nil, fmt.Errorf("entry %d: parser is required", i)
+		}
+		switch parser {
+		case "ip-api", "ipify", "chatgpt-trace":
+		default:
+			return nil, fmt.Errorf("entry %d: unsupported parser %q", i, target.Parser)
+		}
+
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Host == "" {
+			return nil, fmt.Errorf("entry %d: invalid url %q", i, target.URL)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("entry %d: url scheme must be http or https", i)
+		}
+
+		normalized = append(normalized, ProbeURLConfig{
+			URL:    rawURL,
+			Parser: parser,
+		})
+	}
+	return normalized, nil
 }
 
 type BillingConfig struct {
@@ -836,6 +1054,29 @@ type BillingConfig struct {
 	// UserPlatformQuotaSentinelTTLSeconds sentinel(无 limit 占位)entry 的 TTL,
 	// 显著短于 quota cache 默认 86400s 以控 Redis 内存;默认 3600=1h。
 	UserPlatformQuotaSentinelTTLSeconds int `mapstructure:"user_platform_quota_sentinel_ttl_seconds"`
+	// InflightReservation 余额模式在途请求预留（Redis），防止并发请求在预检时看到同一份余额而集体透支。
+	InflightReservation InflightReservationConfig `mapstructure:"inflight_reservation"`
+}
+
+// InflightReservationConfig 余额模式在途预留配置。
+// 准入时按 输入估算 + 输出单价 × max_tokens 估算单请求费用，在 Redis 中原子地
+// 校验 缓存余额 - 在途预留合计 >= 估算 后登记预留，请求结束（任意路径）释放。
+// 估算失败或 Redis 不可用时 fail-open，退回旧的仅余额 > 阈值检查。
+type InflightReservationConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// TTLSeconds 单条预留的最长存活时间；进程崩溃等泄漏的预留到期自动失效。
+	TTLSeconds int `mapstructure:"ttl_seconds"`
+	// DefaultMaxTokens 请求未携带 max_tokens 时用于估算的输出 token 数。
+	DefaultMaxTokens int `mapstructure:"default_max_tokens"`
+	// MaxOutputTokens 估算输出 token 的上限（max_tokens 超出时截断）。
+	MaxOutputTokens int `mapstructure:"max_output_tokens"`
+	// MaxInputTokens 输入 token 估算（请求体字节数 / 4）的上限。
+	MaxInputTokens int `mapstructure:"max_input_tokens"`
+	// MaxReservationUSD 单请求预留金额上限；0 表示不设上限。
+	MaxReservationUSD float64 `mapstructure:"max_reservation_usd"`
+	// FailClosedOnUnpriced 无法为请求估算费用（模型/分组/渠道均无定价）时是否拒绝请求。
+	// 默认 false：放行且不预留（fail-open，节流告警日志）。
+	FailClosedOnUnpriced bool `mapstructure:"fail_closed_on_unpriced"`
 }
 
 type CircuitBreakerConfig struct {
@@ -876,6 +1117,9 @@ type GatewayConfig struct {
 	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒），0表示无超时
 	// OpenAI/Codex 请求可能在上游排队较久；默认不使用通用响应头超时截断。
 	OpenAIResponseHeaderTimeout int `mapstructure:"openai_response_header_timeout"`
+	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
+	// A zero value uses the provider-safe default instead of the generic gateway timeout.
+	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -887,6 +1131,8 @@ type GatewayConfig struct {
 	TextMaxBodySize int64 `mapstructure:"text_max_body_size"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
 	UpstreamResponseReadMaxBytes int64 `mapstructure:"upstream_response_read_max_bytes"`
+	// 上游模型列表响应体读取上限（字节）
+	ModelsListReadMaxBytes int64 `mapstructure:"models_list_read_max_bytes"`
 	// 代理探测响应体读取上限（字节）
 	ProxyProbeResponseReadMaxBytes int64 `mapstructure:"proxy_probe_response_read_max_bytes"`
 	// Gemini 上游响应头调试日志开关（默认关闭，避免高频日志开销）
@@ -896,6 +1142,18 @@ type GatewayConfig struct {
 	// ForceCodexCLI: 强制将 OpenAI `/v1/responses` 请求按 Codex CLI 处理。
 	// 用于网关未透传/改写 User-Agent 时的兼容兜底（默认关闭，避免影响其他客户端）。
 	ForceCodexCLI bool `mapstructure:"force_codex_cli"`
+	// DisableCodexIdentityEnforcement: 关闭「强制统一 Codex 出站身份」。上游 /backend-api/codex
+	// 在容量紧张时按客户端身份分优先级降载，被降载的请求会拿到 HTTP 200 + 流内
+	// server_is_overloaded，该次请求失败。默认强制统一出口：所有 OAuth 出站的
+	// User-Agent / originator / version 都改写为网关规范身份，确保没有请求带着第三方或陈旧身份
+	// 出站。置 true 后退回「仅按最终 User-Agent 配对 originator」的收口语义，供上游策略变动时回滚。
+	//
+	// 取反义命名是为了让零值安全：该开关会发布为进程级快照，未经 viper 加载而手工构造的
+	// Config（测试、工具）其零值必须落在「强制统一开启」这一侧，否则会静默丢掉这层保护。
+	DisableCodexIdentityEnforcement bool `mapstructure:"disable_codex_identity_enforcement"`
+	// DisableCodexOriginatorNormalization: 关闭 originator 按最终 User-Agent 规范化。
+	// 与 DisableCodexIdentityEnforcement 独立；仅用于上游身份策略变化时回滚。
+	DisableCodexOriginatorNormalization bool `mapstructure:"disable_codex_originator_normalization"`
 	// CodexImageGenerationBridgeEnabled: 是否为 Codex `/v1/responses` 自动注入 image_generation 工具和桥接指令。
 	// 默认关闭，避免纯文本 Codex 请求被意外改写；显式携带 image_generation 工具的请求仍按分组能力转发。
 	CodexImageGenerationBridgeEnabled bool `mapstructure:"codex_image_generation_bridge_enabled"`
@@ -911,12 +1169,19 @@ type GatewayConfig struct {
 	// OpenAICompactModel: /responses/compact 上游使用的模型。
 	// compact 端点支持模型滞后于普通 /responses 时，可用该配置降级规避上游错误。
 	OpenAICompactModel string `mapstructure:"openai_compact_model"`
+	// OpenAICodexTicket: ChatGPT OAuth 账号按 (账号, 模型) 捕获 292 长度
+	// x-codex-turn-state，并在住宅 IP 业务请求中注入该头。默认关闭。
+	OpenAICodexTicket OpenAICodexTicketConfig `mapstructure:"openai_codex_ticket"`
 	// OpenAIWS: OpenAI Responses WebSocket 配置（默认开启，可按需回滚到 HTTP）
 	OpenAIWS GatewayOpenAIWSConfig `mapstructure:"openai_ws"`
+	// Live: ChatGPT Frameless Live 会话配置。
+	Live GatewayLiveConfig `mapstructure:"live"`
 	// OpenAIScheduler: OpenAI 高级调度器粘性逃逸配置
 	OpenAIScheduler GatewayOpenAISchedulerConfig `mapstructure:"openai_scheduler"`
 	// OpenAIHTTP2: OpenAI HTTP 上游协议策略（默认启用 HTTP/2，可按代理能力回退 HTTP/1.1）
 	OpenAIHTTP2 GatewayOpenAIHTTP2Config `mapstructure:"openai_http2"`
+	// OpenAIProxyStreamCircuit: Responses SSE 代理断流熔断策略。
+	OpenAIProxyStreamCircuit GatewayOpenAIProxyStreamCircuitConfig `mapstructure:"openai_proxy_stream_circuit"`
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
 	ImageConcurrency ImageConcurrencyConfig `mapstructure:"image_concurrency"`
 
@@ -995,6 +1260,60 @@ type GatewayConfig struct {
 	// UserMessageQueue: 用户消息串行队列配置
 	// 对 role:"user" 的真实用户消息实施账号级串行化 + RPM 自适应延迟
 	UserMessageQueue UserMessageQueueConfig `mapstructure:"user_message_queue"`
+
+	// Grok: Grok/xAI gateway scheduling and free-tier soft-gate settings.
+	Grok GatewayGrokConfig `mapstructure:"grok"`
+
+	// CNProviders: 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）的余额检测配置。
+	// 仅作用于 payg（按量付费）账号：周期探测余额，低于阈值则临时停调。
+	CNProviders GatewayCNProvidersConfig `mapstructure:"cn_providers"`
+}
+
+// GatewayGrokConfig holds Grok-specific gateway scheduling knobs.
+//
+// Free-quota soft gate keys (gateway.grok.*):
+//   - free_quota_soft_gate_enabled: enable local rolling-window scheduling guard for
+//     OAuth accounts whose subscription_tier/plan_type is explicitly "free".
+//     Default true is safe only because free-tier detection is strict (unknown/paid fail open).
+//   - free_quota_token_limit: nominal rolling-window token allowance.
+//   - free_quota_soft_gate_percent: stop new scheduling before the nominal limit (1-100).
+//   - free_quota_window_hours: local usage rolling window length in hours.
+//   - free_quota_stats_cache_seconds: cache TTL for free-tier usage stats
+//     (hot path never blocks on DB; misses fail open and refresh in background).
+type GatewayGrokConfig struct {
+	// PasswordAuthEnabled controls the optional password-to-SSO OAuth flow.
+	// It defaults to false and must be explicitly enabled by the operator.
+	// When true, POST /admin/grok/oauth/password is functional (not ignored).
+	PasswordAuthEnabled bool `mapstructure:"password_auth_enabled"`
+	// FreeQuotaSoftGateEnabled enables a local rolling-window scheduling guard
+	// for explicitly free Grok OAuth accounts only.
+	FreeQuotaSoftGateEnabled bool `mapstructure:"free_quota_soft_gate_enabled"`
+	// FreeQuotaTokenLimit is the nominal rolling-window allowance.
+	FreeQuotaTokenLimit int64 `mapstructure:"free_quota_token_limit"`
+	// FreeQuotaSoftGatePercent stops new scheduling before the nominal limit.
+	FreeQuotaSoftGatePercent int `mapstructure:"free_quota_soft_gate_percent"`
+	// FreeQuotaWindowHours controls the local rolling usage window.
+	FreeQuotaWindowHours int `mapstructure:"free_quota_window_hours"`
+	// FreeQuotaStatsCacheSeconds is the soft-gate stats cache TTL. Hot path never
+	// waits on usage_logs; misses fail open and refresh asynchronously.
+	FreeQuotaStatsCacheSeconds int `mapstructure:"free_quota_stats_cache_seconds"`
+}
+
+// GatewayCNProvidersConfig 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）的余额检测配置。
+//
+// 仅作用于 payg（按量付费）账号（kimi/deepseek 有公开余额端点；zhipu 无，仅靠响应式 429/402）。
+//   - balance_check_enabled: 是否启用周期余额检测（默认 true）
+//   - balance_threshold: 余额低于此值（账户货币单位，默认 0.5）触发临时停调
+//   - balance_check_interval_minutes: 余额检测周期（分钟，默认 10）
+type GatewayCNProvidersConfig struct {
+	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
+	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
+	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
+}
+
+type GatewayLiveConfig struct {
+	// MaxSessionDurationSeconds 是 Live 会话的硬上限。
+	MaxSessionDurationSeconds int `mapstructure:"max_session_duration_seconds"`
 }
 
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。
@@ -1010,6 +1329,19 @@ type GatewayOpenAIHTTP2Config struct {
 	FallbackWindowSeconds int `mapstructure:"fallback_window_seconds"`
 	// FallbackTTLSeconds: 触发后回退 HTTP/1.1 的持续时间（秒）
 	FallbackTTLSeconds int `mapstructure:"fallback_ttl_seconds"`
+}
+
+// GatewayOpenAIProxyStreamCircuitConfig controls the bounded, in-process
+// proxy-ID circuit used for incomplete OpenAI Responses SSE streams.
+type GatewayOpenAIProxyStreamCircuitConfig struct {
+	// Disabled: 完全关闭代理断流熔断（默认开启）。
+	Disabled bool `mapstructure:"disabled"`
+	// FailureThreshold: 统计窗口内多少次断流后隔离代理。
+	FailureThreshold int `mapstructure:"failure_threshold"`
+	// WindowSeconds: 断流统计窗口（秒）。
+	WindowSeconds int `mapstructure:"window_seconds"`
+	// TTLSeconds: 代理隔离持续时间（秒）。
+	TTLSeconds int `mapstructure:"ttl_seconds"`
 }
 
 // UserMessageQueueConfig 用户消息串行队列配置
@@ -1052,6 +1384,21 @@ func (c *UserMessageQueueConfig) GetEffectiveMode() string {
 		return UMQModeSerialize // 向后兼容
 	}
 	return ""
+}
+
+// OpenAICodexTicketConfig 控制 ChatGPT OAuth 的 x-codex-turn-state 门票。
+// 打票走 harvest_proxy_url（SOCKS），业务出站仍用账号住宅 proxy_id，只替换该请求头。
+// 门票默认有效 3600 秒，临近过期前 refresh_before_seconds 重新打票。
+type OpenAICodexTicketConfig struct {
+	Enabled                      bool     `mapstructure:"enabled"`
+	TargetLength                 int      `mapstructure:"target_length"`
+	TTLSeconds                   int      `mapstructure:"ttl_seconds"`
+	RefreshBeforeSeconds         int      `mapstructure:"refresh_before_seconds"`
+	HarvestProxyURL              string   `mapstructure:"harvest_proxy_url"`
+	HarvestProbeIntervalSeconds  int      `mapstructure:"harvest_probe_interval_seconds"`
+	HarvestAttemptTimeoutSeconds int      `mapstructure:"harvest_attempt_timeout_seconds"`
+	FailClosed                   bool     `mapstructure:"fail_closed"`
+	Models                       []string `mapstructure:"models"`
 }
 
 // DefaultOpenAIWSClientFirstMessageTimeoutSeconds preserves the legacy ingress deadline.
@@ -1110,11 +1457,15 @@ type GatewayOpenAIWSConfig struct {
 	MaxConnsPerAccount int `mapstructure:"max_conns_per_account"`
 	MinIdlePerAccount  int `mapstructure:"min_idle_per_account"`
 	MaxIdlePerAccount  int `mapstructure:"max_idle_per_account"`
-	// DynamicMaxConnsByAccountConcurrencyEnabled: 是否按账号并发动态计算连接池上限
+	// DynamicMaxConnsByAccountConcurrencyEnabled: 是否按账号并发动态计算连接池上限。
+	// 旧版及 mode_router_v2 的 ctx_pool 共用此开关和类型系数；关闭后使用 max_conns_per_account。
+	// mode_router_v2 下并发数 <= 0 的账号仍不可调度。
 	DynamicMaxConnsByAccountConcurrencyEnabled bool `mapstructure:"dynamic_max_conns_by_account_concurrency_enabled"`
-	// OAuthMaxConnsFactor: OAuth 账号连接池系数（effective=ceil(concurrency*factor)）
+	// OAuthMaxConnsFactor: OAuth 账号连接池系数（effective=ceil(concurrency*factor)，再受 max_conns_per_account 封顶）。
+	// ctx_pool 接入下每个客户端会话在整个生命周期（含轮次之间）持有一条上游连接，此上限限制的是同时持有连接的会话数，
+	// 在飞请求数另由账号并发槽限制；系数 1.0 会让存活会话数一到并发数就返回 1013 busy，默认 5.0。
 	OAuthMaxConnsFactor float64 `mapstructure:"oauth_max_conns_factor"`
-	// APIKeyMaxConnsFactor: API Key 账号连接池系数（effective=ceil(concurrency*factor)）
+	// APIKeyMaxConnsFactor: API Key 账号连接池系数，含义与 OAuthMaxConnsFactor 相同，默认 5.0。
 	APIKeyMaxConnsFactor  float64 `mapstructure:"apikey_max_conns_factor"`
 	DialTimeoutSeconds    int     `mapstructure:"dial_timeout_seconds"`
 	ReadTimeoutSeconds    int     `mapstructure:"read_timeout_seconds"`
@@ -1449,10 +1800,10 @@ type OpsCleanupConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	Schedule string `mapstructure:"schedule"`
 
-	// Retention days (0 disables that cleanup target).
-	//
-	// vNext requirement: default 30 days across ops datasets.
+	// Retention days. Error and metrics targets accept 0 as an explicit truncate;
+	// system logs require a positive value because their runtime setting is bounded.
 	ErrorLogRetentionDays      int `mapstructure:"error_log_retention_days"`
+	SystemLogRetentionDays     int `mapstructure:"system_log_retention_days"`
 	MinuteMetricsRetentionDays int `mapstructure:"minute_metrics_retention_days"`
 	HourlyMetricsRetentionDays int `mapstructure:"hourly_metrics_retention_days"`
 }
@@ -1517,6 +1868,14 @@ type APIKeyAuthCacheConfig struct {
 	Singleflight       bool                   `mapstructure:"singleflight"`
 	LookupConcurrency  int                    `mapstructure:"lookup_concurrency"`
 	InvalidAbuse       InvalidAuthAbuseConfig `mapstructure:"invalid_abuse"`
+}
+
+// APIKeyCreateConfig 用户创建 API Key 的防滥用限制（0 表示不限制）
+type APIKeyCreateConfig struct {
+	// MaxActivePerUser 单个用户同时存在（未删除）的 API Key 上限
+	MaxActivePerUser int `mapstructure:"max_active_per_user"`
+	// MaxPerUserPerHour 单个用户每小时可创建的 API Key 次数（删除不返还次数）
+	MaxPerUserPerHour int `mapstructure:"max_per_user_per_hour"`
 }
 
 type InvalidAuthAbuseConfig struct {
@@ -1620,26 +1979,20 @@ func LoadForBootstrap() (*Config, error) {
 func load(allowMissingJWTSecret bool) (*Config, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
-
-	// Add config paths in priority order
-	// 1. DATA_DIR environment variable (highest priority)
-	if dataDir := os.Getenv("DATA_DIR"); dataDir != "" {
-		viper.AddConfigPath(dataDir)
-	}
-	// 2. Docker data directory
-	viper.AddConfigPath("/app/data")
-	// 3. Current directory
-	viper.AddConfigPath(".")
-	// 4. Config subdirectory
-	viper.AddConfigPath("./config")
-	// 5. System config directory
-	viper.AddConfigPath("/etc/sub2api")
+	configureConfigSource(viper.SetConfigFile, viper.AddConfigPath)
 
 	// 环境变量支持
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	if tz, ok := os.LookupEnv("TZ"); ok && strings.TrimSpace(tz) != "" {
+		// AutomaticEnv 会先把 timezone 映射到 TIMEZONE；显式 Set 保证标准 TZ 变量优先。
+		viper.Set("timezone", strings.TrimSpace(tz))
+	}
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
+	}
+	if err := viper.BindEnv("codex_radar.api_token", "CODEX_RADAR_API_TOKEN"); err != nil {
+		return nil, fmt.Errorf("bind CODEX_RADAR_API_TOKEN: %w", err)
 	}
 
 	// 默认值
@@ -1686,6 +2039,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Server.Mode = "debug"
 	}
 	cfg.Server.FrontendURL = strings.TrimSpace(cfg.Server.FrontendURL)
+	normalizeModelTracingConfig(&cfg.ModelTracing)
+	cfg.Metrics.Host = strings.TrimSpace(cfg.Metrics.Host)
+	cfg.Metrics.Path = strings.TrimSpace(cfg.Metrics.Path)
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
 	cfg.LinuxDo.ClientID = strings.TrimSpace(cfg.LinuxDo.ClientID)
 	cfg.LinuxDo.ClientSecret = strings.TrimSpace(cfg.LinuxDo.ClientSecret)
@@ -1808,8 +2164,26 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	return &cfg, nil
 }
 
+func configureConfigSource(setConfigFile, addConfigPath func(string)) {
+	if configFile := strings.TrimSpace(os.Getenv("CONFIG_FILE")); configFile != "" {
+		setConfigFile(configFile)
+		return
+	}
+
+	// Add config paths in priority order.
+	if dataDir := strings.TrimSpace(os.Getenv("DATA_DIR")); dataDir != "" {
+		addConfigPath(dataDir)
+	}
+	addConfigPath("/app/data")
+	addConfigPath(".")
+	addConfigPath("./config")
+	addConfigPath("/etc/sub2api")
+}
+
 func setDefaults() {
 	viper.SetDefault("run_mode", RunModeStandard)
+	viper.SetDefault("simple_mode.auto_create_default_groups", true)
+	viper.SetDefault("simple_mode_key_rate_limit_enabled", false)
 
 	// Server
 	viper.SetDefault("server.host", "0.0.0.0")
@@ -1828,6 +2202,13 @@ func setDefaults() {
 	viper.SetDefault("server.h2c.max_read_frame_size", 1<<20)              // 1MB（够用）
 	viper.SetDefault("server.h2c.max_upload_buffer_per_connection", 2<<20) // 2MB
 	viper.SetDefault("server.h2c.max_upload_buffer_per_stream", 512<<10)   // 512KB
+
+	// Private Prometheus listener (disabled and loopback-bound by default).
+	viper.SetDefault("metrics.enabled", false)
+	viper.SetDefault("metrics.pprof_enabled", false)
+	viper.SetDefault("metrics.host", "127.0.0.1")
+	viper.SetDefault("metrics.port", 9091)
+	viper.SetDefault("metrics.path", "/metrics")
 
 	// Log
 	viper.SetDefault("log.level", "info")
@@ -1852,14 +2233,25 @@ func setDefaults() {
 	viper.SetDefault("cors.allowed_origins", []string{})
 	viper.SetDefault("cors.allow_credentials", true)
 
+	// WebAuthn / Passkeys are opt-in because every deployment must explicitly
+	// declare its relying-party domain and trusted browser origins.
+	viper.SetDefault("webauthn.enabled", false)
+	viper.SetDefault("webauthn.rp_display_name", "Sub2API")
+	viper.SetDefault("webauthn.rp_id", "")
+	viper.SetDefault("webauthn.rp_origins", []string{})
+
 	// Security
 	viper.SetDefault("security.url_allowlist.enabled", false)
 	viper.SetDefault("security.url_allowlist.upstream_hosts", []string{
 		"api.openai.com",
 		"api.anthropic.com",
 		"api.kimi.com",
+		"api.moonshot.ai",
+		"api.moonshot.cn",
 		"open.bigmodel.cn",
-		"api.minimaxi.com",
+		"api.minimaxi.com", // MiniMax CN quota + inference
+		"api.minimax.io",   // MiniMax intl; frozen allowlists must add this host to use the intl site
+		"opencode.ai",
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"*.openai.azure.com",
@@ -1875,11 +2267,11 @@ func setDefaults() {
 	viper.SetDefault("security.response_headers.force_remove", []string{})
 	viper.SetDefault("security.csp.enabled", true)
 	viper.SetDefault("security.csp.policy", DefaultCSPPolicy)
-	viper.SetDefault("security.proxy_probe.insecure_skip_verify", false)
 	viper.SetDefault("security.trust_forwarded_ip_for_api_key_acl", true)
 
 	// Security - disable direct fallback on proxy error
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
+	viper.SetDefault("security.proxy_probe.insecure_skip_verify", false)
 
 	// Billing
 	viper.SetDefault("billing.circuit_breaker.enabled", true)
@@ -1889,6 +2281,13 @@ func setDefaults() {
 	viper.SetDefault("billing.minimum_balance_reserve", 0.000001)
 	viper.SetDefault("billing.user_platform_quota_cache_ttl_seconds", 86400)
 	viper.SetDefault("billing.user_platform_quota_sentinel_ttl_seconds", 3600)
+	viper.SetDefault("billing.inflight_reservation.enabled", true)
+	viper.SetDefault("billing.inflight_reservation.ttl_seconds", 900)
+	viper.SetDefault("billing.inflight_reservation.default_max_tokens", 8192)
+	viper.SetDefault("billing.inflight_reservation.max_output_tokens", 128000)
+	viper.SetDefault("billing.inflight_reservation.max_input_tokens", 200000)
+	viper.SetDefault("billing.inflight_reservation.max_reservation_usd", 0)
+	viper.SetDefault("billing.inflight_reservation.fail_closed_on_unpriced", false)
 
 	// Turnstile
 	viper.SetDefault("turnstile.required", false)
@@ -2039,6 +2438,13 @@ func setDefaults() {
 	viper.SetDefault("batch_image.vertex_batch_prediction_base_url", "")
 	viper.SetDefault("batch_image.vertex_gcs_base_url", "")
 
+	// Codex Radar model IQ proxy
+	viper.SetDefault("codex_radar.enabled", false)
+	viper.SetDefault("codex_radar.base_url", "https://codexradar.com/api/v1/current")
+	viper.SetDefault("codex_radar.api_token", "")
+	viper.SetDefault("codex_radar.timeout", 15*time.Second)
+	viper.SetDefault("codex_radar.cache_ttl", 5*time.Minute)
+
 	// Image storage (async image task result offload to S3-compatible object storage)
 	viper.SetDefault("image_storage.enabled", false)
 	viper.SetDefault("image_storage.region", "auto")
@@ -2063,6 +2469,7 @@ func setDefaults() {
 	viper.SetDefault("ops.cleanup.schedule", "0 2 * * *")
 	// Retention days: vNext defaults to 30 days across ops datasets.
 	viper.SetDefault("ops.cleanup.error_log_retention_days", 30)
+	viper.SetDefault("ops.cleanup.system_log_retention_days", 30)
 	viper.SetDefault("ops.cleanup.minute_metrics_retention_days", 30)
 	viper.SetDefault("ops.cleanup.hourly_metrics_retention_days", 30)
 	viper.SetDefault("ops.aggregation.enabled", true)
@@ -2094,13 +2501,22 @@ func setDefaults() {
 	viper.SetDefault("rate_limit.overload_cooldown_minutes", 10)
 	viper.SetDefault("rate_limit.oauth_401_cooldown_minutes", 10)
 
-	// Pricing - 从 model-price-repo 同步模型定价和上下文窗口数据（固定到 commit，避免分支漂移）
+	// Pricing - 从 model-price-repo main 分支同步模型定价和上下文窗口数据
 	viper.SetDefault("pricing.remote_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json")
 	viper.SetDefault("pricing.hash_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256")
 	viper.SetDefault("pricing.data_dir", "./data")
 	viper.SetDefault("pricing.fallback_file", "./resources/model-pricing/model_prices_and_context_window.json")
+	viper.SetDefault("pricing.override_file", "")
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
+
+	// 本地进程插件。插件必须由管理员手动上传，项目默认不携带任何插件能力。
+	viper.SetDefault("plugins.data_dir", "")
+	viper.SetDefault("plugins.allow_unsigned", false)
+	viper.SetDefault("plugins.trusted_publishers", map[string]string{})
+	viper.SetDefault("plugins.max_upload_bytes", int64(128*1024*1024))
+	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
+	viper.SetDefault("plugins.start_timeout_seconds", 15)
 
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")
@@ -2118,6 +2534,8 @@ func setDefaults() {
 	viper.SetDefault("api_key_auth_cache.invalid_abuse.window_seconds", 60)
 	viper.SetDefault("api_key_auth_cache.invalid_abuse.block_seconds", 60)
 	viper.SetDefault("api_key_auth_cache.invalid_abuse.capacity", 16384)
+	viper.SetDefault("api_key_create.max_active_per_user", 200)
+	viper.SetDefault("api_key_create.max_per_user_per_hour", 60)
 
 	// Subscription auth L1 cache
 	viper.SetDefault("subscription_cache.l1_size", 16384)
@@ -2160,9 +2578,18 @@ func setDefaults() {
 	viper.SetDefault("idempotency.cleanup_interval_seconds", 60)
 	viper.SetDefault("idempotency.cleanup_batch_size", 500)
 
+	// Hermes account quota recovery. Opt-in because checks contact upstream.
+	viper.SetDefault("quota_recovery.enabled", false)
+	viper.SetDefault("quota_recovery.interval_seconds", 86400)
+	viper.SetDefault("quota_recovery.batch_size", 50)
+	viper.SetDefault("quota_recovery.concurrency", 3)
+	viper.SetDefault("quota_recovery.timeout_seconds", minQuotaRecoveryTimeoutSeconds)
+	viper.SetDefault("quota_recovery.jitter_seconds", 10)
+
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
+	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
@@ -2172,9 +2599,21 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches", 10)
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
+	viper.SetDefault("gateway.disable_codex_identity_enforcement", false)
+	viper.SetDefault("gateway.disable_codex_originator_normalization", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
-	viper.SetDefault("gateway.openai_compact_model", "gpt-5.4")
+	viper.SetDefault("gateway.openai_compact_model", "gpt-5.5")
+	viper.SetDefault("gateway.openai_codex_ticket.enabled", false)
+	viper.SetDefault("gateway.openai_codex_ticket.target_length", 292)
+	viper.SetDefault("gateway.openai_codex_ticket.ttl_seconds", 3600)
+	viper.SetDefault("gateway.openai_codex_ticket.refresh_before_seconds", 600)
+	viper.SetDefault("gateway.openai_codex_ticket.harvest_proxy_url", "")
+	viper.SetDefault("gateway.openai_codex_ticket.harvest_probe_interval_seconds", 6)
+	viper.SetDefault("gateway.openai_codex_ticket.harvest_attempt_timeout_seconds", 25)
+	viper.SetDefault("gateway.openai_codex_ticket.fail_closed", true)
+	viper.SetDefault("gateway.openai_codex_ticket.models", []string{"gpt-6-astra", "gpt-5.6-sol"})
+	viper.SetDefault("gateway.live.max_session_duration_seconds", 3600)
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)
 	viper.SetDefault("gateway.openai_ws.mode_router_v2_enabled", false)
@@ -2199,8 +2638,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.min_idle_per_account", 4)
 	viper.SetDefault("gateway.openai_ws.max_idle_per_account", 12)
 	viper.SetDefault("gateway.openai_ws.dynamic_max_conns_by_account_concurrency_enabled", true)
-	viper.SetDefault("gateway.openai_ws.oauth_max_conns_factor", 1.0)
-	viper.SetDefault("gateway.openai_ws.apikey_max_conns_factor", 1.0)
+	viper.SetDefault("gateway.openai_ws.oauth_max_conns_factor", 5.0)
+	viper.SetDefault("gateway.openai_ws.apikey_max_conns_factor", 5.0)
 	viper.SetDefault("gateway.openai_ws.dial_timeout_seconds", 10)
 	viper.SetDefault("gateway.openai_ws.read_timeout_seconds", 900)
 	viper.SetDefault("gateway.openai_ws.write_timeout_seconds", 120)
@@ -2238,6 +2677,23 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_http2.fallback_error_threshold", 2)
 	viper.SetDefault("gateway.openai_http2.fallback_window_seconds", 60)
 	viper.SetDefault("gateway.openai_http2.fallback_ttl_seconds", 600)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.disabled", false)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.failure_threshold", 2)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.window_seconds", 60)
+	viper.SetDefault("gateway.openai_proxy_stream_circuit.ttl_seconds", 600)
+	// Grok free-tier local soft gate (scheduler-only; admin QueryQuota does not use this).
+	// Enabled by default because free detection requires an explicit free tier marker.
+	viper.SetDefault("gateway.grok.free_quota_soft_gate_enabled", true)
+	viper.SetDefault("gateway.grok.password_auth_enabled", false)
+	// Free soft-gate nominal limit: 500k tokens / rolling 24h (operator policy).
+	viper.SetDefault("gateway.grok.free_quota_token_limit", int64(500_000))
+	viper.SetDefault("gateway.grok.free_quota_soft_gate_percent", 95)
+	viper.SetDefault("gateway.grok.free_quota_window_hours", 24)
+	viper.SetDefault("gateway.grok.free_quota_stats_cache_seconds", 60)
+	// 国产供应商余额检测（kimi/deepseek payg；zhipu 无余额端点，仅靠响应式 429/402）。
+	viper.SetDefault("gateway.cn_providers.balance_check_enabled", true)
+	viper.SetDefault("gateway.cn_providers.balance_threshold", 0.5)
+	viper.SetDefault("gateway.cn_providers.balance_check_interval_minutes", 10)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
 	viper.SetDefault("gateway.image_concurrency.overflow_mode", ImageConcurrencyOverflowModeReject)
@@ -2248,6 +2704,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
 	viper.SetDefault("gateway.upstream_response_read_max_bytes", DefaultUpstreamResponseReadMaxBytes)
+	viper.SetDefault("gateway.models_list_read_max_bytes", DefaultModelsListReadMaxBytes)
 	viper.SetDefault("gateway.proxy_probe_response_read_max_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
@@ -2341,6 +2798,8 @@ func setDefaults() {
 	viper.SetDefault("subscription_maintenance.worker_count", 2)
 	viper.SetDefault("subscription_maintenance.queue_size", 1024)
 
+	setModelTracingDefaults()
+
 	setEnvReachableDefaults()
 }
 
@@ -2432,6 +2891,38 @@ func (c *Config) Validate() error {
 	}
 	c.Security.ForwardedClientIPHeaders = forwardedClientIPHeaders
 	c.SetForwardedClientIPSettings(c.Security.TrustForwardedIPForAPIKeyACL, forwardedClientIPHeaders)
+	if c.Metrics.PprofEnabled && !c.Metrics.Enabled {
+		return fmt.Errorf("metrics.pprof_enabled requires metrics.enabled")
+	}
+	if c.Metrics.Enabled {
+		if net.ParseIP(c.Metrics.Host) == nil {
+			return fmt.Errorf("metrics.host must be an IP address")
+		}
+		if c.Metrics.Port < 1 || c.Metrics.Port > 65535 {
+			return fmt.Errorf("metrics.port must be between 1 and 65535")
+		}
+		if c.Metrics.Path == "" || c.Metrics.Path[0] != '/' || c.Metrics.Path == "/" || strings.HasSuffix(c.Metrics.Path, "/") || strings.ContainsAny(c.Metrics.Path, "?#") {
+			return fmt.Errorf("metrics.path must be an exact non-root HTTP path without a trailing slash, query, or fragment")
+		}
+		if c.Metrics.PprofEnabled &&
+			(c.Metrics.Path == "/debug/pprof" || strings.HasPrefix(c.Metrics.Path, "/debug/pprof/")) {
+			return fmt.Errorf("metrics.path must not overlap /debug/pprof when metrics.pprof_enabled is true")
+		}
+	}
+	proxyProbeURLs, err := normalizeProxyProbeURLs(c.Security.ProxyProbe.URLs)
+	if err != nil {
+		return fmt.Errorf("security.proxy_probe.urls: %w", err)
+	}
+	c.Security.ProxyProbe.URLs = proxyProbeURLs
+	if c.Plugins.MaxUploadBytes <= 0 || c.Plugins.MaxUploadBytes > 1024*1024*1024 {
+		return fmt.Errorf("plugins.max_upload_bytes must be between 1 and 1073741824")
+	}
+	if c.Plugins.MaxUncompressedBytes < c.Plugins.MaxUploadBytes || c.Plugins.MaxUncompressedBytes > 2*1024*1024*1024 {
+		return fmt.Errorf("plugins.max_uncompressed_bytes must be between max_upload_bytes and 2147483648")
+	}
+	if c.Plugins.StartTimeoutSeconds < 1 || c.Plugins.StartTimeoutSeconds > 120 {
+		return fmt.Errorf("plugins.start_timeout_seconds must be between 1 and 120")
+	}
 	if c.Server.ReadHeaderTimeout < 1 || c.Server.ReadHeaderTimeout > 60 {
 		return fmt.Errorf("server.read_header_timeout must be between 1 and 60 seconds")
 	}
@@ -2460,6 +2951,12 @@ func (c *Config) Validate() error {
 		if c.Server.H2C.MaxUploadBufferPerStream <= 0 {
 			return fmt.Errorf("server.h2c.max_upload_buffer_per_stream must be positive")
 		}
+	}
+	if c.APIKeyCreate.MaxActivePerUser < 0 {
+		return fmt.Errorf("api_key_create.max_active_per_user must be non-negative")
+	}
+	if c.APIKeyCreate.MaxPerUserPerHour < 0 {
+		return fmt.Errorf("api_key_create.max_per_user_per_hour must be non-negative")
 	}
 	if c.APIKeyAuth.InvalidAbuse.Enabled {
 		if c.APIKeyAuth.InvalidAbuse.Threshold < 10 {
@@ -2563,6 +3060,43 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("server.frontend_url invalid: must not include userinfo")
 		}
 		warnIfInsecureURL("server.frontend_url", c.Server.FrontendURL)
+	}
+	if c.WebAuthn.Enabled {
+		c.WebAuthn.RPDisplayName = strings.TrimSpace(c.WebAuthn.RPDisplayName)
+		c.WebAuthn.RPID = strings.ToLower(strings.TrimSpace(c.WebAuthn.RPID))
+		c.WebAuthn.RPOrigins = normalizeStringSlice(c.WebAuthn.RPOrigins)
+		if c.WebAuthn.RPDisplayName == "" {
+			return fmt.Errorf("webauthn.rp_display_name is required when passkeys are enabled")
+		}
+		if c.WebAuthn.RPID == "" {
+			return fmt.Errorf("webauthn.rp_id is required when passkeys are enabled")
+		}
+		if strings.Contains(c.WebAuthn.RPID, "://") || strings.ContainsAny(c.WebAuthn.RPID, "/:") {
+			return fmt.Errorf("webauthn.rp_id must be a domain without scheme, port, or path")
+		}
+		if len(c.WebAuthn.RPOrigins) == 0 {
+			return fmt.Errorf("webauthn.rp_origins must contain at least one origin when passkeys are enabled")
+		}
+		for i, origin := range c.WebAuthn.RPOrigins {
+			u, err := url.Parse(origin)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return fmt.Errorf("webauthn.rp_origins contains invalid origin %q", origin)
+			}
+			if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+				return fmt.Errorf("webauthn.rp_origins entry %q must not include userinfo, path, query, or fragment", origin)
+			}
+			u.Scheme = strings.ToLower(u.Scheme)
+			u.Host = strings.ToLower(u.Host)
+			host := strings.ToLower(u.Hostname())
+			localDevelopment := host == "localhost" || host == "127.0.0.1" || host == "::1"
+			if u.Scheme != "https" && (u.Scheme != "http" || !localDevelopment) {
+				return fmt.Errorf("webauthn.rp_origins entry %q must use HTTPS (HTTP is allowed only for localhost)", origin)
+			}
+			if host != c.WebAuthn.RPID && !strings.HasSuffix(host, "."+c.WebAuthn.RPID) {
+				return fmt.Errorf("webauthn.rp_origins entry %q is not within relying party ID %q", origin, c.WebAuthn.RPID)
+			}
+			c.WebAuthn.RPOrigins[i] = u.Scheme + "://" + u.Host
+		}
 	}
 	if c.JWT.ExpireHour <= 0 {
 		return fmt.Errorf("jwt.expire_hour must be positive")
@@ -2774,6 +3308,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Billing.MinimumBalanceReserve < 0 {
 		return fmt.Errorf("billing.minimum_balance_reserve must be non-negative")
+	}
+	if c.Billing.InflightReservation.TTLSeconds < 0 || c.Billing.InflightReservation.DefaultMaxTokens < 0 ||
+		c.Billing.InflightReservation.MaxOutputTokens < 0 || c.Billing.InflightReservation.MaxInputTokens < 0 ||
+		c.Billing.InflightReservation.MaxReservationUSD < 0 {
+		return fmt.Errorf("billing.inflight_reservation values must be non-negative")
 	}
 	if c.Database.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be positive")
@@ -2997,6 +3536,30 @@ func (c *Config) Validate() error {
 	if c.Idempotency.CleanupBatchSize <= 0 {
 		return fmt.Errorf("idempotency.cleanup_batch_size must be positive")
 	}
+	if c.QuotaRecovery.Enabled {
+		if c.Database.MaxOpenConns < 2 {
+			return fmt.Errorf("quota_recovery requires database.max_open_conns >= 2")
+		}
+		if c.QuotaRecovery.IntervalSeconds <= 0 {
+			return fmt.Errorf("quota_recovery.interval_seconds must be positive")
+		}
+		if c.QuotaRecovery.BatchSize <= 0 {
+			return fmt.Errorf("quota_recovery.batch_size must be positive")
+		}
+		if c.QuotaRecovery.Concurrency <= 0 {
+			return fmt.Errorf("quota_recovery.concurrency must be positive")
+		}
+		if c.QuotaRecovery.TimeoutSeconds < minQuotaRecoveryTimeoutSeconds {
+			return fmt.Errorf(
+				"quota_recovery.timeout_seconds must be at least %d seconds when quota_recovery.enabled=true; update QUOTA_RECOVERY_TIMEOUT_SECONDS or quota_recovery.timeout_seconds to %d or higher before starting",
+				minQuotaRecoveryTimeoutSeconds,
+				minQuotaRecoveryTimeoutSeconds,
+			)
+		}
+		if c.QuotaRecovery.JitterSeconds < 0 {
+			return fmt.Errorf("quota_recovery.jitter_seconds must be non-negative")
+		}
+	}
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
 	}
@@ -3005,6 +3568,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.UpstreamResponseReadMaxBytes <= 0 {
 		return fmt.Errorf("gateway.upstream_response_read_max_bytes must be positive")
+	}
+	if c.Gateway.ModelsListReadMaxBytes <= 0 {
+		return fmt.Errorf("gateway.models_list_read_max_bytes must be positive")
 	}
 	if c.Gateway.ProxyProbeResponseReadMaxBytes <= 0 {
 		return fmt.Errorf("gateway.proxy_probe_response_read_max_bytes must be positive")
@@ -3015,6 +3581,9 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIResponseHeaderTimeout < 0 {
 		return fmt.Errorf("gateway.openai_response_header_timeout must be non-negative")
 	}
+	if c.Gateway.GrokResponseHeaderTimeout < 0 || c.Gateway.GrokResponseHeaderTimeout > 1800 {
+		return fmt.Errorf("gateway.grok_response_header_timeout must be between 0-1800 seconds")
+	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
 		(c.Gateway.OpenAIFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIFirstOutputTimeoutSeconds < 30) {
 		return fmt.Errorf("gateway.openai_first_output_timeout_seconds must be 0 or between 30-600 seconds")
@@ -3022,6 +3591,9 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 1800 ||
 		(c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 30) {
 		return fmt.Errorf("gateway.openai_high_effort_first_output_timeout_seconds must be 0 or between 30-1800 seconds")
+	}
+	if c.Gateway.Live.MaxSessionDurationSeconds <= 0 {
+		c.Gateway.Live.MaxSessionDurationSeconds = 3600
 	}
 	if strings.TrimSpace(c.Gateway.ConnectionPoolIsolation) != "" {
 		switch c.Gateway.ConnectionPoolIsolation {
@@ -3231,6 +3803,15 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIHTTP2.FallbackTTLSeconds < 0 {
 		return fmt.Errorf("gateway.openai_http2.fallback_ttl_seconds must be non-negative")
 	}
+	if c.Gateway.OpenAIProxyStreamCircuit.FailureThreshold < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.failure_threshold must be non-negative")
+	}
+	if c.Gateway.OpenAIProxyStreamCircuit.WindowSeconds < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.window_seconds must be non-negative")
+	}
+	if c.Gateway.OpenAIProxyStreamCircuit.TTLSeconds < 0 {
+		return fmt.Errorf("gateway.openai_proxy_stream_circuit.ttl_seconds must be non-negative")
+	}
 	weights := c.Gateway.OpenAIWS.SchedulerScoreWeights
 	for _, weight := range []float64{
 		weights.Priority, weights.Load, weights.Queue, weights.ErrorRate, weights.TTFT,
@@ -3386,6 +3967,9 @@ func (c *Config) Validate() error {
 	if c.Ops.Cleanup.ErrorLogRetentionDays < 0 {
 		return fmt.Errorf("ops.cleanup.error_log_retention_days must be non-negative")
 	}
+	if c.Ops.Cleanup.Enabled && c.Ops.Cleanup.SystemLogRetentionDays <= 0 {
+		return fmt.Errorf("ops.cleanup.system_log_retention_days must be positive when ops cleanup is enabled")
+	}
 	if c.Ops.Cleanup.MinuteMetricsRetentionDays < 0 {
 		return fmt.Errorf("ops.cleanup.minute_metrics_retention_days must be non-negative")
 	}
@@ -3397,6 +3981,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30 {
 		return fmt.Errorf("concurrency.ping_interval must be between 5-30 seconds")
+	}
+	if c.Gateway.Grok.FreeQuotaSoftGateEnabled {
+		if c.Gateway.Grok.FreeQuotaTokenLimit <= 0 {
+			return fmt.Errorf("gateway.grok.free_quota_token_limit must be positive")
+		}
+		if c.Gateway.Grok.FreeQuotaSoftGatePercent < 1 || c.Gateway.Grok.FreeQuotaSoftGatePercent > 100 {
+			return fmt.Errorf("gateway.grok.free_quota_soft_gate_percent must be between 1 and 100")
+		}
+		if c.Gateway.Grok.FreeQuotaWindowHours <= 0 {
+			return fmt.Errorf("gateway.grok.free_quota_window_hours must be positive")
+		}
+	}
+	if c.Gateway.Grok.FreeQuotaStatsCacheSeconds < 0 {
+		return fmt.Errorf("gateway.grok.free_quota_stats_cache_seconds must be non-negative")
 	}
 	if err := ValidateDingTalkConfig(c.DingTalk); err != nil {
 		return fmt.Errorf("dingtalk_connect: %w", err)
@@ -3452,14 +4050,12 @@ func generateJWTSecret(byteLength int) (string, error) {
 // GetServerAddress returns the server address (host:port) from config file or environment variable.
 // This is a lightweight function that can be used before full config validation,
 // such as during setup wizard startup.
-// Priority: config.yaml > environment variables > defaults
+// Priority: environment variables > config file > defaults.
 func GetServerAddress() string {
 	v := viper.New()
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
-	v.AddConfigPath(".")
-	v.AddConfigPath("./config")
-	v.AddConfigPath("/etc/sub2api")
+	configureConfigSource(v.SetConfigFile, v.AddConfigPath)
 
 	// Support SERVER_HOST and SERVER_PORT environment variables
 	v.AutomaticEnv()
@@ -3556,4 +4152,135 @@ func warnIfInsecureURL(field, raw string) {
 	if strings.EqualFold(u.Scheme, "http") {
 		slog.Warn("url uses http scheme; use https in production to avoid token leakage", "field", field)
 	}
+}
+
+func setModelTracingDefaults() {
+	viper.SetDefault("model_tracing.enabled", false)
+	viper.SetDefault("model_tracing.destination", ModelTracingDestinationLangfuse)
+	viper.SetDefault("model_tracing.endpoint", "")
+	viper.SetDefault("model_tracing.public_key", "")
+	viper.SetDefault("model_tracing.secret_key", "")
+	viper.SetDefault("model_tracing.prompt_max_bytes", 16<<20)
+	viper.SetDefault("model_tracing.response_max_bytes", 8<<20)
+	viper.SetDefault("model_tracing.media_max_bytes", 16<<20)
+	viper.SetDefault("model_tracing.capture_media_content", false)
+	// Sanitization defaults to ON so credential scrubbing stays backward
+	// compatible; operators may disable it explicitly for local performance.
+	// 环境变量覆盖：MODEL_TRACING_SANITIZATION_ENABLED（AutomaticEnv + 点号
+	// 转下划线的 replacer，与 METRICS_* 同款）。
+	viper.SetDefault("model_tracing.sanitization_enabled", true)
+	viper.SetDefault("model_tracing.export_timeout_seconds", 60)
+	viper.SetDefault("model_tracing.export_retry.enabled", true)
+	viper.SetDefault("model_tracing.export_retry.initial_interval_seconds", 5)
+	viper.SetDefault("model_tracing.export_retry.max_interval_seconds", 30)
+	viper.SetDefault("model_tracing.export_retry.max_elapsed_time_seconds", 55)
+	viper.SetDefault("model_tracing.export_queue_size", 256)
+	viper.SetDefault("model_tracing.export_batch_size", 16)
+	viper.SetDefault("model_tracing.export_batch_timeout_ms", 1000)
+}
+
+// normalizeModelTracingConfig applies safe capture defaults and degrades an invalid
+// deployment target to disabled. Runtime updates use the stricter modeltrace validator.
+func normalizeModelTracingConfig(value *ModelTracingConfig) {
+	if value == nil {
+		return
+	}
+	value.Destination = NormalizeModelTracingDestination(value.Destination)
+	value.Endpoint = NormalizeModelTracingEndpoint(value.Destination, value.Endpoint)
+	value.PublicKey = strings.TrimSpace(value.PublicKey)
+	value.SecretKey = strings.TrimSpace(value.SecretKey)
+	if value.PromptMaxBytes <= 0 {
+		value.PromptMaxBytes = 16 << 20
+	}
+	if value.ResponseMaxBytes <= 0 {
+		value.ResponseMaxBytes = 8 << 20
+	}
+	if value.MediaMaxBytes <= 0 {
+		value.MediaMaxBytes = 16 << 20
+	}
+	if value.ExportTimeoutSeconds <= 0 {
+		value.ExportTimeoutSeconds = 60
+	}
+	normalizeModelTracingRetry(&value.ExportRetry)
+	if value.ExportQueueSize <= 0 {
+		value.ExportQueueSize = 256
+	}
+	if value.ExportBatchSize <= 0 {
+		value.ExportBatchSize = 16
+	}
+	if value.ExportBatchTimeoutMs <= 0 {
+		value.ExportBatchTimeoutMs = 1000
+	}
+	if !value.Enabled {
+		return
+	}
+	validDestination := IsSupportedModelTracingDestination(value.Destination)
+	requiresCredentials := value.Destination == ModelTracingDestinationLangfuse
+	if !validDestination || ValidateModelTracingEndpoint(value.Endpoint) != nil ||
+		(requiresCredentials && (value.PublicKey == "" || value.SecretKey == "")) {
+		value.Enabled = false
+		slog.Warn("invalid model_tracing deployment config; tracing disabled")
+	}
+}
+
+// normalizeModelTracingRetry fills documented OTLP retry defaults when unset.
+// Retry is enabled by default so transient Collector refusals can recover
+// within the configured export timeout window; an explicit Enabled=false is
+// respected to fail fast.
+func normalizeModelTracingRetry(retry *ModelTracingExportRetryConfig) {
+	if retry == nil {
+		return
+	}
+	configured := retry.InitialIntervalSeconds > 0 ||
+		retry.MaxIntervalSeconds > 0 ||
+		retry.MaxElapsedTimeSeconds > 0 ||
+		retry.Enabled
+	if retry.InitialIntervalSeconds <= 0 {
+		retry.InitialIntervalSeconds = 5
+	}
+	if retry.MaxIntervalSeconds <= 0 {
+		retry.MaxIntervalSeconds = 30
+	}
+	if retry.MaxElapsedTimeSeconds <= 0 {
+		retry.MaxElapsedTimeSeconds = 55
+	}
+	if retry.InitialIntervalSeconds > retry.MaxIntervalSeconds {
+		retry.InitialIntervalSeconds = retry.MaxIntervalSeconds
+	}
+	// Retry is enabled by default so transient Collector refusals recover within
+	// the export-timeout window. Only an explicit, fully-rejected retry config
+	// disables it.
+	if !configured {
+		retry.Enabled = true
+	}
+}
+
+// ValidateModelTracingEndpoint accepts complete HTTP or HTTPS OTLP trace
+// endpoints. Credentials, queries, and fragments remain forbidden so secrets
+// cannot be smuggled into transport URLs or exposed through configuration APIs.
+func ValidateModelTracingEndpoint(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("endpoint is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("endpoint host is empty")
+	}
+	if u.User != nil {
+		return errors.New("endpoint must not include userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("endpoint must not include a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("endpoint must not include a fragment")
+	}
+	return nil
 }

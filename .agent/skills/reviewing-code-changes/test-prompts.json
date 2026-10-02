@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "prompt": "请使用 $reviewing-code-changes 在提交前评审我的 staged changes。我需要中文报告，且未提供额外设计文档。",
+    "expected": "准备 staged 事实包和打乱 diff；先审测试再审实现；用多角色 subagent 产出 JSON finding；校验、融合、对抗裁定后输出中文报告，并把缺失需求/设计证据写成证据完整性限制。"
+  },
+  {
+    "id": 2,
+    "prompt": "请使用 $reviewing-code-changes 评审这个 AntCode PR 链接。diff 涉及 HTTP client、retry logic，以及 mock downstream service 的测试。请检查 integration risk 和 test coverage。",
+    "expected": "触发 antcode-skill 获取 PR diff、commits 和 review rules；执行 integration-search，搜索真实仓库、本地文档和 Yuque 线索；重点审查 mock 是否来自真实契约、超时/业务失败/缺字段/幂等等测试缺口，并禁止自行猜测联调通过。"
+  },
+  {
+    "id": 3,
+    "prompt": "请使用 $reviewing-code-changes 在首次评审后复审我的修复。我只修改了两个测试和一个与 accepted P1 finding 相关的 error-handling branch。",
+    "expected": "按复审范围收敛执行定向复审，只给相关变化行、上一轮 accepted finding、修复说明和最新验证输出；角色收敛到发现问题的角色、测试角色和相关风险角色；若发现新的 critical/important 再升级为全量复审。"
+  }
+]

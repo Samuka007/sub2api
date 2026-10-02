@@ -130,6 +130,11 @@ func TestBackendModeUserGuard(t *testing.T) {
 			if tc.role != nil {
 				role := *tc.role
 				r.Use(func(c *gin.Context) {
+					var roles []string
+					if role == "admin" {
+						roles = []string{"super_admin"}
+					}
+					c.Set(string(ContextKeyUser), AuthSubject{UserID: 1, Roles: roles})
 					c.Set(string(ContextKeyUserRole), role)
 					c.Next()
 				})

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 )
@@ -37,6 +38,8 @@ type AvailableChannel struct {
 	Groups             []AvailableGroupRef
 	SupportedModels    []SupportedModel
 }
+
+const featureKeyPricingReference = "pricing_reference"
 
 // ListAvailable 返回所有渠道的可用视图：每个渠道附带关联分组信息与支持模型列表。
 //
@@ -90,7 +93,8 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 		ch.normalizeBillingModelSource()
 
 		supported := ch.SupportedModels()
-		s.fillGlobalPricingFallback(supported)
+		fillGlobalPricingFallback(s.pricingService, supported)
+		applyPricingReference(supported, ch.FeaturesConfig)
 
 		out = append(out, AvailableChannel{
 			ID:                 ch.ID,
@@ -117,20 +121,83 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 //  1. Pricing == nil（渠道完全没声明该模型的定价条目）
 //  2. Pricing 非 nil 但所有价格字段为空（admin UI 建了条目但没填价格）
 //
-// 当 s.pricingService 为 nil（测试场景），跳过回落。
-func (s *ChannelService) fillGlobalPricingFallback(models []SupportedModel) {
-	if s.pricingService == nil {
+// 当 pricingService 为 nil（测试场景），跳过价格回落。
+// 可用渠道与模型广场共用。
+func fillGlobalPricingFallback(pricingService *PricingService, models []SupportedModel) {
+	for i := range models {
+		if pricingService != nil && pricingNeedsFallback(models[i].Pricing) {
+			if lp := pricingService.GetModelPricing(models[i].Name); lp != nil {
+				models[i].Pricing = synthesizePricingFromLiteLLM(lp, models[i].Pricing)
+			}
+		}
+	}
+}
+
+// applyPricingReference attaches display-only official-price multipliers from
+// channel FeaturesConfig. It does not change billing prices or resolver caches.
+func applyPricingReference(models []SupportedModel, featuresConfig map[string]any) {
+	source, multipliers := pricingReferenceConfig(featuresConfig)
+	if len(multipliers) == 0 {
 		return
 	}
 	for i := range models {
-		if !pricingNeedsFallback(models[i].Pricing) {
+		if models[i].Pricing == nil {
 			continue
 		}
-		lp := s.pricingService.GetModelPricing(models[i].Name)
-		if lp == nil {
+		multiplier, ok := lookupPricingReferenceMultiplier(multipliers, models[i].Name)
+		if !ok {
 			continue
 		}
-		models[i].Pricing = synthesizePricingFromLiteLLM(lp, models[i].Pricing)
+		models[i].Pricing.ReferenceMultiplier = &multiplier
+		models[i].Pricing.ReferenceSource = source
+	}
+}
+
+func pricingReferenceConfig(featuresConfig map[string]any) (string, map[string]any) {
+	if len(featuresConfig) == 0 {
+		return "", nil
+	}
+	raw, ok := featuresConfig[featureKeyPricingReference].(map[string]any)
+	if !ok {
+		return "", nil
+	}
+	source, _ := raw["source"].(string)
+	multipliers, ok := raw["multipliers"].(map[string]any)
+	if !ok {
+		return source, nil
+	}
+	return source, multipliers
+}
+
+func lookupPricingReferenceMultiplier(multipliers map[string]any, model string) (float64, bool) {
+	if multiplier, ok := positiveFloat64(multipliers[model]); ok {
+		return multiplier, true
+	}
+	modelLower := strings.ToLower(model)
+	for key, raw := range multipliers {
+		if strings.ToLower(key) != modelLower {
+			continue
+		}
+		return positiveFloat64(raw)
+	}
+	return 0, false
+}
+
+func positiveFloat64(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, v > 0
+	case float32:
+		f := float64(v)
+		return f, f > 0
+	case int:
+		f := float64(v)
+		return f, f > 0
+	case int64:
+		f := float64(v)
+		return f, f > 0
+	default:
+		return 0, false
 	}
 }
 
@@ -141,13 +208,13 @@ func pricingNeedsFallback(p *ChannelModelPricing) bool {
 		return true
 	}
 	if p.InputPrice != nil || p.OutputPrice != nil ||
-		p.CacheWritePrice != nil || p.CacheReadPrice != nil ||
+		p.CacheWritePrice != nil || p.CacheWrite1hPrice != nil || p.CacheReadPrice != nil ||
 		p.ImageOutputPrice != nil || p.PerRequestPrice != nil {
 		return false
 	}
 	for _, iv := range p.Intervals {
 		if iv.InputPrice != nil || iv.OutputPrice != nil ||
-			iv.CacheWritePrice != nil || iv.CacheReadPrice != nil ||
+			iv.CacheWritePrice != nil || iv.CacheWrite1hPrice != nil || iv.CacheReadPrice != nil ||
 			iv.PerRequestPrice != nil {
 			return false
 		}
@@ -180,21 +247,31 @@ func synthesizePricingFromLiteLLM(lp *LiteLLMModelPricing, existing *ChannelMode
 
 	if mode == BillingModeImage || mode == BillingModePerRequest {
 		return &ChannelModelPricing{
-			BillingMode:      mode,
-			PerRequestPrice:  nonZeroPtr(lp.OutputCostPerImage),
-			ImageOutputPrice: nonZeroPtr(lp.OutputCostPerImageToken),
-			InputPrice:       nonZeroPtr(lp.InputCostPerToken),
-			OutputPrice:      nonZeroPtr(lp.OutputCostPerToken),
+			BillingMode:                mode,
+			PerRequestPrice:            nonZeroPtr(lp.OutputCostPerImage),
+			ImageOutputPrice:           nonZeroPtr(lp.OutputCostPerImageToken),
+			InputPrice:                 nonZeroPtr(lp.InputCostPerToken),
+			OutputPrice:                nonZeroPtr(lp.OutputCostPerToken),
+			ReasoningEffortMultipliers: reasoningEffortMultipliersFromPricing(existing),
 		}
 	}
 	return &ChannelModelPricing{
-		BillingMode:      mode,
-		InputPrice:       nonZeroPtr(lp.InputCostPerToken),
-		OutputPrice:      nonZeroPtr(lp.OutputCostPerToken),
-		CacheWritePrice:  nonZeroPtr(lp.CacheCreationInputTokenCost),
-		CacheReadPrice:   nonZeroPtr(lp.CacheReadInputTokenCost),
-		ImageOutputPrice: nonZeroPtr(lp.OutputCostPerImageToken),
+		BillingMode:                mode,
+		InputPrice:                 nonZeroPtr(lp.InputCostPerToken),
+		OutputPrice:                nonZeroPtr(lp.OutputCostPerToken),
+		CacheWritePrice:            nonZeroPtr(lp.CacheCreationInputTokenCost),
+		CacheWrite1hPrice:          nonZeroPtr(lp.CacheCreationInputTokenCostAbove1hr),
+		CacheReadPrice:             nonZeroPtr(lp.CacheReadInputTokenCost),
+		ImageOutputPrice:           nonZeroPtr(lp.OutputCostPerImageToken),
+		ReasoningEffortMultipliers: reasoningEffortMultipliersFromPricing(existing),
 	}
+}
+
+func reasoningEffortMultipliersFromPricing(pricing *ChannelModelPricing) map[string]float64 {
+	if pricing == nil {
+		return nil
+	}
+	return maps.Clone(pricing.ReasoningEffortMultipliers)
 }
 
 func nonZeroPtr(v float64) *float64 {

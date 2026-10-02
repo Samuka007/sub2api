@@ -7,10 +7,95 @@ import { apiClient } from '../client'
 import type {
   AdminGroup,
   GroupPlatform,
+  CompositeModelRoute,
+  CompositeModelRouteInput,
+  CompositeRoutePreviewRequest,
+  CompositeRouteDecision,
   CreateGroupRequest,
   UpdateGroupRequest,
   PaginatedResponse
 } from '@/types'
+
+export interface LiveCapability {
+  supported: boolean
+  reason?: string
+}
+
+export type GroupAccountHealthDetectionStatus =
+  | 'deactivated'
+  | 'warning'
+  | 'reactivated'
+  | 'no_evidence'
+  | 'mismatch'
+  | 'fetch_error'
+  | 'parse_error'
+  | 'format_error'
+
+export type GroupAccountHealthFormatIssue =
+  | 'empty'
+  | 'missing_email'
+  | 'missing_url'
+  | 'multiple_records'
+  | 'invalid_url'
+  | 'mixed_invalid_lines'
+
+export type GroupAccountHealthEvidence =
+  | 'account_mismatch'
+  | 'plus_after_deactivation'
+  | 'dynamic_mailbox'
+  | 'reactivated_notice'
+  | 'deactivation_semantics'
+  | 'openai_anchor'
+  | 'account_unavailable'
+  | 'policy_violation'
+  | 'appeal_available'
+  | 'deactivation_subject'
+  | 'warning_notice'
+  | 'plus_marker'
+  | 'subscription_confirmed'
+  | 'order_number'
+  | 'payment_method'
+  | 'order_date'
+  | 'subscription_management'
+
+export type GroupAccountHealthLifespanStatus =
+  | 'unavailable'
+  | 'active'
+  | 'ended'
+  | 'ban_date_unknown'
+  | 'invalid_date'
+
+export interface GroupAccountHealthCandidate {
+  id: number
+  name: string
+  platform: GroupPlatform
+  status: 'active' | 'inactive'
+}
+
+export interface GroupAccountHealthDetectionResult {
+  group_id: number
+  group_name: string
+  account_email: string
+  status: GroupAccountHealthDetectionStatus
+  format_issue?: GroupAccountHealthFormatIssue
+  score: number
+  language: string
+  evidence: GroupAccountHealthEvidence[]
+  message_date: string
+  associated_email: string
+  messages_scanned: number
+  pages_scanned: number
+  plus_detected: boolean
+  plus_score: number
+  plus_language: string
+  plus_date: string
+  payment_method: string
+  lifespan_status: GroupAccountHealthLifespanStatus
+  lifespan_seconds: number | null
+  ban_date: string
+  elapsed_ms: number
+  checked_at: string
+}
 
 /**
  * List all groups with pagination
@@ -61,9 +146,12 @@ export async function getAll(platform?: GroupPlatform): Promise<AdminGroup[]> {
  * Get ALL groups including disabled ones — used by the API Key group filter so
  * that admins can filter users whose keys are still bound to a now-disabled group.
  */
-export async function getAllIncludingInactive(): Promise<AdminGroup[]> {
+export async function getAllIncludingInactive(platform?: GroupPlatform): Promise<AdminGroup[]> {
   const { data } = await apiClient.get<AdminGroup[]>('/admin/groups/all', {
-    params: { include_inactive: true }
+    params: {
+      include_inactive: true,
+      ...(platform ? { platform } : {})
+    }
   })
   return data
 }
@@ -77,6 +165,12 @@ export async function getByPlatform(platform: GroupPlatform): Promise<AdminGroup
   return getAll(platform)
 }
 
+/** 获取当前 Sub2API 服务端的 Live 运行环境能力。 */
+export async function getLiveCapability(): Promise<LiveCapability> {
+  const { data } = await apiClient.get<LiveCapability>('/admin/groups/live-capability')
+  return data
+}
+
 /**
  * Get group by ID
  * @param id - Group ID
@@ -87,16 +181,32 @@ export async function getById(id: number): Promise<AdminGroup> {
   return data
 }
 
+/** List OpenAI groups without exposing descriptions or mailbox credentials. */
+export async function listAccountHealthCandidates(
+  page: number = 1,
+  pageSize: number = 100,
+  options?: { signal?: AbortSignal }
+): Promise<PaginatedResponse<GroupAccountHealthCandidate>> {
+  const { data } = await apiClient.get<PaginatedResponse<GroupAccountHealthCandidate>>(
+    '/admin/groups/account-health-candidates',
+    {
+      params: { page, page_size: pageSize },
+      signal: options?.signal
+    }
+  )
+  return data
+}
+
 /**
- * Get candidate models for custom /v1/models list.
+ * Get candidate models for the group model allowlist.
  * id=0 returns platform default models for create flow.
  */
-export async function getModelsListCandidates(
+export async function getModelAllowlistCandidates(
   id: number,
   platform?: GroupPlatform
 ): Promise<string[]> {
   const { data } = await apiClient.get<{ models: string[] }>(
-    `/admin/groups/${id}/models-list-candidates`,
+    `/admin/groups/${id}/model-allowlist-candidates`,
     {
       params: platform ? { platform } : undefined
     }
@@ -263,6 +373,55 @@ export async function getGroupApiKeys(
   return data
 }
 
+export async function listCompositeRoutes(id: number): Promise<CompositeModelRoute[]> {
+  const { data } = await apiClient.get<CompositeModelRoute[]>(`/admin/groups/${id}/composite-routes`)
+  return data
+}
+
+export async function createCompositeRoute(
+  id: number,
+  route: CompositeModelRouteInput
+): Promise<CompositeModelRoute> {
+  const { data } = await apiClient.post<CompositeModelRoute>(
+    `/admin/groups/${id}/composite-routes`,
+    route
+  )
+  return data
+}
+
+export async function updateCompositeRoute(
+  id: number,
+  routeId: number,
+  route: CompositeModelRouteInput
+): Promise<CompositeModelRoute> {
+  const { data } = await apiClient.put<CompositeModelRoute>(
+    `/admin/groups/${id}/composite-routes/${routeId}`,
+    route
+  )
+  return data
+}
+
+export async function deleteCompositeRoute(
+  id: number,
+  routeId: number
+): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(
+    `/admin/groups/${id}/composite-routes/${routeId}`
+  )
+  return data
+}
+
+export async function previewCompositeRoute(
+  id: number,
+  request: CompositeRoutePreviewRequest
+): Promise<CompositeRouteDecision> {
+  const { data } = await apiClient.post<CompositeRouteDecision>(
+    `/admin/groups/${id}/composite-routes/preview`,
+    request
+  )
+  return data
+}
+
 /**
  * Rate multiplier entry for a user in a group
  */
@@ -382,18 +541,15 @@ export async function clearGroupRPMOverrides(id: number): Promise<{ message: str
 }
 
 /**
- * Get usage summary (today + cumulative cost) for all groups
- * @param timezone - IANA timezone string (e.g. "Asia/Shanghai")
+ * Get usage summary (today + yesterday + cumulative cost) for all groups
  * @returns Array of group usage summaries
  */
-export async function getUsageSummary(
-  timezone?: string
-): Promise<{ group_id: number; today_cost: number; total_cost: number }[]> {
+export async function getUsageSummary(): Promise<
+  { group_id: number; today_cost: number; yesterday_cost: number; total_cost: number }[]
+> {
   const { data } = await apiClient.get<
-    { group_id: number; today_cost: number; total_cost: number }[]
-  >('/admin/groups/usage-summary', {
-    params: timezone ? { timezone } : undefined
-  })
+    { group_id: number; today_cost: number; yesterday_cost: number; total_cost: number }[]
+  >('/admin/groups/usage-summary')
   return data
 }
 
@@ -414,8 +570,10 @@ export const groupsAPI = {
   getAll,
   getByPlatform,
   getAllIncludingInactive,
+  getLiveCapability,
   getById,
-  getModelsListCandidates,
+  listAccountHealthCandidates,
+  getModelAllowlistCandidates,
   create,
   duplicate,
   update,
@@ -423,6 +581,11 @@ export const groupsAPI = {
   toggleStatus,
   getStats,
   getGroupApiKeys,
+  listCompositeRoutes,
+  createCompositeRoute,
+  updateCompositeRoute,
+  deleteCompositeRoute,
+  previewCompositeRoute,
   getGroupRateMultipliers,
   clearGroupRateMultipliers,
   batchSetGroupRateMultipliers,

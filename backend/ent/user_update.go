@@ -10,6 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/announcementread"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
@@ -105,6 +106,18 @@ func (_u *UserUpdate) SetNillableRole(v *string) *UserUpdate {
 	if v != nil {
 		_u.SetRole(*v)
 	}
+	return _u
+}
+
+// SetRoles sets the "roles" field.
+func (_u *UserUpdate) SetRoles(v []string) *UserUpdate {
+	_u.mutation.SetRoles(v)
+	return _u
+}
+
+// AppendRoles appends value to the "roles" field.
+func (_u *UserUpdate) AppendRoles(v []string) *UserUpdate {
+	_u.mutation.AppendRoles(v)
 	return _u
 }
 
@@ -318,6 +331,20 @@ func (_u *UserUpdate) SetNillableLastActiveAt(v *time.Time) *UserUpdate {
 // ClearLastActiveAt clears the value of the "last_active_at" field.
 func (_u *UserUpdate) ClearLastActiveAt() *UserUpdate {
 	_u.mutation.ClearLastActiveAt()
+	return _u
+}
+
+// SetRestrictPublicGroups sets the "restrict_public_groups" field.
+func (_u *UserUpdate) SetRestrictPublicGroups(v bool) *UserUpdate {
+	_u.mutation.SetRestrictPublicGroups(v)
+	return _u
+}
+
+// SetNillableRestrictPublicGroups sets the "restrict_public_groups" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableRestrictPublicGroups(v *bool) *UserUpdate {
+	if v != nil {
+		_u.SetRestrictPublicGroups(*v)
+	}
 	return _u
 }
 
@@ -1012,6 +1039,14 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Roles(); ok {
+		_spec.SetField(user.FieldRoles, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRoles(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, user.FieldRoles, value)
+		})
+	}
 	if value, ok := _u.mutation.Balance(); ok {
 		_spec.SetField(user.FieldBalance, field.TypeFloat64, value)
 	}
@@ -1068,6 +1103,9 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LastActiveAtCleared() {
 		_spec.ClearField(user.FieldLastActiveAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RestrictPublicGroups(); ok {
+		_spec.SetField(user.FieldRestrictPublicGroups, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.BalanceNotifyEnabled(); ok {
 		_spec.SetField(user.FieldBalanceNotifyEnabled, field.TypeBool, value)
@@ -1784,6 +1822,18 @@ func (_u *UserUpdateOne) SetNillableRole(v *string) *UserUpdateOne {
 	return _u
 }
 
+// SetRoles sets the "roles" field.
+func (_u *UserUpdateOne) SetRoles(v []string) *UserUpdateOne {
+	_u.mutation.SetRoles(v)
+	return _u
+}
+
+// AppendRoles appends value to the "roles" field.
+func (_u *UserUpdateOne) AppendRoles(v []string) *UserUpdateOne {
+	_u.mutation.AppendRoles(v)
+	return _u
+}
+
 // SetBalance sets the "balance" field.
 func (_u *UserUpdateOne) SetBalance(v float64) *UserUpdateOne {
 	_u.mutation.ResetBalance()
@@ -1994,6 +2044,20 @@ func (_u *UserUpdateOne) SetNillableLastActiveAt(v *time.Time) *UserUpdateOne {
 // ClearLastActiveAt clears the value of the "last_active_at" field.
 func (_u *UserUpdateOne) ClearLastActiveAt() *UserUpdateOne {
 	_u.mutation.ClearLastActiveAt()
+	return _u
+}
+
+// SetRestrictPublicGroups sets the "restrict_public_groups" field.
+func (_u *UserUpdateOne) SetRestrictPublicGroups(v bool) *UserUpdateOne {
+	_u.mutation.SetRestrictPublicGroups(v)
+	return _u
+}
+
+// SetNillableRestrictPublicGroups sets the "restrict_public_groups" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableRestrictPublicGroups(v *bool) *UserUpdateOne {
+	if v != nil {
+		_u.SetRestrictPublicGroups(*v)
+	}
 	return _u
 }
 
@@ -2718,6 +2782,14 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Roles(); ok {
+		_spec.SetField(user.FieldRoles, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRoles(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, user.FieldRoles, value)
+		})
+	}
 	if value, ok := _u.mutation.Balance(); ok {
 		_spec.SetField(user.FieldBalance, field.TypeFloat64, value)
 	}
@@ -2774,6 +2846,9 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if _u.mutation.LastActiveAtCleared() {
 		_spec.ClearField(user.FieldLastActiveAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RestrictPublicGroups(); ok {
+		_spec.SetField(user.FieldRestrictPublicGroups, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.BalanceNotifyEnabled(); ok {
 		_spec.SetField(user.FieldBalanceNotifyEnabled, field.TypeBool, value)

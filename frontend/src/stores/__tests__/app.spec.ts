@@ -33,6 +33,7 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     contact_info: '',
     doc_url: '',
     home_content: '',
+    compact_home_enabled: false,
     hide_ccs_import_button: false,
     payment_enabled: false,
     risk_control_enabled: false,
@@ -54,6 +55,11 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     channel_monitor_enabled: true,
     channel_monitor_default_interval_seconds: 60,
     available_channels_enabled: false,
+    subscription_enabled: true,
+    payment_balance_disabled: false,
+    model_plaza_enabled: false,
+    model_plaza_require_auth: false,
+    plugin_management_enabled: false,
     service_quota_enabled: false,
     affiliate_enabled: false,
     ...overrides,
@@ -411,6 +417,16 @@ describe('useAppStore', () => {
       expect(store.publicSettingsLoaded).toBe(true)
     })
 
+    it('将旧默认站点名映射为 SCIbuddy', () => {
+      const windowAny = window as any
+      windowAny.__APP_CONFIG__ = createPublicSettings({ site_name: 'Sub2API' })
+
+      const store = useAppStore()
+      store.initFromInjectedConfig()
+
+      expect(store.siteName).toBe('SCIbuddy')
+    })
+
     it('无注入配置时返回 false', () => {
       const store = useAppStore()
       const result = store.initFromInjectedConfig()
@@ -450,6 +466,7 @@ describe('useAppStore', () => {
         contact_info: '',
         doc_url: '',
         home_content: '',
+        compact_home_enabled: false,
         hide_ccs_import_button: false,
         purchase_subscription_enabled: false,
         purchase_subscription_url: '',

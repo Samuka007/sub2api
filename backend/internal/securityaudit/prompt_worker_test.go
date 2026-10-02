@@ -48,7 +48,7 @@ func (s *fakeConfigStore) EffectiveMode() Mode {
 	return s.cfg.EffectiveMode()
 }
 func (s *fakeConfigStore) BlockingActivationDegraded() bool { return false }
-func (s *fakeConfigStore) Public() PublicConfig             { return PublicConfig{} }
+func (s *fakeConfigStore) Public() (PublicConfig, error)    { return PublicConfig{}, nil }
 func (s *fakeConfigStore) Save(context.Context, UpdateConfigRequest, int64) (PublicConfig, error) {
 	return PublicConfig{}, nil
 }
@@ -287,6 +287,19 @@ func TestEnqueuerStagingPayloadPublishProtocolAndFailureCleanup(t *testing.T) {
 		require.Equal(t, "queue_publish_failed", repo.markedCode)
 		require.NotContains(t, payload.values, int64(43))
 	})
+}
+
+func TestEnqueuerObserveOnlyQueuesAuditWhileBlockingModeIsActive(t *testing.T) {
+	cfg := asyncConfig()
+	cfg.BlockingEnabled = true
+	trace := []string{}
+	repo := &fakeJobRepository{trace: &trace, createJob: &Job{ID: 45}}
+	payload := &fakePayloadStore{trace: &trace, values: map[int64]string{}}
+	enqueuer := NewEnqueuer(&fakeConfigStore{cfg: cfg, active: true}, repo, payload)
+
+	require.NoError(t, enqueuer.EnqueueObserveOnly(context.Background(), asyncRequest()))
+	require.Equal(t, []string{"create_staging", "payload_set", "publish_queued"}, trace)
+	require.Equal(t, "payload canary text", payload.values[45])
 }
 
 func TestEnqueuerSkipsOffOutOfScopeAndNoText(t *testing.T) {

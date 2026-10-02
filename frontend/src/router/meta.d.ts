@@ -20,6 +20,13 @@ declare module 'vue-router' {
     requiresAdmin?: boolean
 
     /**
+     * 细粒度管理员权限标识（见 @/types AdminPermission）。
+     * 设置后，除 requiresAdmin 外，还需当前管理员拥有该权限才能访问。
+     * 仅作 UX 门禁；后端仍为最终授权边界。
+     */
+    requiredPermission?: string
+
+    /**
      * Page title for this route
      */
     title?: string
@@ -54,6 +61,12 @@ declare module 'vue-router' {
      * @default false
      */
     requiresRiskControl?: boolean
+
+    /**
+     * 是否要求订阅功能开关（subscription_enabled，opt-out）未被显式关闭
+     * @default false
+     */
+    requiresSubscription?: boolean
 
     /**
      * i18n key for the page title

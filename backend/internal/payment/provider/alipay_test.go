@@ -11,7 +11,56 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/smartwalle/alipay/v3"
+	"github.com/stretchr/testify/require"
 )
+
+func TestAlipayRefundRequestIDIsDeterministicAndAmountScoped(t *testing.T) {
+	first := alipayRefundRequestID("sub2_order_1", "10.00")
+	require.Equal(t, first, alipayRefundRequestID("sub2_order_1", "10.00"))
+	require.NotEqual(t, first, alipayRefundRequestID("sub2_order_1", "9.00"))
+	require.NotEqual(t, first, alipayRefundRequestID("sub2_order_2", "10.00"))
+	require.LessOrEqual(t, len(first), 64)
+}
+
+func TestAlipayRefundUsesDeterministicRequestID(t *testing.T) {
+	previous := alipayTradeRefund
+	t.Cleanup(func() { alipayTradeRefund = previous })
+	var captured alipay.TradeRefund
+	alipayTradeRefund = func(_ context.Context, _ *alipay.Client, param alipay.TradeRefund) (*alipay.TradeRefundRsp, error) {
+		captured = param
+		return &alipay.TradeRefundRsp{FundChange: alipayFundChangeYes}, nil
+	}
+	provider := &Alipay{client: &alipay.Client{}}
+	req := payment.RefundRequest{OrderID: "sub2_order_1", Amount: "10.00", Reason: "test"}
+	result, err := provider.Refund(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, payment.ProviderStatusSuccess, result.Status)
+	require.Equal(t, alipayRefundRequestID(req.OrderID, req.Amount), result.RefundID)
+	require.Equal(t, req.OrderID, captured.OutTradeNo)
+	require.Equal(t, req.Amount, captured.RefundAmount)
+	require.Equal(t, req.Reason, captured.RefundReason)
+	require.Equal(t, result.RefundID, captured.OutRequestNo)
+}
+
+func TestAlipayQueryRefundUsesOriginalRequestID(t *testing.T) {
+	previous := alipayTradeFastPayRefundQuery
+	t.Cleanup(func() { alipayTradeFastPayRefundQuery = previous })
+	var captured alipay.TradeFastPayRefundQuery
+	alipayTradeFastPayRefundQuery = func(_ context.Context, _ *alipay.Client, param alipay.TradeFastPayRefundQuery) (*alipay.TradeFastPayRefundQueryRsp, error) {
+		captured = param
+		return &alipay.TradeFastPayRefundQueryRsp{
+			Error:        alipay.Error{Code: alipay.CodeSuccess},
+			RefundStatus: "REFUND_SUCCESS",
+		}, nil
+	}
+	provider := &Alipay{client: &alipay.Client{}}
+	req := payment.RefundQueryRequest{OrderID: "sub2_order_1", Amount: "10.00"}
+	result, err := provider.QueryRefund(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, payment.ProviderStatusSuccess, result.Status)
+	require.Equal(t, alipayRefundRequestID(req.OrderID, req.Amount), captured.OutRequestNo)
+	require.Equal(t, req.OrderID, captured.OutTradeNo)
+}
 
 func TestIsTradeNotExist(t *testing.T) {
 	t.Parallel()
@@ -279,6 +328,90 @@ func TestCreateTradeUsesWapPayForMobile(t *testing.T) {
 	}
 	if resp.PayURL == "" {
 		t.Fatal("expected pay_url for mobile wap pay")
+	}
+}
+
+func TestCreatePaymentUsesPrecreateForMobileWhenEnabled(t *testing.T) {
+	origPreCreate := alipayTradePreCreate
+	origWapPay := alipayTradeWapPay
+	t.Cleanup(func() {
+		alipayTradePreCreate = origPreCreate
+		alipayTradeWapPay = origWapPay
+	})
+
+	precreateCalls := 0
+	wapPayCalls := 0
+	alipayTradePreCreate = func(_ context.Context, _ *alipay.Client, param alipay.TradePreCreate) (*alipay.TradePreCreateRsp, error) {
+		precreateCalls++
+		if param.OutTradeNo != "sub2_mobile_precreate" {
+			t.Fatalf("out_trade_no = %q", param.OutTradeNo)
+		}
+		if param.ProductCode != alipayProductCodePreCreate {
+			t.Fatalf("product_code = %q, want %q", param.ProductCode, alipayProductCodePreCreate)
+		}
+		return &alipay.TradePreCreateRsp{
+			Error:  alipay.Error{Code: alipay.CodeSuccess},
+			QRCode: "https://qr.alipay.example.com/mobile-dynamic-token",
+		}, nil
+	}
+	alipayTradeWapPay = func(_ *alipay.Client, _ alipay.TradeWapPay) (*url.URL, error) {
+		wapPayCalls++
+		return url.Parse("https://openapi.alipay.com/gateway.do?wap-pay")
+	}
+
+	provider := &Alipay{client: &alipay.Client{}, config: map[string]string{}}
+	resp, err := provider.CreatePayment(context.Background(), payment.CreatePaymentRequest{
+		OrderID:               "sub2_mobile_precreate",
+		Amount:                "28.00",
+		Subject:               "Balance recharge",
+		IsMobile:              true,
+		AlipayMobilePrecreate: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if precreateCalls != 1 || wapPayCalls != 0 {
+		t.Fatalf("precreate calls = %d, wap calls = %d; want 1, 0", precreateCalls, wapPayCalls)
+	}
+	if resp.QRCode != "https://qr.alipay.example.com/mobile-dynamic-token" || resp.PayURL != "" {
+		t.Fatalf("unexpected response: qr_code=%q pay_url=%q", resp.QRCode, resp.PayURL)
+	}
+}
+
+func TestCreatePaymentKeepsWapPayForMobileWhenPrecreateDisabled(t *testing.T) {
+	origPreCreate := alipayTradePreCreate
+	origWapPay := alipayTradeWapPay
+	t.Cleanup(func() {
+		alipayTradePreCreate = origPreCreate
+		alipayTradeWapPay = origWapPay
+	})
+
+	precreateCalls := 0
+	wapPayCalls := 0
+	alipayTradePreCreate = func(_ context.Context, _ *alipay.Client, _ alipay.TradePreCreate) (*alipay.TradePreCreateRsp, error) {
+		precreateCalls++
+		return nil, errors.New("unexpected precreate call")
+	}
+	alipayTradeWapPay = func(_ *alipay.Client, _ alipay.TradeWapPay) (*url.URL, error) {
+		wapPayCalls++
+		return url.Parse("https://openapi.alipay.com/gateway.do?wap-pay")
+	}
+
+	provider := &Alipay{client: &alipay.Client{}, config: map[string]string{}}
+	resp, err := provider.CreatePayment(context.Background(), payment.CreatePaymentRequest{
+		OrderID:  "sub2_mobile_wap",
+		Amount:   "18.00",
+		Subject:  "Balance recharge",
+		IsMobile: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if precreateCalls != 0 || wapPayCalls != 1 {
+		t.Fatalf("precreate calls = %d, wap calls = %d; want 0, 1", precreateCalls, wapPayCalls)
+	}
+	if resp.PayURL == "" || resp.QRCode != "" {
+		t.Fatalf("unexpected response: qr_code=%q pay_url=%q", resp.QRCode, resp.PayURL)
 	}
 }
 

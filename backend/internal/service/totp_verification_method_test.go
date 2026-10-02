@@ -56,7 +56,7 @@ func newTotpVMService(t *testing.T, user *User, emailVerifyEnabled bool) (*TotpS
 }
 
 func TestGetVerificationMethodAdminAlwaysPassword(t *testing.T) {
-	admin := &User{ID: 1, Email: "admin@example.com", Role: RoleAdmin}
+	admin := &User{ID: 1, Email: "admin@example.com", Role: RoleAdmin, Roles: []string{RoleSuperAdmin}}
 	svc, _ := newTotpVMService(t, admin, true)
 
 	method, err := svc.GetVerificationMethod(context.Background(), admin.ID)
@@ -79,7 +79,7 @@ func TestGetVerificationMethodRegularUserFollowsEmailVerifySetting(t *testing.T)
 }
 
 func TestTotpDisableAdminUsesPasswordEvenWithEmailVerifyEnabled(t *testing.T) {
-	admin := &User{ID: 1, Email: "admin@example.com", Role: RoleAdmin, TotpEnabled: true}
+	admin := &User{ID: 1, Email: "admin@example.com", Role: RoleAdmin, Roles: []string{RoleSuperAdmin}, TotpEnabled: true}
 	require.NoError(t, admin.SetPassword("correct-password"))
 	svc, userRepo := newTotpVMService(t, admin, true)
 

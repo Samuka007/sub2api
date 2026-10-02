@@ -179,24 +179,26 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 	}
 
 	if cmd.BalanceCost > 0 {
-		newBalance, sufficient, err := deductUsageBillingBalance(ctx, tx, cmd.UserID, cmd.BalanceCost)
+		newBalance, charged, sufficient, err := deductUsageBillingBalance(ctx, tx, cmd.UserID, cmd.BalanceCost)
 		if err != nil {
 			return err
 		}
 		result.NewBalance = &newBalance
+		result.BalanceCharged = &charged
 		result.BalanceOverdrafted = !sufficient
 	}
 
+	// Key 已不存在时跳过其自身的额度/限速计数，其余结算项不受影响。
 	if cmd.APIKeyQuotaCost > 0 {
 		exhausted, err := incrementUsageBillingAPIKeyQuota(ctx, tx, cmd.APIKeyID, cmd.APIKeyQuotaCost)
-		if err != nil {
+		if err != nil && !errors.Is(err, service.ErrAPIKeyNotFound) {
 			return err
 		}
 		result.APIKeyQuotaExhausted = exhausted
 	}
 
 	if cmd.APIKeyRateLimitCost > 0 {
-		if err := incrementUsageBillingAPIKeyRateLimit(ctx, tx, cmd.APIKeyID, cmd.APIKeyRateLimitCost); err != nil {
+		if err := incrementUsageBillingAPIKeyRateLimit(ctx, tx, cmd.APIKeyID, cmd.APIKeyRateLimitCost); err != nil && !errors.Is(err, service.ErrAPIKeyNotFound) {
 			return err
 		}
 	}
@@ -240,36 +242,48 @@ func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscrip
 	return service.ErrSubscriptionNotFound
 }
 
-func deductUsageBillingBalance(ctx context.Context, tx *sql.Tx, userID int64, amount float64) (float64, bool, error) {
-	var newBalance float64
+func deductUsageBillingBalance(ctx context.Context, tx *sql.Tx, userID int64, amount float64) (float64, float64, bool, error) {
+	var balance float64
 	err := tx.QueryRowContext(ctx, `
-		UPDATE users
-		SET balance = balance - $1,
-			updated_at = NOW()
-		WHERE id = $2 AND deleted_at IS NULL AND balance >= $1
-		RETURNING balance
-	`, amount, userID).Scan(&newBalance)
-	if err == nil {
-		return newBalance, true, nil
+		SELECT balance
+		FROM users
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE
+	`, userID).Scan(&balance)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, service.ErrUserNotFound
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, false, err
+	if err != nil {
+		return 0, 0, false, err
 	}
 
+	sufficient := balance >= amount
+	charged := amount
+	if !sufficient {
+		charged = balance
+		if charged < 0 {
+			charged = 0
+		}
+	}
+	if charged == 0 {
+		return balance, 0, sufficient, nil
+	}
+
+	var newBalance float64
 	err = tx.QueryRowContext(ctx, `
 		UPDATE users
 		SET balance = balance - $1,
 			updated_at = NOW()
 		WHERE id = $2 AND deleted_at IS NULL
 		RETURNING balance
-	`, amount, userID).Scan(&newBalance)
+	`, charged, userID).Scan(&newBalance)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, service.ErrUserNotFound
+		return 0, 0, false, service.ErrUserNotFound
 	}
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
-	return newBalance, false, nil
+	return newBalance, charged, sufficient, nil
 }
 
 func reserveUsageBillingBatchImageBalance(ctx context.Context, tx *sql.Tx, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {

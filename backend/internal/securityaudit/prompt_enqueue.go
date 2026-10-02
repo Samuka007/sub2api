@@ -21,14 +21,26 @@ func NewEnqueuer(config ConfigStore, repo JobRepository, payload PayloadStore, m
 }
 
 func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
+	return e.enqueue(ctx, req, false)
+}
+
+func (e *Enqueuer) EnqueueObserveOnly(ctx context.Context, req Request) error {
+	return e.enqueue(ctx, req, true)
+}
+
+func (e *Enqueuer) enqueue(ctx context.Context, req Request, allowBlockingMode bool) error {
 	if e == nil || e.config == nil || e.repo == nil || e.payload == nil {
 		return errors.New("prompt audit enqueuer unavailable")
 	}
 	cfg, ok := e.config.Active()
 	baseFields := requestLogFields(req)
-	if !ok || cfg.EffectiveMode() != ModeAsync {
+	mode := cfg.EffectiveMode()
+	if !ok || (mode != ModeAsync && (!allowBlockingMode || mode != ModeBlocking)) {
 		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "mode_not_async"}))
 		return nil
+	}
+	if allowBlockingMode {
+		baseFields["observe_only"] = true
 	}
 	baseFields["config_version"] = cfg.ConfigVersion
 	if !cfg.IncludesGroup(req.GroupID) {

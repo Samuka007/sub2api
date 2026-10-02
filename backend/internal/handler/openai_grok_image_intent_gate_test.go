@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type imagePermissionGateAccountRepoStub struct {
+	service.AccountRepository
+}
+
+func (imagePermissionGateAccountRepoStub) ListSchedulableByPlatform(context.Context, string) ([]service.Account, error) {
+	return nil, nil
+}
+
+func (imagePermissionGateAccountRepoStub) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]service.Account, error) {
+	return nil, nil
+}
 
 func TestOpenAIGatewayHandlerResponses_GrokPassiveImageToolDeclarationBypassesPermissionGate(t *testing.T) {
 	body := `{"model":"grok-4.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}],"tool_choice":"auto","input":"write code"}`
@@ -97,14 +110,22 @@ func runOpenAIResponsesImagePermissionGateTest(t *testing.T, platform string, bo
 	})
 	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: userID, Concurrency: 1})
 
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingCache.Stop)
+	gatewayService := service.NewOpenAIGatewayService(
+		imagePermissionGateAccountRepoStub{}, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		service.NewBillingService(cfg, nil), nil, billingCache, nil,
+		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
+	)
 	h := &OpenAIGatewayHandler{
-		gatewayService:      &service.OpenAIGatewayService{},
-		billingCacheService: service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeSimple}, nil),
+		gatewayService:      gatewayService,
+		billingCacheService: billingCache,
 		apiKeyService:       &service.APIKeyService{},
 		concurrencyHelper: &ConcurrencyHelper{concurrencyService: service.NewConcurrencyService(
 			&helperConcurrencyCacheStub{userSeq: []bool{true}},
 		)},
-		cfg:          &config.Config{},
+		cfg:          cfg,
 		imageLimiter: &imageConcurrencyLimiter{},
 	}
 

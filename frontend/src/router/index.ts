@@ -13,6 +13,7 @@ import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
 import { getSetupStatus } from '@/api/setup'
 import { resolveCompletedSetupRedirectPath } from './setupRedirect'
 import { resolveRouteDocumentTitle } from './title'
+import type { AdminPermission } from '@/types'
 
 /**
  * Route definitions with lazy loading
@@ -175,6 +176,16 @@ const routes: RouteRecordRaw[] = [
       title: 'Legal Document'
     }
   },
+  {
+    path: '/model-plaza',
+    name: 'ModelPlaza',
+    component: () => import('@/views/ModelPlazaView.vue'),
+    meta: {
+      requiresAuth: false,
+      title: 'Model Plaza',
+      titleKey: 'modelPlaza.title'
+    }
+  },
 
   // ==================== User Routes ====================
   {
@@ -279,6 +290,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/model-iq',
+    name: 'ModelIq',
+    component: () => import('@/views/user/ModelIqView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'GPT Model IQ Ranking',
+      titleKey: 'modelIq.title',
+      descriptionKey: 'modelIq.description'
+    }
+  },
+  {
     path: '/subscriptions',
     name: 'Subscriptions',
     component: () => import('@/views/user/SubscriptionsView.vue'),
@@ -287,21 +310,26 @@ const routes: RouteRecordRaw[] = [
       requiresAdmin: false,
       title: 'My Subscriptions',
       titleKey: 'userSubscriptions.title',
-      descriptionKey: 'userSubscriptions.description'
+      descriptionKey: 'userSubscriptions.description',
+      requiresSubscription: true
     }
   },
   {
     path: '/purchase',
     name: 'PurchaseSubscription',
-    component: () => import('@/views/user/PaymentView.vue'),
+    component: () => import('@/views/user/RedeemCodeStoreView.vue'),
     meta: {
       requiresAuth: true,
       requiresAdmin: false,
-      title: 'Purchase Subscription',
+      title: 'Redeem Code Store',
       titleKey: 'nav.buySubscription',
       descriptionKey: 'purchase.description',
-      requiresPayment: true
+      requiresPayment: false
     }
+  },
+  {
+    path: '/purchase/store-preview',
+    redirect: '/purchase'
   },
   {
     path: '/orders',
@@ -410,9 +438,23 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Ops Monitoring',
       titleKey: 'admin.ops.title',
       descriptionKey: 'admin.ops.description'
+    }
+  },
+  {
+    path: '/admin/ops/hermes',
+    name: 'AdminHermesStatus',
+    component: () => import('@/views/admin/ops/HermesStatusView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiredPermission: 'admin.super',
+      title: 'Hermes Status',
+      titleKey: 'admin.ops.hermes.title',
+      descriptionKey: 'admin.ops.hermes.description'
     }
   },
   {
@@ -422,6 +464,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Audit Logs',
       titleKey: 'admin.audit.title',
       descriptionKey: 'admin.audit.description'
@@ -434,6 +477,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.users.read',
       title: 'User Management',
       titleKey: 'admin.users.title',
       descriptionKey: 'admin.users.description'
@@ -446,6 +490,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.groups.manage',
       title: 'Group Management',
       titleKey: 'admin.groups.title',
       descriptionKey: 'admin.groups.description'
@@ -462,6 +507,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.channels.manage',
       title: 'Channel Management',
       titleKey: 'admin.channels.title',
       descriptionKey: 'admin.channels.description'
@@ -474,6 +520,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.channels.manage',
       title: 'Channel Monitor',
       titleKey: 'admin.channelMonitor.title',
       descriptionKey: 'admin.channelMonitor.description'
@@ -497,6 +544,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Subscription Management',
       titleKey: 'admin.subscriptions.title',
       descriptionKey: 'admin.subscriptions.description'
@@ -509,9 +557,61 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.accounts.manage',
       title: 'Account Management',
       titleKey: 'admin.accounts.title',
       descriptionKey: 'admin.accounts.description'
+    }
+  },
+  {
+    path: '/admin/one-click-account-notes',
+    name: 'AdminOneClickAccountNotes',
+    component: () => import('@/views/admin/OneClickAccountNotesView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiredPermission: 'admin.accounts.manage',
+      title: 'One-click Account Notes',
+      titleKey: 'admin.oneClickAccountNotes.title',
+      descriptionKey: 'admin.oneClickAccountNotes.description'
+    }
+  },
+  {
+    path: '/admin/account-health-detector',
+    name: 'AdminAccountHealthDetector',
+    component: () => import('@/views/admin/AccountHealthDetectorView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiredPermission: 'admin.accounts.manage',
+      title: 'Account Health Check',
+      titleKey: 'admin.accountHealthDetector.title',
+      descriptionKey: 'admin.accountHealthDetector.description'
+    }
+  },
+  {
+    path: '/admin/plus-quota-automation',
+    name: 'AdminPlusQuotaAutomation',
+    component: () => import('@/views/admin/PlusQuotaAutomationView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiredPermission: 'admin.accounts.manage',
+      title: 'Plus Quota Automation',
+      titleKey: 'admin.plusQuotaAutomation.title',
+      descriptionKey: 'admin.plusQuotaAutomation.description'
+    }
+  },
+  {
+    path: '/admin/plugins',
+    name: 'AdminPlugins',
+    component: () => import('@/views/admin/PluginsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Plugin Management',
+      titleKey: 'admin.plugins.title',
+      descriptionKey: 'admin.plugins.description'
     }
   },
   {
@@ -521,6 +621,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Announcements',
       titleKey: 'admin.announcements.title',
       descriptionKey: 'admin.announcements.description'
@@ -533,6 +634,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.proxies.manage',
       title: 'Proxy Management',
       titleKey: 'admin.proxies.title',
       descriptionKey: 'admin.proxies.description'
@@ -545,6 +647,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.redeem_codes.manage',
       title: 'Redeem Code Management',
       titleKey: 'admin.redeem.title',
       descriptionKey: 'admin.redeem.description'
@@ -557,6 +660,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.promo_codes.manage',
       title: 'Promo Code Management',
       titleKey: 'admin.promo.title',
       descriptionKey: 'admin.promo.description'
@@ -569,6 +673,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'System Settings',
       titleKey: 'admin.settings.title',
       descriptionKey: 'admin.settings.description'
@@ -581,6 +686,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Risk Control',
       titleKey: 'admin.riskControl.title',
       descriptionKey: 'admin.riskControl.description',
@@ -594,6 +700,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Prompt Audit',
       titleKey: 'admin.promptAudit.title',
       descriptionKey: 'admin.promptAudit.description',
@@ -607,6 +714,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Usage Records',
       titleKey: 'admin.usage.title',
       descriptionKey: 'admin.usage.description'
@@ -623,6 +731,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Affiliate Invite Records',
       titleKey: 'nav.affiliateInviteRecords',
       descriptionKey: 'admin.affiliates.invitesDescription'
@@ -635,6 +744,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Affiliate Rebate Records',
       titleKey: 'nav.affiliateRebateRecords',
       descriptionKey: 'admin.affiliates.rebatesDescription'
@@ -647,6 +757,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Affiliate Transfer Records',
       titleKey: 'nav.affiliateTransferRecords',
       descriptionKey: 'admin.affiliates.transfersDescription'
@@ -662,6 +773,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Payment Dashboard',
       titleKey: 'nav.paymentDashboard',
       requiresPayment: true
@@ -674,6 +786,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Order Management',
       titleKey: 'nav.orderManagement',
       requiresPayment: true
@@ -686,6 +799,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
+      requiredPermission: 'admin.super',
       title: 'Subscription Plans',
       titleKey: 'nav.paymentPlans',
       requiresPayment: true
@@ -709,7 +823,12 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-  scrollBehavior(_to, _from, savedPosition) {
+  scrollBehavior(to, _from, savedPosition) {
+    // The cinematic homepage must always open on its hero instead of restoring
+    // a previous position from a reload or browser history navigation.
+    if (to.name === 'Home') {
+      return { top: 0, left: 0 }
+    }
     // Scroll to saved position when using browser back/forward
     if (savedPosition) {
       return savedPosition
@@ -807,6 +926,37 @@ router.beforeEach(async (to, _from, next) => {
       next(authStore.isAdmin ? '/admin/dashboard' : '/dashboard')
       return
     }
+    // Model Plaza:公开路由但受「启用开关 + 可选强制登录」双重控制(后端同口径 fail-closed)
+    if (to.path === '/model-plaza') {
+      if (!appStore.publicSettingsLoaded) {
+        try {
+          await appStore.fetchPublicSettings()
+        } catch (error) {
+          console.warn('Failed to load public settings in route guard', error)
+        }
+      }
+      const plazaSettings = appStore.cachedPublicSettings
+      // 仅在设置成功加载且明确为 false 时拦截(瞬时加载失败视为未知,由后端 404 兜底)
+      if (appStore.publicSettingsLoaded && plazaSettings?.model_plaza_enabled === false) {
+        next(
+          authStore.isAuthenticated
+            ? authStore.isAdmin
+              ? '/admin/dashboard'
+              : '/dashboard'
+            : '/home'
+        )
+        return
+      }
+      if (plazaSettings?.model_plaza_require_auth === true && !authStore.isAuthenticated) {
+        next({ path: '/login', query: { redirect: to.fullPath } })
+        return
+      }
+      // Backend mode:登录的非管理员也不可见(匿名由下方公共拦截处理,广场不在白名单)
+      if (appStore.backendModeEnabled && authStore.isAuthenticated && !authStore.isAdmin) {
+        next('/login')
+        return
+      }
+    }
     // Backend mode: block public pages for unauthenticated users (except login, key-usage, setup)
     if (appStore.backendModeEnabled && !authStore.isAuthenticated) {
       const isAllowed = isBackendModePublicRouteAllowed(to.path, authStore.hasPendingAuthSession)
@@ -829,10 +979,25 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
 
+  // The user dashboard is not the administrator landing page. Keep admin
+  // sessions on the existing admin console even when an auth flow falls back
+  // to the generic /dashboard path.
+  if (to.path === '/dashboard' && authStore.isAdmin) {
+    next('/admin/dashboard')
+    return
+  }
+
   // Check admin requirement
   if (requiresAdmin && !authStore.isAdmin) {
     // User is authenticated but not admin, redirect to user dashboard
     next('/dashboard')
+    return
+  }
+
+  // 细粒度管理员权限门禁（仅 UX；后端仍为最终 403 授权边界）。
+  const requiredPermission = to.meta.requiredPermission as AdminPermission | undefined
+  if (requiredPermission && !authStore.hasPermission(requiredPermission)) {
+    next('/admin/dashboard')
     return
   }
 
@@ -854,7 +1019,7 @@ router.beforeEach(async (to, _from, next) => {
   // 公共设置可能尚未加载（App.vue 的 onMounted 异步拉取晚于首次导航，且纯静态部署
   // 无 __APP_CONFIG__ 注入）。此时 cachedPublicSettings 为空会把 payment/risk_control
   // 误判为“未启用”而错误拦截，故这里先确保设置加载完成。
-  if ((to.meta.requiresPayment || to.meta.requiresRiskControl) && !appStore.publicSettingsLoaded) {
+  if ((to.meta.requiresPayment || to.meta.requiresRiskControl || to.meta.requiresSubscription) && !appStore.publicSettingsLoaded) {
     try {
       await appStore.fetchPublicSettings()
     } catch (error) {
@@ -882,10 +1047,19 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
 
+  // 订阅功能是 opt-out 开关：只有显式 false 才拦截「我的订阅」页直达。
+  if (
+    to.meta.requiresSubscription &&
+    appStore.publicSettingsLoaded &&
+    appStore.cachedPublicSettings?.subscription_enabled === false
+  ) {
+    next(authStore.isAdmin ? '/admin/dashboard' : '/dashboard')
+    return
+  }
+
   // 简易模式下限制访问某些页面
   if (authStore.isSimpleMode) {
     const restrictedPaths = [
-      '/admin/groups',
       '/admin/subscriptions',
       '/admin/redeem',
       '/subscriptions',

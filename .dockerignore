@@ -6,6 +6,9 @@
 .git
 .gitignore
 .gitattributes
+.codegraph/
+.pnpm-store/
+.vite/
 
 # Documentation
 *.md
@@ -37,6 +40,7 @@ node_modules/
 
 # Go build cache (will be built in container)
 backend/vendor/
+backend/bin/
 
 # Test files
 *_test.go
@@ -45,9 +49,22 @@ coverage/
 .nyc_output/
 
 # Environment files
+secrets/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ecdsa
+id_ed25519
+id_dsa
+*.ppk
+
+# 本地闭源插件目录可能包含发布签名私钥，绝不能进入 Docker 构建上下文。
+/plugins/
 
 # Local config
 config.yaml

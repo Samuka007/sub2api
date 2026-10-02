@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -73,8 +76,15 @@ func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_APIKeyUsesResponsesI
 		Schedulable: true,
 	}
 
-	err := svc.ForwardCountTokensAsAnthropic(context.Background(), c, account, body, "gpt-5.3-codex")
+	baseCtx := context.Background()
+	activationCount := 0
+	ctx := recording.WithDeferredActivator(baseCtx, func() context.Context {
+		activationCount++
+		return baseCtx
+	})
+	err := svc.ForwardCountTokensAsAnthropic(ctx, c, account, body, "gpt-5.3-codex")
 	require.NoError(t, err)
+	require.Equal(t, 1, activationCount, "actual upstream send must activate deferred model tracing")
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"input_tokens":42}`, rec.Body.String())
 	require.NotNil(t, upstream.lastReq)
@@ -122,6 +132,11 @@ func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_OAuthFallsBackWhenPl
 			name:       "403_missing_responses_write_scope",
 			statusCode: http.StatusForbidden,
 			body:       `{"error":{"type":"invalid_request_error","code":"missing_scope","message":"Missing scopes: api.responses.write"}}`,
+		},
+		{
+			name:       "403_html_proxy_page",
+			statusCode: http.StatusForbidden,
+			body:       "<!doctype html><html><body>Forbidden</body></html>",
 		},
 		{
 			name:       "404_input_tokens_unsupported",
@@ -306,6 +321,10 @@ func TestEstimateOpenAIInputTokens_CompareWithOpenAIAPI(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("OPENAI_API_KEY not set")
 	}
+	// Invalid/expired keys in local env must not fail the unit suite.
+	if strings.HasPrefix(apiKey, "sk-") && len(apiKey) < 20 {
+		t.Skip("OPENAI_API_KEY looks incomplete")
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	cases := []struct {
@@ -340,7 +359,17 @@ func TestEstimateOpenAIInputTokens_CompareWithOpenAIAPI(t *testing.T) {
 			require.NoError(t, err)
 
 			actual, err := callOpenAIInputTokensAPIForTest(client, apiKey, prepared.Request)
-			require.NoError(t, err)
+			if err != nil {
+				// This is an optional live-API comparison. Credential and transient
+				// network failures must not make the deterministic unit suite fail.
+				var netErr net.Error
+				if strings.Contains(err.Error(), "status=401") ||
+					strings.Contains(err.Error(), "invalid_api_key") ||
+					errors.As(err, &netErr) {
+					t.Skipf("OpenAI live comparison unavailable: %v", err)
+				}
+				require.NoError(t, err)
+			}
 
 			diff := estimated - actual
 			if diff < 0 {

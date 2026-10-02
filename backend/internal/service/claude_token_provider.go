@@ -59,6 +59,13 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if account.Platform != PlatformAnthropic || (account.Type != AccountTypeOAuth && account.Type != AccountTypeServiceAccount) {
 		return "", errors.New("not an anthropic oauth or service account")
 	}
+	quotaScoped := quotaRecoveryCredentialRefreshReceiptFromContext(ctx) != nil
+	if quotaScoped {
+		if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return "", err
+		}
+	}
 	if account.Type == AccountTypeServiceAccount {
 		return p.getServiceAccountAccessToken(ctx, account)
 	}
@@ -66,7 +73,7 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	cacheKey := ClaudeTokenCacheKey(account)
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !quotaScoped {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("claude_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -85,12 +92,20 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if needsRefresh && p.refreshAPI != nil && p.executor != nil {
 		result, err := p.refreshAPI.RefreshIfNeeded(ctx, account, p.executor, claudeTokenRefreshSkew)
 		if err != nil {
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return "", err
+			}
 			if p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
 				return "", err
 			}
 			slog.Warn("claude_token_refresh_failed", "account_id", account.ID, "error", err)
 			refreshFailed = true
 		} else if result.LockHeld {
+			if quotaScoped {
+				invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+				return "", ErrQuotaRecoveryCredentialRefreshLockHeld
+			}
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				time.Sleep(claudeLockWaitTime)
 				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {
@@ -102,6 +117,9 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			account = result.Account
 			expiresAt = account.GetCredentialAsTime("expires_at")
 		}
+	} else if needsRefresh && quotaScoped {
+		invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+		return "", errors.New("quota recovery Anthropic OAuth refresh is not configured")
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
 		locked, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
@@ -118,13 +136,22 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	}
 
+	if quotaScoped {
+		if err := validateQuotaRecoveryCredentialOwner(ctx, account); err != nil {
+			invalidateQuotaRecoveryCredentialRefreshReceipt(ctx)
+			return "", err
+		}
+		if err := deleteQuotaRecoveryCachedAccessToken(ctx, p.tokenCache, cacheKey, account); err != nil {
+			return "", err
+		}
+	}
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
 		return "", errors.New("access_token not found in credentials")
 	}
 
 	// 3) Populate cache with TTL.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !quotaScoped {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
 			slog.Debug("claude_token_version_stale_use_latest", "account_id", account.ID)

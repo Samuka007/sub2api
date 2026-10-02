@@ -178,6 +178,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			c.Set(string(ContextKeyUser), AuthSubject{
 				UserID:      apiKey.User.ID,
 				Concurrency: apiKey.User.Concurrency,
+				Roles:       apiKey.User.Roles,
 			})
 			c.Set(string(ContextKeyUserRole), apiKey.User.Role)
 			setGroupContext(c, apiKey.Group)
@@ -276,6 +277,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		c.Set(string(ContextKeyUser), AuthSubject{
 			UserID:      apiKey.User.ID,
 			Concurrency: apiKey.User.Concurrency,
+			Roles:       apiKey.User.Roles,
 		})
 		c.Set(string(ContextKeyUserRole), apiKey.User.Role)
 		setGroupContext(c, apiKey.Group)
@@ -358,6 +360,7 @@ func SetOpsFallbackAPIKey(c *gin.Context, apiKey *service.APIKey) {
 		return
 	}
 	c.Set(string(ContextKeyOpsFallbackAPIKey), apiKey)
+	notifyIdentityEstablished(c, resolvedIdentityFromAPIKey(apiKey))
 }
 
 // GetOpsFallbackAPIKey 读取 Ops 错误日志专用的回退 API Key。

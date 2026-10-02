@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/appmetrics"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
@@ -25,12 +27,18 @@ import (
 )
 
 type Application struct {
-	Server      *http.Server
-	PromptAudit *securityaudit.PromptService
-	Cleanup     func()
+	Server           *http.Server
+	PromptAudit      *securityaudit.PromptService
+	ModelTraceConfig *modeltrace.ConfigManager
+	ModelTrace       *modeltrace.Manager
+	Metrics          *appmetrics.Metrics
+	OpsMetrics       *service.OpsMetricsCollector
+	PluginManager    *service.PluginManager
+	Cleanup          func()
+	cleanupOnce      sync.Once
 }
 
-func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
+func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.Manager) (*Application, error) {
 	wire.Build(
 		// Infrastructure layer ProviderSets
 		config.ProviderSet,
@@ -51,12 +59,18 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 
 		// BuildInfo provider
 		provideServiceBuildInfo,
+		providePluginHostInfo,
+
+		// Model tracing runtime configuration provider
+		provideModelTraceConfigManager,
+		provideBatchImageTraceRecorder,
+		provideAppMetrics,
 
 		// Cleanup function provider
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "ModelTrace", "Metrics", "OpsMetrics", "PluginManager", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -67,6 +81,36 @@ func providePrivacyClientFactory() service.PrivacyClientFactory {
 
 func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 	return service.BuildInfo{
+		Version:   buildInfo.Version,
+		BuildType: buildInfo.BuildType,
+	}
+}
+
+func provideAppMetrics(
+	cfg *config.Config,
+	opsMetrics *service.OpsMetricsCollector,
+	modelTrace *modeltrace.Manager,
+) (*appmetrics.Metrics, error) {
+	return appmetrics.New(cfg.Metrics, opsMetrics, modelTrace)
+}
+
+func provideModelTraceConfigManager(
+	cfg *config.Config,
+	settings service.SettingRepository,
+	encryptor service.SecretEncryptor,
+	runtime *modeltrace.Manager,
+) *modeltrace.ConfigManager {
+	return modeltrace.NewConfigManager(
+		cfg.ModelTracing,
+		settings,
+		encryptor,
+		cfg.Totp.EncryptionKeyConfigured,
+		runtime,
+	)
+}
+
+func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
+	return service.PluginHostInfo{
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
@@ -88,6 +132,9 @@ func provideCleanup(
 	schedulerSnapshot *service.SchedulerSnapshotService,
 	tokenRefresh *service.TokenRefreshService,
 	accountExpiry *service.AccountExpiryService,
+	cnProviderBalanceCheck *service.CNProviderBalanceCheckService,
+	codexVersionSync *service.OpenAICodexVersionSyncService,
+	claudeCodeVersionSync *service.ClaudeCodeVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
 	subscriptionExpiry *service.SubscriptionExpiryService,
 	usageCleanup *service.UsageCleanupService,
@@ -109,10 +156,18 @@ func provideCleanup(
 	backupSvc *service.BackupService,
 	paymentOrderExpiry *service.PaymentOrderExpiryService,
 	channelMonitorRunner *service.ChannelMonitorRunner,
+	channelMonitorV2Aggregator *service.ChannelMonitorV2Aggregator,
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
+	quotaRecovery *service.QuotaRecoveryService,
+	plusQuotaAutomation *service.PlusQuotaAutomationService,
+	modelIQ *service.ModelIQService,
+	ollamaCloudUsage *service.OllamaCloudUsageService,
+	opencodeGoUsage *service.OpenCodeGoUsageService,
 	auditLog *service.AuditLogService,
+	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
+	pluginManager *service.PluginManager,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -125,6 +180,18 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"PluginManager", func() error {
+				if pluginManager != nil {
+					pluginManager.Stop()
+				}
+				return nil
+			}},
+			{"OpenAIQuotaAutoResetService", func() error {
+				if openAIAutoReset != nil {
+					openAIAutoReset.Stop()
+				}
+				return nil
+			}},
 			{"OpsIngressRejectAggregator", func() error {
 				if opsIngressReject != nil {
 					opsIngressReject.Stop()
@@ -235,6 +302,20 @@ func provideCleanup(
 				accountExpiry.Stop()
 				return nil
 			}},
+			{"CNProviderBalanceCheckService", func() error {
+				if cnProviderBalanceCheck != nil {
+					cnProviderBalanceCheck.Stop()
+				}
+				return nil
+			}},
+			{"OpenAICodexVersionSyncService", func() error {
+				codexVersionSync.Stop()
+				return nil
+			}},
+			{"ClaudeCodeVersionSyncService", func() error {
+				claudeCodeVersionSync.Stop()
+				return nil
+			}},
 			{"ProxyExpiryService", func() error {
 				proxyExpiry.Stop()
 				return nil
@@ -295,6 +376,12 @@ func provideCleanup(
 				}
 				return nil
 			}},
+			{"OpenAICodexTicketHarvester", func() error {
+				if openAIGateway != nil {
+					openAIGateway.StopOpenAICodexTicketHarvester()
+				}
+				return nil
+			}},
 			{"ScheduledTestRunnerService", func() error {
 				if scheduledTestRunner != nil {
 					scheduledTestRunner.Stop()
@@ -313,6 +400,12 @@ func provideCleanup(
 				}
 				return nil
 			}},
+			{"ChannelMonitorV2Aggregator", func() error {
+				if channelMonitorV2Aggregator != nil {
+					channelMonitorV2Aggregator.Stop()
+				}
+				return nil
+			}},
 			{"ChannelMonitorRunner", func() error {
 				if channelMonitorRunner != nil {
 					channelMonitorRunner.Stop()
@@ -328,6 +421,36 @@ func provideCleanup(
 			{"UpstreamBillingProbeService", func() error {
 				if upstreamBillingProbe != nil {
 					upstreamBillingProbe.Stop()
+				}
+				return nil
+			}},
+			{"QuotaRecoveryService", func() error {
+				if quotaRecovery != nil {
+					quotaRecovery.Stop()
+				}
+				return nil
+			}},
+			{"PlusQuotaAutomationService", func() error {
+				if plusQuotaAutomation != nil {
+					plusQuotaAutomation.Stop()
+				}
+				return nil
+			}},
+			{"ModelIQService", func() error {
+				if modelIQ != nil {
+					modelIQ.Stop()
+				}
+				return nil
+			}},
+			{"OllamaCloudUsageService", func() error {
+				if ollamaCloudUsage != nil {
+					ollamaCloudUsage.Stop()
+				}
+				return nil
+			}},
+			{"OpenCodeGoUsageService", func() error {
+				if opencodeGoUsage != nil {
+					opencodeGoUsage.Stop()
 				}
 				return nil
 			}},

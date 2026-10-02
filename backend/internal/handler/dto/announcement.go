@@ -40,6 +40,14 @@ type UserAnnouncement struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// PublicAnnouncement intentionally contains only fields needed by the public
+// homepage. Administrative state and targeting rules must remain private.
+type PublicAnnouncement struct {
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
 func AnnouncementFromService(a *service.Announcement) *Announcement {
 	if a == nil {
 		return nil
@@ -74,5 +82,16 @@ func UserAnnouncementFromService(a *service.UserAnnouncement) *UserAnnouncement 
 		ReadAt:     a.ReadAt,
 		CreatedAt:  a.Announcement.CreatedAt,
 		UpdatedAt:  a.Announcement.UpdatedAt,
+	}
+}
+
+func PublicAnnouncementFromService(a *service.Announcement) *PublicAnnouncement {
+	if a == nil {
+		return nil
+	}
+	return &PublicAnnouncement{
+		ID:      a.ID,
+		Title:   a.Title,
+		Content: a.Content,
 	}
 }

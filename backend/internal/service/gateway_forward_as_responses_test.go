@@ -3,6 +3,10 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +14,364 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAdaptResponsesClientToolsForAnthropic_FlattensNamespace(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"model":"claude-fable-5",
+		"input":[{"type":"function_call","call_id":"call_1","namespace":"codex_app","name":"read_thread","arguments":"{}"}],
+		"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"read_thread","description":"Read a task","parameters":{"type":"object","properties":{}}}]}]
+	}`)
+
+	adapted, mapping, err := adaptResponsesClientToolsForAnthropic(body)
+	require.NoError(t, err)
+	require.Equal(t, apicompat.ResponsesNamespaceName{Namespace: "codex_app", Name: "read_thread"}, mapping.NamespaceTools["codex_app__read_thread"])
+
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(adapted, &request))
+	tools := request["tools"].([]any)
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]any)
+	require.Equal(t, "function", tool["type"])
+	require.Equal(t, "codex_app__read_thread", tool["name"])
+
+	input := request["input"].([]any)
+	call := input[0].(map[string]any)
+	require.Equal(t, "codex_app__read_thread", call["name"])
+	require.NotContains(t, call, "namespace")
+}
+
+func TestAdaptResponsesClientToolsForAnthropic_LiftsAdditionalTools(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-fable-5",
+		"input":[
+			{"type":"additional_tools","tools":[
+				{"type":"custom","name":"exec","description":"Run a command"},
+				{"type":"namespace","name":"codex_app","tools":[
+					{"type":"function","name":"read_thread","parameters":{"type":"object"}}
+				]}
+			]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]}
+		]
+	}`)
+
+	adapted, mapping, err := adaptResponsesClientToolsForAnthropic(body)
+	require.NoError(t, err)
+	require.True(t, mapping.CustomTools["exec"])
+	require.Equal(t, apicompat.ResponsesNamespaceName{Namespace: "codex_app", Name: "read_thread"}, mapping.NamespaceTools["codex_app__read_thread"])
+
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(adapted, &request))
+	tools := request["tools"].([]any)
+	require.Len(t, tools, 2)
+	require.Equal(t, "function", tools[0].(map[string]any)["type"])
+	require.Equal(t, "codex_app__read_thread", tools[1].(map[string]any)["name"])
+
+	input := request["input"].([]any)
+	require.Len(t, input, 1)
+	require.Equal(t, "message", input[0].(map[string]any)["type"])
+}
+
+func TestForwardAsResponses_ClientToolAdaptationErrorWritesInvalidRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name        string
+		body        string
+		wantMessage string
+	}{
+		{
+			name: "ambiguous custom and function tool names",
+			body: `{
+				"model":"claude-fable-5",
+				"tools":[
+					{"type":"function","name":"exec","parameters":{"type":"object"}},
+					{"type":"custom","name":"exec"}
+				]
+			}`,
+			wantMessage: "conflicts with a function tool",
+		},
+		{
+			name: "malformed additional tools",
+			body: `{
+				"model":"claude-fable-5",
+				"input":[
+					{"type":"additional_tools","tools":{"type":"custom","name":"exec"}}
+				]
+			}`,
+			wantMessage: "additional_tools.tools must be an array",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+
+			result, err := (&GatewayService{}).ForwardAsResponses(
+				context.Background(),
+				c,
+				nil,
+				[]byte(tt.body),
+				nil,
+			)
+
+			require.Error(t, err)
+			require.Nil(t, result)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.True(t, IsResponseCommitted(c))
+
+			var response struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, "invalid_request_error", response.Error.Code)
+			require.Contains(t, response.Error.Message, tt.wantMessage)
+		})
+	}
+}
+
+// Codex 的 codex_app 工具（如 automation_update）把 parameters 根节点声明成对象
+// 联合；Responses→Anthropic 转换后 input_schema 顶部不能再出现联合关键字。
+func TestAdaptResponsesClientToolsForAnthropic_FlattensRootUnionSchema(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"model":"claude-opus-5",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"create an automation"}]}],
+		"tools":[{"type":"namespace","name":"codex_app","tools":[{
+			"type":"function",
+			"name":"automation_update",
+			"description":"Create, update, view, or delete recurring automations",
+			"parameters":{"oneOf":[
+				{"type":"object","properties":{"mode":{"enum":["view"]},"id":{"type":"string"}},"required":["mode","id"]},
+				{"type":"object","properties":{"mode":{"enum":["update"]},"id":{"type":"string"}},"required":["mode","id"]}
+			]}
+		}]}]
+	}`)
+
+	adapted, _, err := adaptResponsesClientToolsForAnthropic(body)
+	require.NoError(t, err)
+
+	var responsesReq apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal(adapted, &responsesReq))
+
+	claudeReq, err := apicompat.ResponsesToAnthropicRequest(&responsesReq)
+	require.NoError(t, err)
+	require.Len(t, claudeReq.Tools, 1)
+
+	tool := claudeReq.Tools[0]
+	require.Equal(t, "codex_app__automation_update", tool.Name)
+
+	var schema map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(tool.InputSchema, &schema))
+	require.JSONEq(t, `"object"`, string(schema["type"]))
+	require.NotContains(t, schema, "oneOf")
+	require.NotContains(t, schema, "anyOf")
+	require.NotContains(t, schema, "allOf")
+	require.JSONEq(t, `["mode","id"]`, string(schema["required"]))
+
+	wire, err := json.Marshal(tool)
+	require.NoError(t, err)
+	require.NotContains(t, string(wire), `"input_schema":{"oneOf"`)
+	require.NotContains(t, string(wire), `"input_schema":{"anyOf"`)
+	require.NotContains(t, string(wire), `"input_schema":{"allOf"`)
+}
+
+func namespaceToolAnthropicStream() string {
+	return strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_namespace","type":"message","role":"assistant","content":[],"model":"claude-fable-5","stop_reason":"","usage":{"input_tokens":10}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_namespace","name":"codex_app__read_thread","input":{"thread_id":"123"}}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+}
+
+func namespaceToolMapping() apicompat.ResponsesClientToolMapping {
+	return apicompat.ResponsesClientToolMapping{NamespaceTools: map[string]apicompat.ResponsesNamespaceName{
+		"codex_app__read_thread": {Namespace: "codex_app", Name: "read_thread"},
+	}}
+}
+
+func TestHandleResponsesBufferedStreamingResponse_RestoresNamespaceTool(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(namespaceToolAnthropicStream()))}
+
+	svc := &GatewayService{}
+	_, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-fable-5", "claude-fable-5", nil, time.Now(), namespaceToolMapping())
+	require.NoError(t, err)
+	require.Contains(t, rec.Body.String(), `"type":"function_call"`)
+	require.Contains(t, rec.Body.String(), `"name":"read_thread"`)
+	require.Contains(t, rec.Body.String(), `"namespace":"codex_app"`)
+	require.NotContains(t, rec.Body.String(), `"name":"codex_app__read_thread"`)
+}
+
+func TestHandleResponsesBufferedStreamingResponse_ToolArgumentsAreValidJSON(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(toolAnthropicSSEStream()))}
+
+	_, err := (&GatewayService{}).handleResponsesBufferedStreamingResponse(resp, c, "claude-fable-5", "claude-fable-5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	require.NoError(t, err)
+
+	var body struct {
+		Output []struct {
+			Type      string `json:"type"`
+			Arguments string `json:"arguments"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Output, 1)
+	require.Equal(t, "function_call", body.Output[0].Type)
+	require.JSONEq(t, `{"query":"status"}`, body.Output[0].Arguments)
+}
+
+func TestAppendRawJSON_EmptyObjectPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	fragment := `{"query":"status"}`
+	require.JSONEq(t, fragment, string(appendRawJSON(json.RawMessage("{ \n\t }"), fragment)))
+	require.Equal(t, `{"existing":true}{"query":"status"}`, string(appendRawJSON(json.RawMessage(`{"existing":true}`), fragment)))
+}
+
+func TestHandleResponsesStreamingResponse_RestoresNamespaceTool(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(namespaceToolAnthropicStream()))}
+
+	svc := &GatewayService{}
+	_, err := svc.handleResponsesStreamingResponse(resp, c, "claude-fable-5", "claude-fable-5", nil, time.Now(), namespaceToolMapping())
+	require.NoError(t, err)
+	require.Contains(t, rec.Body.String(), `response.output_item.added`)
+	require.Contains(t, rec.Body.String(), `"name":"read_thread"`)
+	require.Contains(t, rec.Body.String(), `"namespace":"codex_app"`)
+	require.NotContains(t, rec.Body.String(), `"name":"codex_app__read_thread"`)
+}
+
+func TestHandleResponsesStreamingResponse_FinalizesOpenClientToolThroughRestorer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name            string
+		toolName        string
+		arguments       string
+		mapping         apicompat.ResponsesClientToolMapping
+		wantItemType    string
+		wantItemName    string
+		wantCustomInput string
+	}{
+		{
+			name:            "custom tool",
+			toolName:        "exec",
+			arguments:       `{"input":"pwd"}`,
+			mapping:         apicompat.ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}},
+			wantItemType:    "custom_tool_call",
+			wantItemName:    "exec",
+			wantCustomInput: "pwd",
+		},
+		{
+			name:         "tool search",
+			toolName:     "tool_search",
+			arguments:    `{"query":"git"}`,
+			mapping:      apicompat.ResponsesClientToolMapping{ToolSearch: true},
+			wantItemType: "tool_search_call",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			quotedArguments, err := json.Marshal(tt.arguments)
+			require.NoError(t, err)
+			upstream := strings.Join([]string{
+				`event: message_start`,
+				`data: {"type":"message_start","message":{"id":"msg_open_tool","type":"message","role":"assistant","content":[],"model":"claude-fable-5","stop_reason":"","usage":{"input_tokens":10}}}`,
+				``,
+				`event: content_block_start`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_open","name":"` + tt.toolName + `","input":{}}}`,
+				``,
+				`event: content_block_delta`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":` + string(quotedArguments) + `}}`,
+				``,
+			}, "\n")
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(upstream))}
+
+			result, err := (&GatewayService{}).handleResponsesStreamingResponse(
+				resp,
+				c,
+				"claude-fable-5",
+				"claude-fable-5",
+				nil,
+				time.Now(),
+				tt.mapping,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			frames := parseCompactBridgeSSE(t, rec.Body.String())
+			require.Len(t, frames, 4)
+			wantTypes := []string{
+				"response.created",
+				"response.output_item.added",
+				"response.output_item.done",
+				"response.completed",
+			}
+			events := make([]apicompat.ResponsesStreamEvent, len(frames))
+			for index, frame := range frames {
+				require.NoError(t, json.Unmarshal([]byte(frame[1]), &events[index]))
+				require.Equal(t, wantTypes[index], frame[0])
+				require.Equal(t, frame[0], events[index].Type)
+				require.Equal(t, index, events[index].SequenceNumber)
+			}
+
+			require.NotNil(t, events[2].Item)
+			require.Equal(t, tt.wantItemType, events[2].Item.Type)
+			require.Equal(t, tt.wantItemName, events[2].Item.Name)
+			require.NotNil(t, events[3].Response)
+			require.Len(t, events[3].Response.Output, 1)
+			require.Equal(t, tt.wantItemType, events[3].Response.Output[0].Type)
+			require.Equal(t, tt.wantItemName, events[3].Response.Output[0].Name)
+			if tt.wantCustomInput != "" {
+				require.Equal(t, tt.wantCustomInput, events[2].Item.Input)
+				require.Equal(t, tt.wantCustomInput, events[3].Response.Output[0].Input)
+			} else {
+				require.JSONEq(t, tt.arguments, events[2].Item.Arguments)
+				require.JSONEq(t, tt.arguments, events[3].Response.Output[0].Arguments)
+			}
+		})
+	}
+}
 
 func TestExtractResponsesReasoningEffortFromBody(t *testing.T) {
 	t.Parallel()
@@ -23,7 +382,19 @@ func TestExtractResponsesReasoningEffortFromBody(t *testing.T) {
 
 	maxGot := ExtractResponsesReasoningEffortFromBody([]byte(`{"model":"deepseek-v4-pro","reasoning":{"effort":"max"}}`))
 	require.NotNil(t, maxGot)
-	require.Equal(t, "xhigh", *maxGot)
+	require.Equal(t, "max", *maxGot)
+
+	mappedMax := ExtractResponsesReasoningEffortFromBody(
+		[]byte(`{"model":"public-alias","reasoning":{"effort":"max"}}`),
+		"provider/glm-5.2",
+		"public-alias",
+	)
+	require.NotNil(t, mappedMax)
+	require.Equal(t, "max", *mappedMax)
+
+	legacyMax := ExtractResponsesReasoningEffortFromBody([]byte(`{"model":"gpt-5.5","reasoning":{"effort":"max"}}`))
+	require.NotNil(t, legacyMax)
+	require.Equal(t, "xhigh", *legacyMax)
 
 	require.Nil(t, ExtractResponsesReasoningEffortFromBody([]byte(`{"model":"claude-sonnet-4.5"}`)))
 }
@@ -36,7 +407,7 @@ func TestHandleResponsesBufferedStreamingResponse_PreservesMessageStartCacheUsag
 	c, _ := gin.CreateTestContext(rec)
 
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_buffered"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_buffered"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event: message_start`,
 			`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":12,"cache_read_input_tokens":9,"cache_creation_input_tokens":3}}}`,
@@ -51,9 +422,11 @@ func TestHandleResponsesBufferedStreamingResponse_PreservesMessageStartCacheUsag
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
+	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, "rid_buffered", result.RequestID)
+	require.Equal(t, "msg_1", result.ResponseID)
 	require.Equal(t, 12, result.Usage.InputTokens)
 	require.Equal(t, 7, result.Usage.OutputTokens)
 	require.Equal(t, 9, result.Usage.CacheReadInputTokens)
@@ -69,7 +442,7 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	c, _ := gin.CreateTestContext(rec)
 
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_stream"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_stream"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event: message_start`,
 			`data: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":20,"cache_read_input_tokens":11,"cache_creation_input_tokens":4}}}`,
@@ -87,14 +460,126 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
+	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, "rid_stream", result.RequestID)
+	require.Equal(t, "msg_2", result.ResponseID)
 	require.Equal(t, 20, result.Usage.InputTokens)
 	require.Equal(t, 8, result.Usage.OutputTokens)
 	require.Equal(t, 11, result.Usage.CacheReadInputTokens)
 	require.Equal(t, 4, result.Usage.CacheCreationInputTokens)
 	require.Contains(t, rec.Body.String(), `response.completed`)
+}
+
+func TestHandleResponsesStreamingResponse_NormalizesTerminalUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name              string
+		startUsage        string
+		deltaUsage        string
+		wantInput         int
+		wantOutput        int
+		wantCached        int
+		wantCacheCreation int
+	}{
+		{
+			name:       "cache_read_input_tokens full cache",
+			startUsage: `"input_tokens":173306,"prompt_tokens":173306`,
+			deltaUsage: `"input_tokens":0,"output_tokens":8,"prompt_tokens":173306,"cache_read_input_tokens":173306`,
+			wantOutput: 8,
+			wantCached: 173306,
+		},
+		{
+			name:       "cached_tokens full cache",
+			startUsage: `"input_tokens":173306,"prompt_tokens":173306`,
+			deltaUsage: `"input_tokens":0,"output_tokens":8,"prompt_tokens":173306,"cached_tokens":173306`,
+			wantOutput: 8,
+			wantCached: 173306,
+		},
+		{
+			name:       "prompt_tokens_details full cache",
+			startUsage: `"input_tokens":173306,"prompt_tokens":173306`,
+			deltaUsage: `"input_tokens":0,"output_tokens":8,"prompt_tokens":173306,"prompt_tokens_details":{"cached_tokens":173306}`,
+			wantOutput: 8,
+			wantCached: 173306,
+		},
+		{
+			name:       "DeepSeek input total with hit and miss buckets",
+			startUsage: `"input_tokens":0`,
+			deltaUsage: `"input_tokens":1200,"output_tokens":30,"prompt_cache_hit_tokens":800,"prompt_cache_miss_tokens":400`,
+			wantInput:  400,
+			wantOutput: 30,
+			wantCached: 800,
+		},
+		{
+			name:       "OpenAI prompt total with cached details",
+			startUsage: `"input_tokens":0`,
+			deltaUsage: `"prompt_tokens":1200,"output_tokens":30,"prompt_tokens_details":{"cached_tokens":800}`,
+			wantInput:  400,
+			wantOutput: 30,
+			wantCached: 800,
+		},
+		{
+			name:              "cache creation only without prompt total or miss bucket keeps independent input",
+			startUsage:        `"input_tokens":1200`,
+			deltaUsage:        `"input_tokens":0,"output_tokens":30,"cache_creation_input_tokens":800`,
+			wantInput:         1200,
+			wantOutput:        30,
+			wantCacheCreation: 800,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, terminal := range []string{"message_stop", "eof"} {
+			t.Run(tt.name+"/"+terminal, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				lines := []string{
+					`event: message_start`,
+					`data: {"type":"message_start","message":{"id":"msg_usage","type":"message","role":"assistant","content":[],"model":"k3","stop_reason":"","usage":{` + tt.startUsage + `}}}`,
+					``,
+					`event: message_delta`,
+					`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{` + tt.deltaUsage + `}}`,
+					``,
+				}
+				if terminal == "message_stop" {
+					lines = append(lines, `event: message_stop`, `data: {"type":"message_stop"}`, ``)
+				}
+				resp := &http.Response{Body: io.NopCloser(strings.NewReader(strings.Join(lines, "\n")))}
+
+				result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "k3", "k3", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+				require.NoError(t, err)
+				require.Equal(t, tt.wantInput, result.Usage.InputTokens)
+				require.Equal(t, tt.wantCached, result.Usage.CacheReadInputTokens)
+				require.Equal(t, tt.wantCacheCreation, result.Usage.CacheCreationInputTokens)
+
+				var completed apicompat.ResponsesStreamEvent
+				for _, line := range strings.Split(rec.Body.String(), "\n") {
+					if !strings.HasPrefix(line, "data: ") {
+						continue
+					}
+					var event apicompat.ResponsesStreamEvent
+					require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event))
+					if event.Type == "response.completed" {
+						completed = event
+					}
+				}
+				require.NotNil(t, completed.Response)
+				require.NotNil(t, completed.Response.Usage)
+				require.Equal(t, tt.wantInput+tt.wantCached+tt.wantCacheCreation, completed.Response.Usage.InputTokens)
+				require.Equal(t, tt.wantOutput, completed.Response.Usage.OutputTokens)
+				require.Equal(t, completed.Response.Usage.InputTokens+tt.wantOutput, completed.Response.Usage.TotalTokens)
+				require.Equal(t, tt.wantCacheCreation, completed.Response.Usage.CacheCreationInputTokens)
+				if tt.wantCached == 0 {
+					require.Nil(t, completed.Response.Usage.InputTokensDetails)
+				} else {
+					require.Equal(t, tt.wantCached, completed.Response.Usage.InputTokensDetails.CachedTokens)
+				}
+			})
+		}
+	}
 }
 
 func TestParseAnthropicSSEField(t *testing.T) {
@@ -183,7 +668,7 @@ func TestHandleResponsesBufferedStreamingResponse_CompactSSEFormat(t *testing.T)
 
 	// Simulate compact SSE format without spaces after colons (e.g. Kimi API)
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_compact"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_compact"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event:message_start`,
 			`data:{"type":"message_start","message":{"id":"msg_compact","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":10}}}`,
@@ -198,7 +683,7 @@ func TestHandleResponsesBufferedStreamingResponse_CompactSSEFormat(t *testing.T)
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
+	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 10, result.Usage.InputTokens)
@@ -214,7 +699,7 @@ func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 
 	// Simulate compact SSE format without spaces after colons (e.g. Kimi API)
 	resp := &http.Response{
-		Header: http.Header{"x-request-id": []string{"rid_compact_stream"}},
+		Header: http.Header{"X-Request-Id": []string{"rid_compact_stream"}},
 		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 			`event:message_start`,
 			`data:{"type":"message_start","message":{"id":"msg_compact_stream","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":15}}}`,
@@ -232,10 +717,86 @@ func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now())
+	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 15, result.Usage.InputTokens)
 	require.Equal(t, 6, result.Usage.OutputTokens)
 	require.Contains(t, rec.Body.String(), `response.completed`)
+}
+
+func TestClaude55ResponsesSignedThinkingBufferedAndStreamed(t *testing.T) {
+	payload := strings.Join([]string{
+		"event: message_start\n" + `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":10}}}`,
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		"event: content_block_delta\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}}`,
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}`,
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		"event: content_block_delta\n" + `data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}`,
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":1}`,
+		"event: message_delta\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		"event: message_stop\n" + `data: {"type":"message_stop"}`,
+	}, "\n\n") + "\n\n"
+	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-5-5"} {
+		modelPayload := strings.ReplaceAll(payload, "claude-opus-5-5", model)
+		for _, stream := range []bool{false, true} {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(modelPayload))}
+			svc := &GatewayService{}
+			var err error
+			if stream {
+				_, err = svc.handleResponsesStreamingResponse(resp, c, "public-claude", model, nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+			} else {
+				_, err = svc.handleResponsesBufferedStreamingResponse(resp, c, "public-claude", model, nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+			}
+			require.NoError(t, err)
+			require.Contains(t, rec.Body.String(), "anthropic-thinking-v1:")
+			require.Contains(t, rec.Body.String(), "public-claude")
+			require.Contains(t, rec.Body.String(), `"text":"ok"`)
+		}
+	}
+}
+
+func TestClaude55BridgeUsesMappedModelBeforeThinkingConversion(t *testing.T) {
+	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-5-5"} {
+		for _, chat := range []bool{false, true} {
+			for _, forced := range []bool{false, true} {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				body := `{"model":"public-claude","input":"hello","reasoning":{"effort":"xhigh"}}`
+				if chat {
+					body = `{"model":"public-claude","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"xhigh"}`
+				}
+				if forced {
+					body = body[:len(body)-1] + `,"tool_choice":"required","tools":[{"type":"function","name":"lookup","function":{"name":"lookup"}}]}`
+				}
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+				upstream := &anthropicHTTPUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(namespaceToolAnthropicStream()))}}
+				svc := &GatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+				account := &Account{ID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "fixture-key", "model_mapping": map[string]any{"public-claude": model}}}
+				var err error
+				var result *ForwardResult
+				if chat {
+					result, err = svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(body), nil)
+				} else {
+					result, err = svc.ForwardAsResponses(context.Background(), c, account, []byte(body), nil)
+				}
+				if forced {
+					require.Error(t, err)
+					require.Equal(t, 400, rec.Code)
+					require.Nil(t, upstream.lastReq)
+				} else {
+					require.NoError(t, err)
+					require.NotNil(t, result)
+					require.NotNil(t, upstream.lastReq)
+					require.Equal(t, model, gjson.GetBytes(upstream.lastBody, "model").String())
+					require.Equal(t, "adaptive", gjson.GetBytes(upstream.lastBody, "thinking.type").String())
+					require.Equal(t, "xhigh", gjson.GetBytes(upstream.lastBody, "output_config.effort").String())
+					require.False(t, gjson.GetBytes(upstream.lastBody, "thinking.budget_tokens").Exists())
+				}
+			}
+		}
+	}
 }

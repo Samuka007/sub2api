@@ -11,6 +11,10 @@ const { getSnapshotV2, getUserUsageTrend, getUserSpendingRanking } = vi.hoisted(
   getUserSpendingRanking: vi.fn()
 }))
 
+vi.mock('vue-chartjs', () => ({
+  Line: { name: 'Line', props: ['data', 'options'], template: '<div class="line-chart" />' }
+}))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     dashboard: {
@@ -18,6 +22,13 @@ vi.mock('@/api/admin', () => ({
       getUserUsageTrend,
       getUserSpendingRanking
     }
+  }
+}))
+
+vi.mock('vue-chartjs', () => ({
+  Line: {
+    props: ['data'],
+    template: '<pre class="user-trend-data">{{ JSON.stringify(data) }}</pre>'
   }
 }))
 
@@ -38,7 +49,10 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string, params?: Record<string, unknown>) => {
+        if (key === 'admin.redeem.userPrefix') return `User #${params?.id}`
+        return key
+      }
     })
   }
 })
@@ -115,6 +129,30 @@ describe('admin DashboardView', () => {
     })
   })
 
+  it('switches metrics and ignores a stale tokens response', async () => {
+    let resolveTokens!: (value: any) => void
+    getUserUsageTrend.mockImplementationOnce(() => new Promise(resolve => { resolveTokens = resolve }))
+    getUserUsageTrend.mockResolvedValueOnce({ trend: [{ date: '2026-01-01', user_id: 2, username: 'spender', email: '', requests: 1, tokens: 10, cost: 5, actual_cost: 5 }] })
+    const wrapper = mount(DashboardView, {
+      global: { stubs: {
+        AppLayout: { template: '<div><slot /></div>' }, LoadingSpinner: true,
+        Icon: true, DateRangePicker: true, Select: true, ModelDistributionChart: true,
+        TokenUsageTrend: true
+      } }
+    })
+    await flushPromises()
+    expect(getUserUsageTrend).toHaveBeenCalledWith(expect.objectContaining({ metric: 'tokens', limit: 12 }))
+    await wrapper.findAll('button').find(button => button.text() === 'admin.dashboard.actualSpending')!.trigger('click')
+    expect(getUserUsageTrend).toHaveBeenCalledWith(expect.objectContaining({ metric: 'actual_cost', limit: 12 }))
+    await flushPromises()
+    const chart = wrapper.findComponent({ name: 'Line' })
+    expect(chart.props('data').datasets[0].data).toEqual([5])
+    expect(chart.props('options').scales.y.ticks.callback(5)).toBe('$5.00')
+    resolveTokens({ trend: [{ date: '2026-01-01', user_id: 1, username: 'tokens', email: '', requests: 1, tokens: 100, cost: 1, actual_cost: 1 }] })
+    await flushPromises()
+    expect(chart.props('data').datasets[0].data).toEqual([5])
+  })
+
   it('uses last 24 hours as default dashboard range', async () => {
     mount(DashboardView, {
       global: {
@@ -142,5 +180,44 @@ describe('admin DashboardView', () => {
       end_date: formatLocalDate(now),
       granularity: 'hour'
     }))
+  })
+
+  it('uses username, notes, email, then user ID for user trend labels', async () => {
+    getUserUsageTrend.mockResolvedValue({
+      trend: [
+        { date: '2026-08-12', user_id: 1, username: '  Alice  ', notes: 'Admin Alice', email: 'alice@example.com', tokens: 100 },
+        { date: '2026-08-12', user_id: 2, username: '   ', notes: '  Admin Bob  ', email: 'bob@example.com', tokens: 200 },
+        { date: '2026-08-12', user_id: 3, username: '', notes: ' \t\n ', email: '  carol@example.com  ', tokens: 300 },
+        { date: '2026-08-12', user_id: 4, username: ' ', notes: '\n\t', email: ' ', tokens: 400 }
+      ],
+      start_date: '',
+      end_date: '',
+      granularity: 'hour'
+    })
+
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          LoadingSpinner: true,
+          Icon: true,
+          DateRangePicker: true,
+          Select: true,
+          ModelDistributionChart: true,
+          TokenUsageTrend: true,
+          Line: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const chartData = JSON.parse(wrapper.find('.user-trend-data').text())
+    expect(chartData.datasets.map((dataset: { label: string }) => dataset.label)).toEqual([
+      'Alice',
+      'Admin Bob',
+      'carol@example.com',
+      'User #4'
+    ])
   })
 })

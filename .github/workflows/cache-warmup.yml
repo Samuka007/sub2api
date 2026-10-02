@@ -1,0 +1,36 @@
+name: Go Build Cache Warmup
+
+# 把 self-hosted runner 的本地 go-build 缓存持续对齐到 main HEAD，
+# 让不碰 hub 包（internal/service 等）的 PR 直接热启动，避免冷全量重编。
+# 注意：改 hub 包并不会被本 job 救到——那属于 buildid 级联失效，需拆包解决。
+
+on:
+  schedule:
+    - cron: '12 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  warm-go-cache:
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: false
+      # 只编译不执行（go build 不跑 test 二进制），对齐 run_backend_ci.sh 的
+      # 三个 tag/flag 集：unit / integration / CGO_ENABLED=0 build
+      - name: Warm -tags=unit package compile cache
+        working-directory: backend
+        run: go build -tags=unit ./...
+      - name: Warm -tags=integration package compile cache
+        working-directory: backend
+        run: go build -tags=integration ./...
+      - name: Warm CGO-disabled build cache
+        working-directory: backend
+        run: CGO_ENABLED=0 go build -trimpath ./cmd/server

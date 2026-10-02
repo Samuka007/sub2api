@@ -1,21 +1,30 @@
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-dark-950">
+  <div
+    class="min-h-screen"
+    :class="usesAdminLayout ? 'bg-gray-50 dark:bg-dark-950' : 'user-console-shell bg-[#f4f6f5] dark:bg-[#0b1113]'"
+  >
     <!-- Background Decoration -->
-    <div class="pointer-events-none fixed inset-0 bg-mesh-gradient"></div>
+    <div v-if="usesAdminLayout" class="pointer-events-none fixed inset-0 bg-mesh-gradient"></div>
 
     <!-- Sidebar -->
-    <AppSidebar />
+    <AppSidebar :variant="layoutVariant" />
 
     <!-- Main Content Area -->
     <div
       class="relative min-h-screen transition-all duration-300"
-      :class="[sidebarCollapsed ? 'lg:ml-[72px]' : 'lg:ml-64']"
+      :class="[
+        sidebarCollapsed
+          ? 'lg:ml-[72px]'
+          : usesAdminLayout
+            ? 'lg:ml-64'
+            : 'lg:ml-[232px]'
+      ]"
     >
       <!-- Header -->
-      <AppHeader />
+      <AppHeader :variant="layoutVariant" />
 
       <!-- Main Content -->
-      <main class="p-4 md:p-6 lg:p-8">
+      <main :class="usesAdminLayout ? 'p-4 md:p-6 lg:p-8' : 'px-4 py-6 sm:px-6 lg:px-8 lg:py-7'">
         <slot />
       </main>
     </div>
@@ -35,10 +44,13 @@ import AppHeader from './AppHeader.vue'
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const sidebarCollapsed = computed(() => appStore.sidebarCollapsed)
-const isAdmin = computed(() => authStore.user?.role === 'admin')
+// Shared personal routes such as /keys and /usage still belong to the admin
+// console when the current session is an administrator.
+const usesAdminLayout = computed(() => authStore.isAdmin)
+const layoutVariant = computed<'admin' | 'user'>(() => usesAdminLayout.value ? 'admin' : 'user')
 
 const { replayTour } = useOnboardingTour({
-  storageKey: isAdmin.value ? 'admin_guide' : 'user_guide',
+  storageKey: usesAdminLayout.value ? 'admin_guide' : 'user_guide',
   autoStart: true
 })
 

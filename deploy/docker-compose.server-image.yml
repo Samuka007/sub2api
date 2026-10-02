@@ -1,0 +1,9 @@
+# Overlay for loading a prebuilt application image on the server.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.server-image.yml \
+#     up -d --no-build sub2api
+services:
+  sub2api:
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+    platform: ${SUB2API_PLATFORM:-linux/amd64}
+    pull_policy: never

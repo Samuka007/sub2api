@@ -47,12 +47,12 @@ type failOnceMarkSucceededRepo struct {
 	failNext bool
 }
 
-func (r *failOnceMarkSucceededRepo) MarkSucceeded(ctx context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *failOnceMarkSucceededRepo) MarkSucceeded(ctx context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
 	if r.failNext {
 		r.failNext = false
 		return errors.New("mark succeeded failed")
 	}
-	return r.memoryIdempotencyRepoStub.MarkSucceeded(ctx, id, responseStatus, responseBody, expiresAt)
+	return r.memoryIdempotencyRepoStub.MarkSucceeded(ctx, id, expectedLockedUntil, responseStatus, responseBody, expiresAt)
 }
 
 func (s *duplicateAccountAdminServiceStub) DuplicateAccount(_ context.Context, accountID int64, actorScope, operationKey string) (*service.Account, error) {

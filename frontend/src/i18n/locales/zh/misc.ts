@@ -58,10 +58,12 @@ export default {
     dockerRecreate: '重新创建容器'
   },
 
-  // Recharge / Subscription Page
+  // Redeem Code Store
   purchase: {
-    title: '充值/订阅',
-    description: '通过内嵌页面完成充值/订阅',
+    title: '兑换码直购',
+    description: '购买 API 额度兑换码并自动充入当前账户',
+    rechargeDescription: '通过内嵌页面完成充值',
+    subscriptionDescription: '通过内嵌页面完成订阅',
     openInNewTab: '新窗口打开',
     notEnabledTitle: '该功能未开启',
     notEnabledDesc: '管理员暂未开启充值/订阅入口，请联系管理员。',
@@ -150,16 +152,16 @@ export default {
     // Admin tour steps
     admin: {
       welcome: {
-        title: '👋 欢迎使用 Sub2API',
+        title: '👋 欢迎使用 SCIbuddy',
         description:
-          '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">Sub2API 是一个强大的 AI 服务中转平台，让您轻松管理和分发 AI 服务。</p><p style="margin-bottom: 12px;"><b>🎯 核心功能：</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>📦 <b>分组管理</b> - 创建不同的服务套餐（VIP、免费试用等）</li><li>🔗 <b>账号池</b> - 连接多个上游 AI 服务商账号</li><li>🔑 <b>密钥分发</b> - 为用户生成独立的 API Key</li><li>💰 <b>计费管理</b> - 灵活的费率和配额控制</li></ul><p style="color: #10b981; font-weight: 600;">接下来，我们将用 3 分钟带您完成首次配置 →</p></div>',
+          '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">SCIbuddy 是一个强大的 AI 服务中转平台，让您轻松管理和分发 AI 服务。</p><p style="margin-bottom: 12px;"><b>🎯 核心功能：</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>📦 <b>分组管理</b> - 创建不同的服务套餐（VIP、免费试用等）</li><li>🔗 <b>账号池</b> - 连接多个上游 AI 服务商账号</li><li>🔑 <b>密钥分发</b> - 为用户生成独立的 API Key</li><li>💰 <b>计费管理</b> - 灵活的费率和配额控制</li></ul><p style="color: #10b981; font-weight: 600;">接下来，我们将用 3 分钟带您完成首次配置 →</p></div>',
         nextBtn: '开始配置 🚀',
         prevBtn: '跳过'
       },
       groupManage: {
         title: '📦 第一步：分组管理',
         description:
-          '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;"><b>什么是分组？</b></p><p style="margin-bottom: 12px;">分组是 Sub2API 的核心概念，它就像一个"服务套餐"：</p><ul style="margin-left: 20px; margin-bottom: 12px; font-size: 13px;"><li>🎯 每个分组可以包含多个上游账号</li><li>💰 每个分组有独立的计费倍率</li><li>👥 可以设置为公开或专属分组</li></ul><p style="margin-top: 12px; padding: 8px 12px; background: #f0fdf4; border-left: 3px solid #10b981; border-radius: 4px; font-size: 13px;"><b>💡 示例：</b>您可以创建"VIP专线"（高倍率）和"免费试用"（低倍率）两个分组</p><p style="margin-top: 16px; color: #10b981; font-weight: 600;">👉 点击左侧的"分组管理"开始</p></div>'
+          '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;"><b>什么是分组？</b></p><p style="margin-bottom: 12px;">分组是 SCIbuddy 的核心概念，它就像一个"服务套餐"：</p><ul style="margin-left: 20px; margin-bottom: 12px; font-size: 13px;"><li>🎯 每个分组可以包含多个上游账号</li><li>💰 每个分组有独立的计费倍率</li><li>👥 可以设置为公开或专属分组</li></ul><p style="margin-top: 12px; padding: 8px 12px; background: #f0fdf4; border-left: 3px solid #10b981; border-radius: 4px; font-size: 13px;"><b>💡 示例：</b>您可以创建"VIP专线"（高倍率）和"免费试用"（低倍率）两个分组</p><p style="margin-top: 16px; color: #10b981; font-weight: 600;">👉 点击左侧的"分组管理"开始</p></div>'
       },
       createGroup: {
         title: '➕ 创建新分组',
@@ -313,6 +315,13 @@ export default {
     amountLabel: '充值金额',
     paymentAmount: '支付金额',
     creditedBalance: '到账余额',
+    rechargeBonus: {
+      creditedShort: '到账 {amount}',
+      payShort: '实付 {amount}',
+      amountLabel: '赠送额度',
+      amountLabelWithPercent: '赠送额度 (+{percent}%)',
+      discountLabelWithPercent: '优惠 ({percent}% OFF)',
+    },
     quickAmounts: '快捷金额',
     customAmount: '自定义金额',
     enterAmount: '输入金额',
@@ -362,6 +371,14 @@ export default {
       cancelledDesc: '您已取消本次支付',
       waitingPayment: '等待支付...',
       cancelOrder: '取消订单',
+      alipayOpening: '正在打开支付宝',
+      alipayContinueInApp: '请在支付宝中完成支付',
+      alipayWaitingHint: '支付结果将由服务端确认，本页面会自动更新',
+      alipayFallbackTitle: '打开支付宝未成功',
+      alipayFallbackHint: '可重新打开支付宝，或保存下方二维码后从支付宝相册识别',
+      reopenAlipay: '重新打开支付宝',
+      saveQRCode: '保存二维码',
+      alipaySaveAndScanHint: '保存二维码后，打开支付宝扫一扫，从相册选择二维码',
     },
     orders: {
       title: '我的订单',
@@ -371,6 +388,8 @@ export default {
       amount: '金额',
       payAmount: '实付',
       creditedAmount: '到账金额',
+      bonusAmount: '赠送额度',
+      bonusIncluded: '含赠送 {amount}',
       fee: '手续费',
       baseAmount: '充值金额',
       includedInPayAmount: '已含在实付金额中',
@@ -401,12 +420,18 @@ export default {
     tabSubscribe: '订阅',
     noPlans: '暂无可用订阅套餐',
     notAvailable: '充值功能暂未开放',
+    redeemStorePrompt: '充值请打开兑换码API额度购买链接：',
+    redeemStoreHint: '购买后请返回本页，通过下方兑换入口将兑换码充入当前账户。',
+    redeemEntryTitle: '兑换入口',
+    redeemEntryHint: '已经购买兑换码？前往兑换页面，将兑换码兑换为 API 额度。',
+    redeemEntryAction: '兑换入口',
+    billingUnavailable: '充值与订阅均暂未开放，请联系管理员。',
     confirmSubscription: '确认订阅',
     confirmCancel: '确定要取消此订单吗？',
     amountTooLow: '最低金额为 {min}',
     amountTooHigh: '最高金额为 {max}',
     amountNoMethod: '该金额没有可用的支付方式',
-    rechargeRatePreview: '当前倍率：1 CNY = {usd} USD',
+    rechargeRatePreview: '当前倍率：1 {currency} = {usd} USD',
     refundReason: '退款原因',
     refundReasonPlaceholder: '请描述您的退款原因',
     stripeLoadFailed: '支付组件加载失败，请刷新页面重试',

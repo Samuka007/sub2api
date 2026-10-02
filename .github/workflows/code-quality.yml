@@ -1,0 +1,119 @@
+name: Code Quality
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-type-test:
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.9
+          dest: ${{ runner.temp }}/setup-pnpm
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+      - name: Run frontend typecheck and tests in parallel
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: /bin/bash tools/run_frontend_ci.sh --type-test
+
+  backend-test-build:
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      # self-hosted: 本地 go-build/模块缓存常驻磁盘（持久），actions cache 反而
+      # 要压缩 20G+ 缓存导致 post 步骤挂死，故显式关闭
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: false
+      - name: Verify Go version
+        run: test "$(go env GOVERSION)" = "go1.27.0"
+      - name: Validate model tracing Compose environment
+        run: /bin/bash deploy/tests/model-tracing-compose-test.sh
+      - name: Run unit, integration, and build in parallel
+        env:
+          GOFLAGS: "-p=4"
+        run: /bin/bash tools/run_backend_ci.sh
+
+  backend-fast-lint:
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      # 同上：self-hosted 依赖本地缓存；golangci-lint 的 HOME 指向 runner.temp
+      # 会隔离掉模块/go-build 缓存，保持默认 HOME 以复用
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: false
+      - name: Verify Go version
+        run: test "$(go env GOVERSION)" = "go1.27.0"
+      - name: Run fast Go linters (low memory footprint)
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOMEMLIMIT: 3GiB
+        with:
+          version: v2.13
+          working-directory: backend
+          args: --timeout=20m --enable-only=errcheck,govet,staticcheck
+
+  frontend-build:
+    runs-on: [self-hosted, Linux, X64, sub2api-pve]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Resolve checked out commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.9
+          dest: ${{ runner.temp }}/setup-pnpm
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+      - name: Build frontend
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: pnpm --dir frontend exec vite build
+      - name: Upload reusable frontend artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist-${{ steps.commit.outputs.sha }}
+          path: backend/internal/web/dist/
+          if-no-files-found: error
+          retention-days: 30

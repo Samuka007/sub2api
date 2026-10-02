@@ -301,22 +301,80 @@ func (a *Airwallex) Refund(ctx context.Context, req payment.RefundRequest) (*pay
 }
 
 func (a *Airwallex) QueryRefund(ctx context.Context, req payment.RefundQueryRequest) (*payment.RefundResponse, error) {
+	paymentIntentID := strings.TrimSpace(req.TradeNo)
+	requestID := airwallexDeterministicRequestID("refund", paymentIntentID, req.Amount)
 	refundID := strings.TrimSpace(req.RefundID)
-	if refundID == "" {
-		return nil, fmt.Errorf("airwallex query refund: missing refund id")
-	}
 	token, err := a.accessToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("airwallex auth: %w", err)
 	}
+	if refundID == "" {
+		return a.listRefundByRequestID(ctx, token, paymentIntentID, requestID)
+	}
+
 	var resp airwallexRefund
-	if err := a.doJSON(ctx, http.MethodGet, "/pa/refunds/"+url.PathEscape(refundID), token, nil, &resp); err != nil {
+	status, err := a.getJSON(ctx, "/pa/refunds/"+url.PathEscape(refundID), token, &resp)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return a.listRefundByRequestID(ctx, token, paymentIntentID, requestID)
+		}
 		return nil, fmt.Errorf("airwallex query refund: %w", err)
 	}
 	if strings.TrimSpace(resp.ID) == "" {
 		resp.ID = refundID
 	}
-	return &payment.RefundResponse{RefundID: resp.ID, Status: airwallexRefundProviderStatus(resp.Status)}, nil
+	return airwallexRefundResponse(resp), nil
+}
+
+func (a *Airwallex) listRefundByRequestID(ctx context.Context, token, paymentIntentID, requestID string) (*payment.RefundResponse, error) {
+	if paymentIntentID == "" {
+		return nil, fmt.Errorf("airwallex query refund: missing payment intent id")
+	}
+	path := "/pa/refunds?payment_intent_id=" + url.QueryEscape(paymentIntentID) + "&page_num=0&page_size=1000"
+	var result airwallexRefundList
+	if err := a.doJSON(ctx, http.MethodGet, path, token, nil, &result); err != nil {
+		return nil, fmt.Errorf("airwallex list refunds: %w", err)
+	}
+	refunds := result.Items
+	if len(refunds) == 0 {
+		refunds = result.Data
+	}
+	for i := range refunds {
+		if strings.TrimSpace(refunds[i].RequestID) == requestID {
+			return airwallexRefundResponse(refunds[i]), nil
+		}
+	}
+	return nil, fmt.Errorf("airwallex refund not found for request_id %q", requestID)
+}
+
+func (a *Airwallex) getJSON(ctx context.Context, path, token string, out any) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.config["apiBase"]+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if accountID := strings.TrimSpace(a.config["accountId"]); accountID != "" {
+		req.Header.Set("x-on-behalf-of", accountID)
+	}
+	body, status, err := a.do(req)
+	if err != nil {
+		return status, err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return status, fmt.Errorf("HTTP %d: %s", status, summarizeAirwallexResponse(body))
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return status, fmt.Errorf("parse response: %w", err)
+	}
+	return status, nil
+}
+
+func airwallexRefundResponse(refund airwallexRefund) *payment.RefundResponse {
+	return &payment.RefundResponse{
+		RefundID: refund.ID,
+		Status:   airwallexRefundProviderStatus(refund.Status),
+	}
 }
 
 func (a *Airwallex) CancelPayment(ctx context.Context, tradeNo string) error {
@@ -632,6 +690,12 @@ type airwallexRefund struct {
 	Amount          decimal.Decimal `json:"amount"`
 	Currency        string          `json:"currency"`
 	Status          string          `json:"status"`
+	FailureReason   string          `json:"failure_reason"`
+}
+
+type airwallexRefundList struct {
+	Items []airwallexRefund `json:"items"`
+	Data  []airwallexRefund `json:"data"`
 }
 
 type airwallexWebhookEvent struct {

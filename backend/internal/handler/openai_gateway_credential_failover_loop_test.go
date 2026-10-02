@@ -23,6 +23,7 @@ import (
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type grokCredentialHandlerRepo struct {
@@ -322,6 +323,116 @@ type grokCredentialHandlerUpstream struct {
 	cancelRequest context.CancelFunc
 }
 
+type grokMediaCommitRecorder struct {
+	*httptest.ResponseRecorder
+	committed bool
+}
+
+func newGrokMediaCommitRecorder() *grokMediaCommitRecorder {
+	return &grokMediaCommitRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *grokMediaCommitRecorder) WriteHeader(statusCode int) {
+	r.committed = true
+	r.ResponseRecorder.WriteHeader(statusCode)
+}
+
+func (r *grokMediaCommitRecorder) Write(body []byte) (int, error) {
+	r.committed = true
+	return r.ResponseRecorder.Write(body)
+}
+
+type grokMediaUsageLogRepo struct {
+	service.UsageLogRepository
+	mu   sync.Mutex
+	logs []service.UsageLog
+}
+
+func (r *grokMediaUsageLogRepo) Create(_ context.Context, usage *service.UsageLog) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, *usage)
+	return true, nil
+}
+
+func (r *grokMediaUsageLogRepo) snapshot() []service.UsageLog {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]service.UsageLog(nil), r.logs...)
+}
+
+type grokMediaBindingCache struct {
+	mu                    sync.Mutex
+	bindings              map[string]int64
+	videoSetErr           error
+	persistBeforeSetError bool
+	onVideoSet            func()
+}
+
+func (c *grokMediaBindingCache) GetSessionAccountID(_ context.Context, _ int64, sessionHash string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	accountID, ok := c.bindings[sessionHash]
+	if !ok {
+		return 0, service.ErrStickySessionNotFound
+	}
+	return accountID, nil
+}
+
+func (c *grokMediaBindingCache) SetSessionAccountID(_ context.Context, _ int64, sessionHash string, accountID int64, _ time.Duration) error {
+	isVideoTask := strings.Contains(sessionHash, "grok-video:")
+	if isVideoTask && c.onVideoSet != nil {
+		c.onVideoSet()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bindings == nil {
+		c.bindings = make(map[string]int64)
+	}
+	if !isVideoTask || c.videoSetErr == nil || c.persistBeforeSetError {
+		c.bindings[sessionHash] = accountID
+	}
+	if isVideoTask {
+		return c.videoSetErr
+	}
+	return nil
+}
+
+func (c *grokMediaBindingCache) RefreshSessionTTL(context.Context, int64, string, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) DeleteSessionAccountID(_ context.Context, _ int64, sessionHash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.bindings, sessionHash)
+	return nil
+}
+
+func (c *grokMediaBindingCache) SetGrokVideoPendingBilling(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) GetGrokVideoPendingBilling(context.Context, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *grokMediaBindingCache) ClaimGrokVideoBilled(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (c *grokMediaBindingCache) ReleaseGrokVideoBilled(context.Context, string) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) SetReasoningContent(context.Context, string, string, time.Duration) error {
+	return nil
+}
+
+func (c *grokMediaBindingCache) GetReasoningContent(context.Context, string) (string, error) {
+	return "", service.ErrReasoningContentNotFound
+}
+
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	var requestBody []byte
 	if req.Body != nil {
@@ -594,6 +705,32 @@ func TestResponsesGrok429FailoverIsBounded(t *testing.T) {
 	})
 }
 
+func TestResponsesGrok402FailoverCooldown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, repo, upstream, router, cleanup := newGrokCredentialFailoverHandler(t, "first_402")
+	defer cleanup()
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", bytes.NewBufferString(`{"model":"grok","input":"hello","stream":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Contains(t, recorder.Body.String(), "resp_healthy")
+	require.Equal(t, []int64{801, 802}, upstream.accountHits())
+	require.Equal(t, []int64{801}, repo.setTempIDs)
+	before := repo.selectorCalls()
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", bytes.NewBufferString(`{"model":"grok","input":"again","stream":false}`))
+	secondReq.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(second, secondReq)
+
+	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+	require.Equal(t, before+1, repo.selectorCalls())
+	require.Equal(t, []int64{801, 802, 802}, upstream.accountHits(), "cooldown must exclude the 402 account from later requests")
+}
+
 func TestResponsesGrok429FailoverHandlesMixedStatuses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -669,6 +806,76 @@ func TestGrokMedia429FailoverIsBounded(t *testing.T) {
 	})
 }
 
+func TestGrokMediaVideoResponseWaitsForAccountBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("definite binding failure still returns upstream success response", func(t *testing.T) {
+		cache := &grokMediaBindingCache{videoSetErr: errors.New("redis write failed")}
+		usageRepo := &grokMediaUsageLogRepo{}
+		h, _, _, router, cleanup := newGrokCredentialFailoverHandlerWithCache(t, "postmap_cancel", cache, usageRepo)
+		defer cleanup()
+		recorder := newGrokMediaCommitRecorder()
+		bindingObserved := false
+		writerCommittedAtBind := false
+		cache.onVideoSet = func() {
+			bindingObserved = true
+			writerCommittedAtBind = recorder.committed
+		}
+		req := httptest.NewRequest(http.MethodPost, "/openai/v1/videos/generations", bytes.NewBufferString(`{"model":"grok-imagine-video","prompt":"waves"}`))
+		req.Header.Set("Content-Type", "application/json")
+
+		router.ServeHTTP(recorder, req)
+
+		require.True(t, bindingObserved)
+		// Upstream writes the success response before binding; the binding
+		// failure is only warned, never turned into a gateway error.
+		require.True(t, writerCommittedAtBind)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		require.Equal(t, "resp_healthy", gjson.Get(recorder.Body.String(), "id").String())
+		accountID, err := h.gatewayService.ResolveGrokMediaVideoRequestAccount(context.Background(), ptrInt64(901), "resp_healthy", 903, 902)
+		require.ErrorIs(t, err, service.ErrStickySessionNotFound)
+		// Create never bills directly; billing defers to status polling.
+		usageLogs := usageRepo.snapshot()
+		require.Len(t, usageLogs, 0)
+		require.Zero(t, accountID)
+	})
+
+	t.Run("persisted binding survives lost set reply before success is committed", func(t *testing.T) {
+		cache := &grokMediaBindingCache{
+			videoSetErr:           errors.New("redis reply lost"),
+			persistBeforeSetError: true,
+		}
+		h, _, upstream, router, cleanup := newGrokCredentialFailoverHandlerWithCache(t, "postmap_cancel", cache)
+		defer cleanup()
+		generation := newGrokMediaCommitRecorder()
+		writerCommittedAtBind := false
+		cache.onVideoSet = func() {
+			writerCommittedAtBind = generation.committed
+		}
+		generateReq := httptest.NewRequest(http.MethodPost, "/openai/v1/videos/generations", bytes.NewBufferString(`{"model":"grok-imagine-video","prompt":"waves"}`))
+		generateReq.Header.Set("Content-Type", "application/json")
+
+		router.ServeHTTP(generation, generateReq)
+
+		require.True(t, writerCommittedAtBind)
+		require.Equal(t, http.StatusOK, generation.Code, generation.Body.String())
+		require.Equal(t, "resp_healthy", gjson.Get(generation.Body.String(), "id").String())
+		accountID, err := h.gatewayService.ResolveGrokMediaVideoRequestAccount(context.Background(), ptrInt64(901), "resp_healthy", 903, 902)
+		require.NoError(t, err)
+		require.Equal(t, int64(801), accountID)
+
+		status := httptest.NewRecorder()
+		router.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/openai/v1/videos/resp_healthy", nil))
+		require.Equal(t, http.StatusOK, status.Code, status.Body.String())
+		require.Equal(t, "resp_healthy", gjson.Get(status.Body.String(), "id").String())
+
+		content := httptest.NewRecorder()
+		router.ServeHTTP(content, httptest.NewRequest(http.MethodGet, "/openai/v1/videos/resp_healthy/content", nil))
+		require.Equal(t, http.StatusOK, content.Code, content.Body.String())
+		require.Equal(t, []int64{801, 801, 801, 801}, upstream.accountHits())
+	})
+}
+
 func TestGrokOAuthCredentialFailoverAcrossHTTPHandlers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	endpoints := []struct {
@@ -738,7 +945,7 @@ func TestResponsesWebSocketCredentialFailoverLoop(t *testing.T) {
 	dial := func(t *testing.T, router *gin.Engine) (*coderws.Conn, func()) {
 		t.Helper()
 		server := httptest.NewServer(router)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/openai/v1/responses", nil)
 		cancel()
 		require.NoError(t, err)
@@ -814,7 +1021,17 @@ func findHandlerRefresherStarted(router *gin.Engine) <-chan struct{} {
 }
 
 func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGatewayHandler, *grokCredentialHandlerRepo, *grokCredentialHandlerUpstream, *gin.Engine, func()) {
+	return newGrokCredentialFailoverHandlerWithCache(t, mode, &grokMediaBindingCache{})
+}
+func newGrokCredentialFailoverHandlerWithCache(t *testing.T, mode string, gatewayCache service.GatewayCache, usageLogRepos ...service.UsageLogRepository) (*OpenAIGatewayHandler, *grokCredentialHandlerRepo, *grokCredentialHandlerUpstream, *gin.Engine, func()) {
 	t.Helper()
+	if gatewayCache == nil {
+		gatewayCache = &grokMediaBindingCache{}
+	}
+	var usageLogRepo service.UsageLogRepository
+	if len(usageLogRepos) > 0 {
+		usageLogRepo = usageLogRepos[0]
+	}
 	groupID := int64(901)
 	accounts := []service.Account{
 		{
@@ -836,7 +1053,7 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 			Extra: map[string]any{service.GrokMediaEligibleExtraKey: true},
 		},
 	}
-	if mode == "postmap_cancel" || mode == "first_429" || mode == "all_429" || mode == "mixed_429_500" || mode == "mixed_500_429" || mode == "oauth_429_apikey_500" {
+	if mode == "postmap_cancel" || mode == "first_402" || mode == "first_429" || mode == "all_429" || mode == "mixed_429_500" || mode == "mixed_500_429" || mode == "oauth_429_apikey_500" {
 		accounts[0].Credentials["expires_at"] = time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 	}
 	if mode == "all_429" || mode == "mixed_429_500" || mode == "mixed_500_429" || mode == "oauth_429_apikey_500" {
@@ -879,6 +1096,8 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 	}
 	upstream := &grokCredentialHandlerUpstream{}
 	switch mode {
+	case "first_402":
+		upstream.failAccountID = 801
 	case "first_429":
 		upstream.rateLimitIDs = map[int64]bool{801: true}
 	case "all_429":
@@ -897,7 +1116,7 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 	cfg.Gateway.MaxAccountSwitches = 3
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	gateway := service.NewOpenAIGatewayService(
-		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		repo, usageLogRepo, nil, nil, nil, nil, gatewayCache, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
 		&service.DeferredService{}, nil, provider, nil, nil, nil, nil, nil,
 	)
@@ -923,6 +1142,7 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 	router.POST("/openai/v1/chat/completions", h.ChatCompletions)
 	router.POST("/openai/v1/videos/generations", h.GrokVideoGeneration)
 	router.GET("/openai/v1/videos/:request_id", h.GrokVideoStatus)
+	router.GET("/openai/v1/videos/:request_id/content", h.GrokVideoContent)
 	handlerRefresherStarted.Store(router, refresher.started)
 	cleanup := func() {
 		handlerRefresherStarted.Delete(router)

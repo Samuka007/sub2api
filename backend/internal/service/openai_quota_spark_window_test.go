@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,7 +29,10 @@ import (
 // stubQuotaAccountRepo 是多账号 AccountRepository stub，仅实现 GetByID。
 type stubQuotaAccountRepo struct {
 	AccountRepository
-	accounts map[int64]*Account
+	accounts         map[int64]*Account
+	extraUpdates     map[int64]map[string]any
+	extraUpdateCalls int
+	extraUpdateErr   error
 }
 
 func (r *stubQuotaAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -44,6 +49,18 @@ func (r *stubQuotaAccountRepo) UpdateCredentials(_ context.Context, id int64, cr
 		return fmt.Errorf("account %d not found", id)
 	}
 	acc.Credentials = credentials
+	return nil
+}
+
+func (r *stubQuotaAccountRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
+	if r.extraUpdateErr != nil {
+		return r.extraUpdateErr
+	}
+	r.extraUpdateCalls++
+	if r.extraUpdates == nil {
+		r.extraUpdates = make(map[int64]map[string]any)
+	}
+	r.extraUpdates[id] = updates
 	return nil
 }
 
@@ -176,6 +193,32 @@ func TestResetCreditShadowRejected(t *testing.T) {
 		"shadow ResetCredit 应映射为 409 Conflict 而非 500")
 }
 
+func TestResetCreditTargetedSendsStableCreditAndRedeemIDs(t *testing.T) {
+	account := &Account{
+		ID: 203, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "account-targeted"},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "fake-token"}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+	var body map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/backend-api/wham/rate-limit-reset-credits/consume", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"ok","windows_reset":1}`))
+	}))
+	defer srv.Close()
+
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
+	result, err := svc.ResetCreditTargeted(context.Background(), account.ID, "credit-123", "redeem-456")
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Code)
+	require.Equal(t, map[string]string{
+		"credit_id": "credit-123", "redeem_request_id": "redeem-456",
+	}, body)
+}
+
 func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -197,6 +240,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	resetCalls := 0
 	registerCalls := 0
 	var assertions []string
+	var redeemRequestIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		if strings.Contains(r.URL.Path, "/task/register") {
@@ -206,6 +250,9 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 		}
 		resetCalls++
 		assertions = append(assertions, r.Header.Get("authorization"))
+		var body map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		redeemRequestIDs = append(redeemRequestIDs, body["redeem_request_id"])
 		require.Equal(t, "account-reset-recovery", r.Header.Get("chatgpt-account-id"))
 		if resetCalls == 1 {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -220,10 +267,10 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
 	invalidator := &agentIdentityWSInvalidationRecorder{}
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	svc.agentIdentityWS = invalidator
 
-	result, err := svc.ResetCredit(context.Background(), account.ID)
+	result, err := svc.ResetCreditWithRequestID(context.Background(), account.ID, "stable-reset-request-id")
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
 	require.Equal(t, 2, result.WindowsReset)
@@ -233,6 +280,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	require.True(t, strings.HasPrefix(assertions[0], "AgentAssertion "))
 	require.True(t, strings.HasPrefix(assertions[1], "AgentAssertion "))
 	require.NotEqual(t, assertions[0], assertions[1])
+	require.Equal(t, []string{"stable-reset-request-id", "stable-reset-request-id"}, redeemRequestIDs)
 	require.Equal(t, "task-reset-new", account.GetCredential("task_id"))
 	require.Equal(t, []int64{account.ID}, invalidator.accountIDs)
 }
@@ -282,7 +330,7 @@ func TestResetCreditAgentIdentityReusesConcurrentlyRecoveredTask(t *testing.T) {
 	openAIAgentIdentityAuthAPIBaseURL = srv.URL
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	result, err := svc.ResetCredit(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
@@ -335,7 +383,7 @@ func TestPrepareUpstreamCallShadowResolve(t *testing.T) {
 	// privacyClientFactory 可以是任意合法工厂；prepareUpstreamCall 在返回前不调用它
 	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, func(_ string) (*req.Client, error) {
 		return req.C(), nil
-	})
+	}, nil)
 
 	_, chatGPTAccountID, _, _, err := svc.prepareUpstreamCall(ctx, 200)
 	require.NoError(t, err, "shadow resolve should succeed; got error: %v", err)
@@ -373,7 +421,7 @@ func TestQueryUsageAgentIdentityUsesAssertionWithoutOAuthToken(t *testing.T) {
 		_, _ = w.Write([]byte(`{"plan_type":"pro","rate_limit":{"allowed":true}}`))
 	}))
 	defer srv.Close()
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -427,7 +475,7 @@ func TestQueryUsageAgentIdentityRecoversInvalidTaskOnce(t *testing.T) {
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
 	invalidator := &agentIdentityWSInvalidationRecorder{}
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	svc.agentIdentityWS = invalidator
 	usage, err := svc.QueryUsage(context.Background(), account.ID)
 	require.NoError(t, err)
@@ -523,7 +571,7 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 100)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -535,6 +583,14 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 		{ExpiresAt: "2026-07-03T04:05:06Z"},
 		{ExpiresAt: "2026-07-04T04:05:06Z"},
 	}, usage.RateLimitResetCredits.Credits)
+	require.NoError(t, svc.CacheResetCreditsSnapshot(ctx, 100, usage.RateLimitResetCredits))
+	require.Equal(t, &OpenAIRateLimitResetCredits{
+		AvailableCount: 2,
+		Credits: []OpenAIRateLimitResetCreditDetail{
+			{ExpiresAt: "2026-07-03T04:05:06Z"},
+			{ExpiresAt: "2026-07-04T04:05:06Z"},
+		},
+	}, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
 
 	encoded, err := json.Marshal(usage)
 	require.NoError(t, err)
@@ -576,7 +632,7 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 100)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -584,6 +640,140 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	require.Equal(t, 1, usage.RateLimitResetCredits.AvailableCount)
 	require.Equal(t, 1, detailCalls)
 	require.Empty(t, usage.RateLimitResetCredits.Credits)
+
+	// A count without expiration details must not be persisted (the reader could
+	// never age it out), and the previous snapshot must survive untouched.
+	require.Error(t, svc.CacheResetCreditsSnapshot(ctx, 100, usage.RateLimitResetCredits))
+	require.Empty(t, repo.extraUpdates)
+}
+
+func TestCacheResetCreditsSnapshot(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("zero count allows an empty expiration list", func(t *testing.T) {
+		repo := &stubQuotaAccountRepo{}
+		svc := &OpenAIQuotaService{accountRepo: repo}
+		credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
+
+		require.NoError(t, svc.CacheResetCreditsSnapshot(ctx, 100, credits))
+		require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+	})
+
+	t.Run("missing expiration list preserves the cache", func(t *testing.T) {
+		repo := &stubQuotaAccountRepo{}
+		svc := &OpenAIQuotaService{accountRepo: repo}
+
+		err := svc.CacheResetCreditsSnapshot(ctx, 100, &OpenAIRateLimitResetCredits{AvailableCount: 1})
+
+		require.Error(t, err)
+		require.Empty(t, repo.extraUpdates)
+	})
+
+	t.Run("empty expiration list with a positive count preserves the cache", func(t *testing.T) {
+		repo := &stubQuotaAccountRepo{}
+		svc := &OpenAIQuotaService{accountRepo: repo}
+
+		err := svc.CacheResetCreditsSnapshot(ctx, 100, &OpenAIRateLimitResetCredits{
+			AvailableCount: 2,
+			Credits:        []OpenAIRateLimitResetCreditDetail{},
+		})
+
+		require.Error(t, err)
+		require.Empty(t, repo.extraUpdates)
+	})
+
+	t.Run("nil snapshot preserves the cache", func(t *testing.T) {
+		repo := &stubQuotaAccountRepo{}
+		svc := &OpenAIQuotaService{accountRepo: repo}
+
+		require.Error(t, svc.CacheResetCreditsSnapshot(ctx, 100, nil))
+		require.Empty(t, repo.extraUpdates)
+	})
+
+	t.Run("repository errors are returned", func(t *testing.T) {
+		repo := &stubQuotaAccountRepo{extraUpdateErr: errors.New("database unavailable")}
+		svc := &OpenAIQuotaService{accountRepo: repo}
+
+		err := svc.CacheResetCreditsSnapshot(ctx, 100, &OpenAIRateLimitResetCredits{
+			AvailableCount: 1,
+			Credits:        []OpenAIRateLimitResetCreditDetail{{ExpiresAt: "2026-07-03T04:05:06Z"}},
+		})
+
+		require.ErrorContains(t, err, "database unavailable")
+	})
+}
+
+func TestQueryUsageStrictSurfacesResetCreditDetails401(t *testing.T) {
+	ctx := context.Background()
+	account := &Account{
+		ID:       100,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"chatgpt_account_id": "org-parent123",
+		},
+	}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: account}}
+	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
+		OpenAITokenCacheKey(account): "fake-token",
+	}}
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			_ = json.NewEncoder(w).Encode(OpenAIQuotaUsage{})
+		case "/backend-api/wham/rate-limit-reset-credits":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	usage, err := svc.QueryUsageStrict(ctx, 100)
+	require.Nil(t, usage)
+	require.Error(t, err)
+	require.Equal(t, http.StatusUnauthorized, infraerrors.Code(err))
+	require.Equal(t, "OPENAI_QUOTA_RESET_CREDITS_UPSTREAM_ERROR", infraerrors.Reason(err))
+	require.Contains(t, logs.String(), "openai_quota_reset_credit_details_failed")
+	require.Contains(t, logs.String(), "account_id=100")
+	require.Contains(t, logs.String(), "upstream returned 401")
+}
+
+func TestCachePostResetSnapshot(t *testing.T) {
+	repo := &stubQuotaAccountRepo{}
+	svc := &OpenAIQuotaService{accountRepo: repo}
+	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
+	balance := "1200.50"
+	usage := &OpenAIQuotaUsage{
+		Credits:               &OpenAICredits{HasCredits: true, Balance: &balance},
+		FetchedAt:             123,
+		RateLimitResetCredits: credits,
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 5 * 60 * 60, ResetAfterSeconds: 5 * 60 * 60,
+			},
+			SecondaryWindow: &OpenAIRateLimitWindow{
+				UsedPercent: 0, LimitWindowSeconds: 7 * 24 * 60 * 60, ResetAfterSeconds: 7 * 24 * 60 * 60,
+			},
+		},
+	}
+
+	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
+	require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+	require.Equal(t, openAICreditsSnapshot{Credits: usage.Credits, FetchedAt: 123}, repo.extraUpdates[100][openaiQuotaCreditsKey])
+	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_5h_used_percent"])
+	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_7d_used_percent"])
 }
 
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：
@@ -637,7 +827,7 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 200)
 	require.NoError(t, err)
 	require.NotNil(t, usage)

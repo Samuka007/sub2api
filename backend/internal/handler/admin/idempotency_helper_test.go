@@ -24,16 +24,16 @@ func (storeUnavailableRepoStub) CreateProcessing(context.Context, *service.Idemp
 func (storeUnavailableRepoStub) GetByScopeAndKeyHash(context.Context, string, string) (*service.IdempotencyRecord, error) {
 	return nil, errors.New("store unavailable")
 }
-func (storeUnavailableRepoStub) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (storeUnavailableRepoStub) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, errors.New("store unavailable")
 }
-func (storeUnavailableRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (storeUnavailableRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, errors.New("store unavailable")
 }
-func (storeUnavailableRepoStub) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+func (storeUnavailableRepoStub) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
 	return errors.New("store unavailable")
 }
-func (storeUnavailableRepoStub) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (storeUnavailableRepoStub) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return errors.New("store unavailable")
 }
 func (storeUnavailableRepoStub) DeleteExpired(context.Context, time.Time, int) (int64, error) {
@@ -93,10 +93,107 @@ func TestExecuteAdminIdempotentJSONFailOpenOnStoreUnavailable(t *testing.T) {
 	require.Equal(t, 1, executed, "fail-open strategy should allow semantic idempotent path to continue")
 }
 
+func TestExecuteAdminTransactionalIdempotentJSONFailsClosedWithoutCoordinator(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.SetDefaultIdempotencyCoordinator(nil)
+	t.Cleanup(func() { service.SetDefaultIdempotencyCoordinator(nil) })
+
+	var executed int
+	router := gin.New()
+	router.POST("/transactional", func(c *gin.Context) {
+		executeAdminTransactionalIdempotentJSON(
+			c,
+			"admin.test.transactional",
+			map[string]any{"a": 1},
+			time.Minute,
+			func(context.Context) (any, error) {
+				executed++
+				return gin.H{"ok": true}, nil
+			},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/transactional", bytes.NewBufferString(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "transactional-key")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Zero(t, executed)
+}
+
+func TestExecuteAdminTransactionalIdempotentJSONFailsClosedWithoutTransactionalRepository(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(storeUnavailableRepoStub{}, service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() { service.SetDefaultIdempotencyCoordinator(nil) })
+
+	var executed int
+	router := gin.New()
+	router.POST("/transactional", func(c *gin.Context) {
+		executeAdminTransactionalIdempotentJSON(
+			c,
+			"admin.test.transactional",
+			map[string]any{"a": 1},
+			time.Minute,
+			func(context.Context) (any, error) {
+				executed++
+				return gin.H{"ok": true}, nil
+			},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/transactional", bytes.NewBufferString(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "transactional-key")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Zero(t, executed)
+}
+
 type memoryIdempotencyRepoStub struct {
 	mu     sync.Mutex
+	txMu   sync.Mutex
 	nextID int64
 	data   map[string]*service.IdempotencyRecord
+}
+
+func (r *memoryIdempotencyRepoStub) WithinTransaction(
+	ctx context.Context,
+	execute func(context.Context, service.IdempotencyRepository) error,
+) error {
+	r.txMu.Lock()
+	defer r.txMu.Unlock()
+
+	r.mu.Lock()
+	txRepo := &memoryIdempotencyRepoStub{
+		nextID: r.nextID,
+		data:   make(map[string]*service.IdempotencyRecord, len(r.data)),
+	}
+	for key, record := range r.data {
+		txRepo.data[key] = r.clone(record)
+	}
+	r.mu.Unlock()
+
+	if err := execute(ctx, txRepo); err != nil {
+		return err
+	}
+
+	txRepo.mu.Lock()
+	committedNextID := txRepo.nextID
+	committedData := make(map[string]*service.IdempotencyRecord, len(txRepo.data))
+	for key, record := range txRepo.data {
+		committedData[key] = txRepo.clone(record)
+	}
+	txRepo.mu.Unlock()
+
+	r.mu.Lock()
+	r.nextID = committedNextID
+	r.data = committedData
+	r.mu.Unlock()
+	return nil
 }
 
 func newMemoryIdempotencyRepoStub() *memoryIdempotencyRepoStub {
@@ -155,7 +252,7 @@ func (r *memoryIdempotencyRepoStub) GetByScopeAndKeyHash(_ context.Context, scop
 	return r.clone(r.data[r.key(scope, keyHash)]), nil
 }
 
-func (r *memoryIdempotencyRepoStub) TryReclaim(_ context.Context, id int64, fromStatus string, now, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+func (r *memoryIdempotencyRepoStub) TryReclaim(_ context.Context, id int64, fromStatus, newRequestFingerprint string, now, newLockedUntil, newExpiresAt time.Time) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
@@ -169,6 +266,7 @@ func (r *memoryIdempotencyRepoStub) TryReclaim(_ context.Context, id int64, from
 			return false, nil
 		}
 		rec.Status = service.IdempotencyStatusProcessing
+		rec.RequestFingerprint = newRequestFingerprint
 		rec.LockedUntil = &newLockedUntil
 		rec.ExpiresAt = newExpiresAt
 		rec.ErrorReason = nil
@@ -177,14 +275,14 @@ func (r *memoryIdempotencyRepoStub) TryReclaim(_ context.Context, id int64, from
 	return false, nil
 }
 
-func (r *memoryIdempotencyRepoStub) ExtendProcessingLock(_ context.Context, id int64, requestFingerprint string, newLockedUntil, newExpiresAt time.Time) (bool, error) {
+func (r *memoryIdempotencyRepoStub) ExtendProcessingLock(_ context.Context, id int64, requestFingerprint string, expectedLockedUntil, newLockedUntil, newExpiresAt time.Time) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
 		if rec.ID != id {
 			continue
 		}
-		if rec.Status != service.IdempotencyStatusProcessing || rec.RequestFingerprint != requestFingerprint {
+		if rec.Status != service.IdempotencyStatusProcessing || rec.RequestFingerprint != requestFingerprint || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
 			return false, nil
 		}
 		rec.LockedUntil = &newLockedUntil
@@ -194,12 +292,18 @@ func (r *memoryIdempotencyRepoStub) ExtendProcessingLock(_ context.Context, id i
 	return false, nil
 }
 
-func (r *memoryIdempotencyRepoStub) MarkSucceeded(_ context.Context, id int64, responseStatus int, responseBody string, expiresAt time.Time) error {
+func (r *memoryIdempotencyRepoStub) MarkSucceeded(_ context.Context, id int64, expectedLockedUntil time.Time, responseStatus int, responseBody string, expiresAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
 		if rec.ID != id {
 			continue
+		}
+		if rec.Status != service.IdempotencyStatusProcessing {
+			return errors.New("record is not processing")
+		}
+		if rec.Status != service.IdempotencyStatusProcessing || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
+			return errors.New("record lease is not active")
 		}
 		rec.Status = service.IdempotencyStatusSucceeded
 		rec.LockedUntil = nil
@@ -212,12 +316,18 @@ func (r *memoryIdempotencyRepoStub) MarkSucceeded(_ context.Context, id int64, r
 	return nil
 }
 
-func (r *memoryIdempotencyRepoStub) MarkFailedRetryable(_ context.Context, id int64, errorReason string, lockedUntil, expiresAt time.Time) error {
+func (r *memoryIdempotencyRepoStub) MarkFailedRetryable(_ context.Context, id int64, expectedLockedUntil time.Time, errorReason string, lockedUntil, expiresAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.data {
 		if rec.ID != id {
 			continue
+		}
+		if rec.Status != service.IdempotencyStatusProcessing {
+			return errors.New("record is not processing")
+		}
+		if rec.Status != service.IdempotencyStatusProcessing || rec.LockedUntil == nil || !rec.LockedUntil.Equal(expectedLockedUntil) {
+			return errors.New("record lease is not active")
 		}
 		rec.Status = service.IdempotencyStatusFailedRetryable
 		rec.LockedUntil = &lockedUntil

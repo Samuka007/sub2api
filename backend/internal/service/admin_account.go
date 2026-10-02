@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -21,6 +22,11 @@ import (
 
 // Account management implementations
 func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error) {
+	if groupID > 0 {
+		if err := s.ValidateAccountGroupBindings(ctx, []int64{groupID}); err != nil {
+			return nil, 0, err
+		}
+	}
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
 	if err != nil {
@@ -128,22 +134,24 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	"drive_storage_limit":                    {},
 	"drive_storage_usage":                    {},
 	"drive_tier_updated_at":                  {},
-	"codex_primary_used_percent":             {},
-	"codex_primary_reset_after_seconds":      {},
-	"codex_primary_window_minutes":           {},
-	"codex_secondary_used_percent":           {},
-	"codex_secondary_reset_after_seconds":    {},
-	"codex_secondary_window_minutes":         {},
-	"codex_primary_over_secondary_percent":   {},
-	"codex_usage_updated_at":                 {},
-	"codex_5h_used_percent":                  {},
-	"codex_5h_reset_after_seconds":           {},
-	"codex_5h_window_minutes":                {},
-	"codex_5h_reset_at":                      {},
-	"codex_7d_used_percent":                  {},
-	"codex_7d_reset_after_seconds":           {},
-	"codex_7d_window_minutes":                {},
-	"codex_7d_reset_at":                      {},
+	// Codex fingerprint convergence uses a per-account random seed, never copied from another account.
+	codexFingerprintSeedExtraKey:           {},
+	"codex_primary_used_percent":           {},
+	"codex_primary_reset_after_seconds":    {},
+	"codex_primary_window_minutes":         {},
+	"codex_secondary_used_percent":         {},
+	"codex_secondary_reset_after_seconds":  {},
+	"codex_secondary_window_minutes":       {},
+	"codex_primary_over_secondary_percent": {},
+	"codex_usage_updated_at":               {},
+	"codex_5h_used_percent":                {},
+	"codex_5h_reset_after_seconds":         {},
+	"codex_5h_window_minutes":              {},
+	"codex_5h_reset_at":                    {},
+	"codex_7d_used_percent":                {},
+	"codex_7d_reset_after_seconds":         {},
+	"codex_7d_window_minutes":              {},
+	"codex_7d_reset_at":                    {},
 }
 
 func duplicateAccountExtra(value map[string]any) (map[string]any, error) {
@@ -282,6 +290,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	}
 	autoPauseOnExpired := source.AutoPauseOnExpired
 	groups, groupIDs := duplicateAccountGroups(source)
+	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
+		return nil, err
+	}
 	proxyID := source.ProxyID
 	if source.ProxyFallbackOriginID != nil {
 		// Proxy fallback is transient runtime state; duplicate the configured origin.
@@ -310,6 +321,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
 	duplicate, err := buildAccountForCreate(input, accountExtra)
@@ -394,68 +408,23 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 	return normalized, nil
 }
 
-// ValidateGrokMediaEligibilityExtra validates the optional media-routing
-// override. null removes the override and returns the account to automatic
-// provider-observation based routing.
-func ValidateGrokMediaEligibilityExtra(platform string, extra map[string]any) error {
-	if platform != PlatformGrok || extra == nil {
-		return nil
-	}
-	raw, exists := extra[GrokMediaEligibleExtraKey]
-	if !exists || raw == nil {
-		return nil
-	}
-	if _, ok := raw.(bool); !ok {
-		return infraerrors.BadRequest(
-			"GROK_MEDIA_ELIGIBILITY_INVALID",
-			"grok_media_eligible must be a boolean or null",
-		)
-	}
-	return nil
-}
-
-func normalizeGrokMediaEligibilityExtra(platform string, extra map[string]any) (map[string]any, error) {
-	if platform != PlatformGrok {
-		return extra, nil
-	}
-	if err := ValidateGrokMediaEligibilityExtra(platform, extra); err != nil {
-		return nil, err
-	}
-	normalized := maps.Clone(extra)
-	if normalized != nil && normalized[GrokMediaEligibleExtraKey] == nil {
-		delete(normalized, GrokMediaEligibleExtraKey)
-	}
-	return normalized, nil
-}
-
-func normalizeGrokMediaEligibilityUpdateExtra(account *Account, input *UpdateAccountInput, normalized map[string]any) (map[string]any, error) {
-	if account == nil || account.Platform != PlatformGrok {
-		return normalized, nil
-	}
-	if err := ValidateGrokMediaEligibilityExtra(account.Platform, input.Extra); err != nil {
-		return nil, err
-	}
-	normalized = maps.Clone(normalized)
-	if normalized == nil {
-		normalized = make(map[string]any)
-	}
-	raw, provided := input.Extra[GrokMediaEligibleExtraKey]
-	if provided {
-		if raw == nil {
-			delete(normalized, GrokMediaEligibleExtraKey)
-		}
-		return normalized, nil
-	}
-	if current, ok := account.Extra[GrokMediaEligibleExtraKey].(bool); ok {
-		normalized[GrokMediaEligibleExtraKey] = current
-	}
-	return normalized, nil
-}
+// Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
-	// Probe state is system-managed. New accounts always start with auto probe disabled.
+	accountExtra = MergeOpenAICodexTicketExtra(accountExtra, nil)
+	if input.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
+		return nil, errors.New("typesafe accounts only support apikey credentials")
+	}
+	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
+	delete(accountExtra, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingProbeExtraKey)
+	delete(accountExtra, OllamaCloudUsageSessionExtraKey)
+	delete(accountExtra, OllamaCloudUsageAutoRefreshExtraKey)
+	delete(accountExtra, OllamaCloudUsageSnapshotExtraKey)
+	delete(accountExtra, OpenCodeGoUsageAutoRefreshExtraKey)
+	delete(accountExtra, OpenCodeGoUsageSnapshotExtraKey)
+	accountExtra = prepareCodexFingerprintExtraForCreate(input.Platform, input.Type, accountExtra)
 	account := &Account{
 		Name:        input.Name,
 		Notes:       normalizeAccountNotes(input.Notes),
@@ -519,6 +488,13 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	accountExtra, err = normalizeOpenAIAutoResetCreditExtra(input.Platform, input.Type, false, accountExtra)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
+		return nil, err
+	}
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -547,9 +523,17 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	// Never persist ephemeral SSO/password secrets after OAuth conversion.
+	input.Credentials = SanitizeStoredCredentials(input.Platform, input.Credentials)
 
 	account, err := buildAccountForCreate(input, accountExtra)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
 	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
@@ -591,14 +575,13 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	return account, nil
 }
 
-type accountProbeEnabledAtomicUpdater interface {
-	UpdateWithUpstreamBillingProbeEnabled(context.Context, *Account, bool) error
-}
-
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
+		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
@@ -610,8 +593,21 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err != nil {
 			return nil, err
 		}
+		effectiveType := account.Type
+		if input.Type != "" {
+			effectiveType = input.Type
+		}
+		normalizedExtra, err = normalizeOpenAIAutoResetCreditExtra(account.Platform, effectiveType, account.IsShadow(), normalizedExtra)
+		if err != nil {
+			return nil, err
+		}
+		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
+	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
+	previousOpenCodeUsageIdentity := openCodeGoUsageIdentity(account)
 	// 安全/身份不变量(影子账号):通用更新路径被 edit/re-auth/refresh/batch 共用,
 	// 必须在此守住,否则仅在创建时的保证可被这些路径绕过。
 	if account.IsCredentialShadow() {
@@ -660,10 +656,16 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err
 		}
+		if err := NormalizeOpenCodeGoProtocolRulesCredentials(account.Credentials); err != nil {
+			return nil, err
+		}
+		// Strip SSO/password residue that must never sit next to OAuth tokens.
+		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
-	var requestedProbeEnabledUpdate *bool
+	requestedProbeEnabledUpdate := input.ProbeEnabled
+	requestedRateSyncEnabledUpdate := input.RateSyncEnabled
 	if input.Extra != nil {
 		requestedProbeEnabled, hasRequestedProbeEnabled := normalizedExtra[UpstreamBillingProbeEnabledExtraKey]
 		if hasRequestedProbeEnabled {
@@ -671,11 +673,20 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			if !ok {
 				return nil, infraerrors.BadRequest("INVALID_UPSTREAM_BILLING_PROBE_ENABLED", "upstream_billing_probe_enabled must be a boolean")
 			}
+			if requestedProbeEnabledUpdate != nil && *requestedProbeEnabledUpdate != enabled {
+				return nil, infraerrors.BadRequest("CONFLICTING_UPSTREAM_BILLING_PROBE_ENABLED", "conflicting upstream_billing_probe_enabled values")
+			}
 			requestedProbeEnabledUpdate = &enabled
 		}
 		delete(normalizedExtra, UpstreamBillingProbeEnabledExtraKey)
+		delete(normalizedExtra, UpstreamBillingRateSyncEnabledExtraKey)
 		delete(normalizedExtra, UpstreamBillingProbeExtraKey)
-		// 保留配额用量字段，防止编辑账号时意外重置
+		delete(normalizedExtra, OllamaCloudUsageSessionExtraKey)
+		delete(normalizedExtra, OllamaCloudUsageAutoRefreshExtraKey)
+		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
+		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
+		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
 			"quota_daily_used",
@@ -684,19 +695,21 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			"quota_weekly_start",
 			grokBillingExtraKey,
 			UpstreamBillingProbeEnabledExtraKey,
+			UpstreamBillingRateSyncEnabledExtraKey,
 			UpstreamBillingProbeExtraKey,
+			OllamaCloudUsageSessionExtraKey,
+			OllamaCloudUsageAutoRefreshExtraKey,
+			OllamaCloudUsageSnapshotExtraKey,
+			OpenAIAutoResetCreditStateExtraKey,
+			OpenCodeGoUsageAutoRefreshExtraKey,
+			OpenCodeGoUsageSnapshotExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
 			}
 		}
-		if hasRequestedProbeEnabled {
-			if isUpstreamBillingProbeAccount(account) {
-				normalizedExtra[UpstreamBillingProbeEnabledExtraKey] = requestedProbeEnabled
-			} else {
-				delete(normalizedExtra, UpstreamBillingProbeEnabledExtraKey)
-			}
-		}
+		normalizedExtra = MergeOpenAICodexTicketExtra(normalizedExtra, account.Extra)
+		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
 		account.Extra = normalizedExtra
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
@@ -716,6 +729,38 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		ComputeQuotaResetAt(account.Extra)
 		NormalizeFixedQuotaWindows(account.Extra)
 	}
+	if input.Extra == nil {
+		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
+	}
+	if requestedRateSyncEnabledUpdate != nil && *requestedRateSyncEnabledUpdate {
+		if requestedProbeEnabledUpdate != nil && !*requestedProbeEnabledUpdate {
+			return nil, infraerrors.BadRequest(
+				"UPSTREAM_BILLING_RATE_SYNC_REQUIRES_PROBE",
+				"upstream billing rate sync requires upstream billing probe",
+			)
+		}
+		enabled := true
+		requestedProbeEnabledUpdate = &enabled
+	}
+	if requestedProbeEnabledUpdate != nil && !*requestedProbeEnabledUpdate {
+		disabled := false
+		requestedRateSyncEnabledUpdate = &disabled
+	}
+	if (requestedProbeEnabledUpdate != nil && *requestedProbeEnabledUpdate) ||
+		(requestedRateSyncEnabledUpdate != nil && *requestedRateSyncEnabledUpdate) {
+		if !isUpstreamBillingProbeAccount(account) {
+			return nil, ErrUpstreamBillingProbeAccountInvalid
+		}
+	}
+	if account.Extra == nil && (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) {
+		account.Extra = make(map[string]any)
+	}
+	if requestedProbeEnabledUpdate != nil {
+		account.Extra[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
+	}
+	if requestedRateSyncEnabledUpdate != nil {
+		account.Extra[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
+	}
 	// 影子代理恒继承母账号(由 propagateProxyToShadows 同步),不接受独立编辑——外审 B/P1;
 	// 否则要等母账号下次改 proxy 才被覆盖,期间影子会出现"有时继承、有时独立"的漂移。
 	if input.ProxyID != nil && !account.IsCredentialShadow() {
@@ -731,6 +776,29 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(account.Extra, UpstreamBillingProbeExtraKey)
 		if !isUpstreamBillingProbeAccount(account) {
 			delete(account.Extra, UpstreamBillingProbeEnabledExtraKey)
+			delete(account.Extra, UpstreamBillingRateSyncEnabledExtraKey)
+		}
+	}
+	if account.Extra != nil {
+		if !IsOllamaCloudUsageAccount(account) {
+			delete(account.Extra, OllamaCloudUsageSessionExtraKey)
+			delete(account.Extra, OllamaCloudUsageAutoRefreshExtraKey)
+			delete(account.Extra, OllamaCloudUsageSnapshotExtraKey)
+		} else if !reflect.DeepEqual(previousOllamaUsageIdentity, ollamaCloudUsageIdentity(account)) {
+			delete(account.Extra, OllamaCloudUsageSessionExtraKey)
+			delete(account.Extra, OllamaCloudUsageAutoRefreshExtraKey)
+			delete(account.Extra, OllamaCloudUsageSnapshotExtraKey)
+		}
+	}
+	// OpenCode Go 受管键：身份改变或不再 eligible 时随本次写入清除，防止跨组污染。
+	// （代理变化只失效快照而保留开关，由 repository 合并层在锁定的 DB 行上裁决。）
+	if account.Extra != nil {
+		if !IsOpenCodeGoUsageAccount(account) {
+			delete(account.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
+			delete(account.Extra, OpenCodeGoUsageSnapshotExtraKey)
+		} else if !reflect.DeepEqual(previousOpenCodeUsageIdentity, openCodeGoUsageIdentity(account)) {
+			delete(account.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
+			delete(account.Extra, OpenCodeGoUsageSnapshotExtraKey)
 		}
 	}
 	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
@@ -744,6 +812,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if input.RateMultiplier != nil {
 		if *input.RateMultiplier < 0 {
 			return nil, errors.New("rate_multiplier must be >= 0")
+		}
+		// 同步开启时倍率归上游所有，手工值活不过下一次成功探测（表现为"改了又自己
+		// 变回去"），与批量路径一样直接拒绝。判断的是本次请求生效后的状态：上面
+		// 已把请求携带的两个开关落进 account.Extra，所以"同一请求关闭同步 + 改倍率"
+		// （用户显式收回所有权）会走到这里时读到 false，正常放行。
+		if upstreamBillingRateSyncEnabled(account) {
+			return nil, ErrUpstreamBillingRateSyncConflict
 		}
 		account.RateMultiplier = input.RateMultiplier
 	}
@@ -776,6 +851,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := s.validateGroupIDsExist(ctx, *input.GroupIDs); err != nil {
 			return nil, err
 		}
+		if err := s.ValidateAccountGroupBindings(ctx, *input.GroupIDs); err != nil {
+			return nil, err
+		}
 
 		// 检查混合渠道风险（除非用户已确认）
 		if !input.SkipMixedChannelCheck {
@@ -785,23 +863,42 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 
-	probeEnabledAppliedAtomically := false
-	if requestedProbeEnabledUpdate != nil && isUpstreamBillingProbeAccount(account) {
-		if updater, ok := s.accountRepo.(accountProbeEnabledAtomicUpdater); ok {
-			if err := updater.UpdateWithUpstreamBillingProbeEnabled(ctx, account, *requestedProbeEnabledUpdate); err != nil {
-				return nil, err
-			}
-			probeEnabledAppliedAtomically = true
-		}
+	billingSettingsAppliedAtomically := false
+	updater := s.accountBillingRepo
+	if updater == nil {
+		// Unit tests and narrow internal callers may construct adminServiceImpl
+		// directly; production wiring requires this capability through
+		// AdminAccountRepository.
+		updater, _ = s.accountRepo.(AccountBillingSettingsWithNotesIntentRepository)
 	}
-	if !probeEnabledAppliedAtomically {
-		if err := s.accountRepo.Update(ctx, account); err != nil {
+	if updater != nil {
+		updateErr := updater.UpdateWithAccountBillingSettingsAndNotesIntent(
+			ctx,
+			account,
+			requestedProbeEnabledUpdate,
+			requestedRateSyncEnabledUpdate,
+			input.RateMultiplier,
+			input.Notes != nil,
+		)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		billingSettingsAppliedAtomically = true
+	}
+	if !billingSettingsAppliedAtomically {
+		if err := updateAccountWithNotesIntent(ctx, s.accountRepo, account, input.Notes != nil); err != nil {
 			return nil, err
 		}
-		if requestedProbeEnabledUpdate != nil && isUpstreamBillingProbeAccount(account) {
-			if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-				UpstreamBillingProbeEnabledExtraKey: *requestedProbeEnabledUpdate,
-			}); err != nil {
+		if (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) &&
+			isUpstreamBillingProbeAccount(account) {
+			settings := make(map[string]any, 2)
+			if requestedProbeEnabledUpdate != nil {
+				settings[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
+			}
+			if requestedRateSyncEnabledUpdate != nil {
+				settings[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
+			}
+			if err := s.accountRepo.UpdateExtra(ctx, account.ID, settings); err != nil {
 				return nil, err
 			}
 		}
@@ -833,6 +930,17 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
+	updates = MergeOpenAICodexTicketExtra(updates, nil)
+	updates = sanitizedCodexFingerprintExtraUpdates(updates)
+	updates = stripOpenAIAutoResetCreditManagedExtra(updates, true)
+	delete(updates, UpstreamBillingProbeEnabledExtraKey)
+	delete(updates, UpstreamBillingRateSyncEnabledExtraKey)
+	delete(updates, UpstreamBillingProbeExtraKey)
+	delete(updates, OllamaCloudUsageSessionExtraKey)
+	delete(updates, OllamaCloudUsageAutoRefreshExtraKey)
+	delete(updates, OllamaCloudUsageSnapshotExtraKey)
+	delete(updates, OpenCodeGoUsageAutoRefreshExtraKey)
+	delete(updates, OpenCodeGoUsageSnapshotExtraKey)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -851,9 +959,18 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
-	// Managed probe state may only enter through the dedicated typed field below.
+	// Managed probe/session state may only enter through dedicated typed endpoints.
+	input.Extra = MergeOpenAICodexTicketExtra(input.Extra, nil)
+	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
+	input.Extra = stripOpenAIAutoResetCreditManagedExtra(input.Extra, true)
 	delete(input.Extra, UpstreamBillingProbeEnabledExtraKey)
+	delete(input.Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingProbeExtraKey)
+	delete(input.Extra, OllamaCloudUsageSessionExtraKey)
+	delete(input.Extra, OllamaCloudUsageAutoRefreshExtraKey)
+	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
+	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
+	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
@@ -876,27 +993,40 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		if err := s.validateGroupIDsExist(ctx, *input.GroupIDs); err != nil {
 			return nil, err
 		}
+		if err := s.ValidateAccountGroupBindings(ctx, *input.GroupIDs); err != nil {
+			return nil, err
+		}
+	}
+	openAISettings, err := normalizeBulkOpenAISettings(input)
+	if err != nil {
+		return nil, err
 	}
 
 	needMixedChannelCheck := input.GroupIDs != nil && !input.SkipMixedChannelCheck
-	_, hasLongContextBillingUpdate := input.Extra[openAILongContextBillingEnabledKey]
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || hasLongContextBillingUpdate || input.ProbeEnabled != nil {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
 		}
 		cachedTargets = loaded
 	}
-	if input.ProbeEnabled != nil {
-		targetsByID := make(map[int64]*Account, len(cachedTargets))
-		for _, account := range cachedTargets {
-			if account != nil {
-				targetsByID[account.ID] = account
-			}
+	targetsByID := make(map[int64]*Account, len(cachedTargets))
+	for _, account := range cachedTargets {
+		if account != nil {
+			targetsByID[account.ID] = account
 		}
+	}
+	if openAISettings.any() {
+		inheritedCount, err := validateBulkOpenAISettingsTargets(input, openAISettings, targetsByID)
+		if err != nil {
+			return nil, err
+		}
+		result.LongContextInheritedCount = inheritedCount
+	}
+	if input.ProbeEnabled != nil {
 		for _, accountID := range input.AccountIDs {
 			account, ok := targetsByID[accountID]
 			if !ok {
@@ -907,18 +1037,6 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			}
 		}
 	}
-	if hasLongContextBillingUpdate {
-		for _, account := range cachedTargets {
-			if account == nil || account.Platform != PlatformOpenAI {
-				continue
-			}
-			if err := ValidateOpenAILongContextBillingExtra(account.Platform, input.Extra); err != nil {
-				return nil, err
-			}
-			break
-		}
-	}
-
 	// 影子账号绝不持有凭据:批量更新携带凭据时,目标中不得含影子(外审 G5,与单账号
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
 	if len(input.Credentials) > 0 {
@@ -969,24 +1087,51 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		if *input.RateMultiplier < 0 {
 			return nil, errors.New("rate_multiplier must be >= 0")
 		}
+		syncEnabledCount := 0
+		for _, account := range cachedTargets {
+			if account == nil || account.Extra == nil {
+				continue
+			}
+			enabled, _ := account.Extra[UpstreamBillingRateSyncEnabledExtraKey].(bool)
+			if enabled {
+				syncEnabledCount++
+			}
+		}
+		if syncEnabledCount > 0 {
+			return nil, ErrUpstreamBillingRateSyncBulkConflict.WithMetadata(map[string]string{
+				"count": strconv.Itoa(syncEnabledCount),
+			})
+		}
 	}
 
 	// 校验并规范化请求头覆写配置（批量路径为 JSONB 顶层 key 合并，直接校验增量即可）
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
+	if err := NormalizeOpenCodeGoProtocolRulesCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	// Bulk may mix platforms; always drop ephemeral SSO/password keys (cookie
+	// only when platform is known Grok — empty platform still strips password/*).
+	if input.Credentials != nil {
+		input.Credentials = SanitizeStoredCredentials("", input.Credentials)
+	}
 
 	// Prepare bulk updates for columns and JSONB fields.
 	repoUpdates := AccountBulkUpdate{
-		Credentials:  input.Credentials,
-		Extra:        input.Extra,
-		ProbeEnabled: input.ProbeEnabled,
+		Credentials:                input.Credentials,
+		Extra:                      input.Extra,
+		ProbeEnabled:               input.ProbeEnabled,
+		EnsureCodexFingerprintSeed: ShouldEnsureCodexFingerprintSeedForExtraUpdates(input.Extra),
 	}
 	if input.ProbeEnabled != nil {
 		if repoUpdates.Extra == nil {
 			repoUpdates.Extra = make(map[string]any)
 		}
 		repoUpdates.Extra[UpstreamBillingProbeEnabledExtraKey] = *input.ProbeEnabled
+		if !*input.ProbeEnabled {
+			repoUpdates.Extra[UpstreamBillingRateSyncEnabledExtraKey] = false
+		}
 	}
 	if updatesUpstreamBillingProbeIdentity(input.Credentials) || input.ProxyID != nil {
 		if repoUpdates.Extra == nil {
@@ -1227,14 +1372,12 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, fmt.Errorf("get parent account: %w", err)
 	}
 	if !parent.IsOpenAIOAuth() {
-		return nil, infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_INVALID_PARENT",
-			"spark shadow requires an OpenAI OAuth parent account")
+		return nil, ErrSparkShadowInvalidParent
 	}
 	// G6:母账号本身不能是影子,否则会建出二级影子——resolveCredentialAccount 只解一层,
 	// 会解析到无凭据的一级影子,进入坏调度/上游失败。
 	if parent.IsCredentialShadow() {
-		return nil, infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_PARENT_IS_SHADOW",
-			"spark shadow parent must be a real account, not another spark shadow")
+		return nil, ErrSparkShadowParentIsShadow
 	}
 
 	// 2. 一母一影校验
@@ -1243,8 +1386,7 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, fmt.Errorf("check existing spark shadows: %w", err)
 	}
 	if len(shadows) > 0 {
-		return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
-			"parent account already has a spark shadow account")
+		return nil, ErrSparkShadowAlreadyExists
 	}
 
 	// 3. 解析分组。未指定 GroupIDs 时:优先**继承母账号当前分组**(影子与母同路由域,母在自定义
@@ -1270,6 +1412,9 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 				}
 			}
 		}
+	}
+	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
+		return nil, err
 	}
 
 	// 4. 构造影子账号（安全不变量：Credentials 恒不含 auth token，仅含 model_mapping）。
@@ -1312,37 +1457,33 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		},
 	}
 
-	// 5. 持久化（Create 填充 shadow.ID）。并发竞态:预查(步骤2)放行后另一请求抢先建成,本次会撞
-	// 一母一影唯一索引。复查确认确为"已存在"竞态时返回结构化 409 而非裸 500——外审 A/P1。
-	if err := s.accountRepo.Create(ctx, shadow); err != nil {
-		if existing, qerr := s.accountRepo.ListShadowsByParent(ctx, parentID); qerr == nil && len(existing) > 0 {
-			return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
-				"parent account already has a spark shadow account")
-		}
-		return nil, fmt.Errorf("create spark shadow: %w", err)
+	// 5. The repository locks and revalidates the parent, then persists the
+	// shadow, group bindings, and scheduler outbox in one transaction.
+	groups := make([]AccountGroup, 0, len(groupIDs))
+	for i, groupID := range groupIDs {
+		groups = append(groups, AccountGroup{GroupID: groupID, Priority: i + 1})
 	}
-
-	// 6. 绑定分组。注意:create+bind 非单一 DB 事务(通用 Create 走 r.client、outbox 走 r.sql,
-	// 无现成共享事务路径),故绑组失败时做 best-effort 补偿删除刚建的影子,避免半成品影子(否则
-	// 一母一影唯一索引会挡住重试)——外审 C/P1。补偿删除用 detached ctx,即便请求 ctx 已取消/超时
-	// 仍能完成清理(外审第4轮);进程崩溃这种极端仍可能残留,属已知权衡。
-	if len(groupIDs) > 0 {
-		if err := s.accountRepo.BindGroups(ctx, shadow.ID, groupIDs); err != nil {
-			if delErr := s.accountRepo.Delete(context.WithoutCancel(ctx), shadow.ID); delErr != nil {
-				slog.Error("spark_shadow_bind_groups_rollback_failed",
-					"shadow_id", shadow.ID, "parent_id", parentID, "delete_err", delErr)
-			}
-			return nil, fmt.Errorf("bind groups for spark shadow: %w", err)
-		}
-		shadow.GroupIDs = groupIDs
+	creator := sparkShadowAtomicCreator(s.adminAccountRepo)
+	if creator == nil {
+		creator, _ = s.accountRepo.(sparkShadowAtomicCreator)
+	}
+	if creator == nil {
+		return nil, errors.New("atomic spark shadow creation is not supported")
+	}
+	if err := creator.CreateSparkShadowWithGroups(ctx, parentID, shadow, groups); err != nil {
+		return nil, fmt.Errorf("create spark shadow: %w", err)
 	}
 
 	return shadow, nil
 }
 
+type sparkShadowAtomicCreator interface {
+	CreateSparkShadowWithGroups(ctx context.Context, parentID int64, shadow *Account, groups []AccountGroup) error
+}
+
 // propagateProxyToShadows syncs proxyID to all spark shadow accounts of parentID.
 // It is called synchronously so that proxy changes are immediately consistent;
-// accountRepo.Update triggers the scheduler outbox + cache propagation internally.
+// The notes-intent update triggers the scheduler outbox + cache propagation internally.
 // Calling this for a non-parent account is a harmless no-op.
 func (s *adminServiceImpl) propagateProxyToShadows(ctx context.Context, parentID int64, proxyID *int64) error {
 	return propagateAccountProxyToShadows(ctx, s.accountRepo, parentID, proxyID)
@@ -1358,7 +1499,7 @@ func propagateAccountProxyToShadows(ctx context.Context, repo AccountRepository,
 	}
 	for _, shadow := range shadows {
 		shadow.ProxyID = proxyID
-		if err := repo.Update(ctx, shadow); err != nil {
+		if err := updateAccountWithNotesIntent(ctx, repo, shadow, false); err != nil {
 			return fmt.Errorf("update spark shadow %d proxy: %w", shadow.ID, err)
 		}
 	}
@@ -1443,6 +1584,35 @@ func (s *adminServiceImpl) validateGroupIDsExist(ctx context.Context, groupIDs [
 	return nil
 }
 
+// ValidateAccountGroupBindings is the shared fail-closed policy boundary for
+// every account path that accepts explicit group bindings.
+func (s *adminServiceImpl) ValidateAccountGroupBindings(ctx context.Context, groupIDs []int64) error {
+	if len(groupIDs) == 0 || s.cfg == nil || s.cfg.RunMode != config.RunModeSimple {
+		return nil
+	}
+	if s.groupRepo == nil {
+		return errors.New("group repository not configured")
+	}
+	seen := make(map[int64]struct{}, len(groupIDs))
+	for _, groupID := range groupIDs {
+		if groupID <= 0 {
+			return fmt.Errorf("get group: %w", ErrGroupNotFound)
+		}
+		if _, ok := seen[groupID]; ok {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		group, err := s.groupRepo.GetByIDLite(ctx, groupID)
+		if err != nil {
+			return fmt.Errorf("get group: %w", err)
+		}
+		if !IsGroupBindableInSimpleMode(group) {
+			return infraerrors.BadRequest("SIMPLE_MODE_GROUP_NOT_BINDABLE", "composite groups cannot be bound in simple mode")
+		}
+	}
+	return nil
+}
+
 // CheckMixedChannelRisk checks whether target groups contain mixed channels for the current account platform.
 func (s *adminServiceImpl) CheckMixedChannelRisk(ctx context.Context, currentAccountID int64, currentAccountPlatform string, groupIDs []int64) error {
 	return s.checkMixedChannelRisk(ctx, currentAccountID, currentAccountPlatform, groupIDs)
@@ -1484,7 +1654,7 @@ func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) erro
 		return infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_NO_QUOTA_RESET",
 			"cannot reset quota for a spark shadow account; manage it on the parent account")
 	}
-	return s.accountRepo.ResetQuotaUsed(ctx, id)
+	return s.accountRepo.ResetQuotaUsedAndClearRateLimitCooldown(ctx, id)
 }
 
 // EnsureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，

@@ -43,6 +43,9 @@ func (e *handlerPromptEngine) Evaluate(_ context.Context, req securityaudit.Requ
 	e.requests = append(e.requests, req.Clone())
 	return e.decision, e.err
 }
+func (e *handlerPromptEngine) Observe(ctx context.Context, req securityaudit.Request) error {
+	return e.Enqueue(ctx, req)
+}
 func (e *handlerPromptEngine) snapshot() (evaluated, enqueued int, requests []securityaudit.Request) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

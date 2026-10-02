@@ -20,9 +20,13 @@ import (
 // 并覆盖测试所需的核心方法。
 type sparkShadowRepoStub struct {
 	mockAccountRepoForGemini
-	nextID   int64
-	accounts map[int64]*Account
-	groupsOf map[int64][]int64 // accountID → []groupIDs
+	nextID            int64
+	accounts          map[int64]*Account
+	groupsOf          map[int64][]int64 // accountID → []groupIDs
+	createShadowErr   error
+	createShadowCalls int
+	deleteErrByID     map[int64]error
+	deleteCalls       []int64
 }
 
 func newSparkShadowRepoStub() *sparkShadowRepoStub {
@@ -69,6 +73,44 @@ func (s *sparkShadowRepoStub) BindGroups(_ context.Context, accountID int64, gro
 	return nil
 }
 
+func (s *sparkShadowRepoStub) CreateSparkShadowWithGroups(
+	ctx context.Context,
+	parentID int64,
+	shadow *Account,
+	groups []AccountGroup,
+) error {
+	s.createShadowCalls++
+	if s.createShadowErr != nil {
+		return s.createShadowErr
+	}
+	parent, ok := s.accounts[parentID]
+	if !ok {
+		return ErrAccountNotFound
+	}
+	if !parent.IsOpenAIOAuth() {
+		return ErrSparkShadowInvalidParent
+	}
+	if parent.IsCredentialShadow() {
+		return ErrSparkShadowParentIsShadow
+	}
+	if existing, _ := s.ListShadowsByParent(ctx, parentID); len(existing) > 0 {
+		return ErrSparkShadowAlreadyExists
+	}
+	if err := s.Create(ctx, shadow); err != nil {
+		return err
+	}
+	shadow.GroupIDs = make([]int64, 0, len(groups))
+	shadow.AccountGroups = append([]AccountGroup(nil), groups...)
+	for _, group := range groups {
+		shadow.GroupIDs = append(shadow.GroupIDs, group.GroupID)
+		s.groupsOf[shadow.ID] = append(s.groupsOf[shadow.ID], group.GroupID)
+	}
+	stored := *shadow
+	s.accounts[shadow.ID] = &stored
+	s.mockAccountRepoForGemini.accountsByID[shadow.ID] = &stored
+	return nil
+}
+
 func (s *sparkShadowRepoStub) ListSchedulableByGroupID(_ context.Context, groupID int64) ([]Account, error) {
 	var result []Account
 	for accID, groups := range s.groupsOf {
@@ -103,6 +145,10 @@ func (s *sparkShadowRepoStub) Update(_ context.Context, account *Account) error 
 }
 
 func (s *sparkShadowRepoStub) Delete(_ context.Context, id int64) error {
+	s.deleteCalls = append(s.deleteCalls, id)
+	if err := s.deleteErrByID[id]; err != nil {
+		return err
+	}
 	delete(s.accounts, id)
 	delete(s.mockAccountRepoForGemini.accountsByID, id)
 	return nil
@@ -190,8 +236,8 @@ func TestCreateShadowInheritsParentEffectiveOpenAILongContextBillingValue(t *tes
 	}
 }
 
-// TestCreateShadow_BindGroups は BindGroups の後置呼び出しを検証する。
-// 影子账号が指定グループに属し、ListSchedulableByGroupID で取得可能であること。
+// TestCreateShadow_BindGroups verifies that service persistence goes through
+// the atomic repository operation and returns the persisted group projection.
 func TestCreateShadow_BindGroups(t *testing.T) {
 	ctx := context.Background()
 	repo := newSparkShadowRepoStub()
@@ -215,6 +261,7 @@ func TestCreateShadow_BindGroups(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, shadow)
+	require.Equal(t, 1, repo.createShadowCalls)
 	require.Equal(t, []int64{testGroupID}, shadow.GroupIDs, "CreateShadow should backfill GroupIDs into the returned shadow")
 
 	accounts, err := repo.ListSchedulableByGroupID(ctx, testGroupID)
@@ -728,30 +775,21 @@ func TestBulkUpdateAccounts_PropagatesProxyToShadow(t *testing.T) {
 
 // ── 外审 P1/P2 加固:专用测试桩 ───────────────────────────────────────────
 
-// raceCreateRepoStub 模拟并发竞态:对影子的 Create 撞一母一影唯一索引(返回错误),
-// 且复查时另一并发请求的影子已存在 → CreateShadow 应映射为结构化 409(外审 A/P1)。
+// raceCreateRepoStub 模拟锁内复核发现另一请求已创建影子。
 type raceCreateRepoStub struct {
 	*sparkShadowRepoStub
 }
 
-func (s *raceCreateRepoStub) Create(ctx context.Context, account *Account) error {
-	if account.ParentAccountID != nil {
-		// 模拟另一并发请求已抢先建成影子:注入底层 map,本次 Create 撞唯一索引失败。
-		s.sparkShadowRepoStub.nextID++
-		phantom := *account
-		phantom.ID = s.sparkShadowRepoStub.nextID
-		s.sparkShadowRepoStub.accounts[phantom.ID] = &phantom
-		return errors.New(`duplicate key value violates unique constraint "uq_accounts_spark_shadow_per_parent"`)
-	}
-	return s.sparkShadowRepoStub.Create(ctx, account)
+func (s *raceCreateRepoStub) CreateSparkShadowWithGroups(context.Context, int64, *Account, []AccountGroup) error {
+	return ErrSparkShadowAlreadyExists
 }
 
-// bindFailRepoStub 让 BindGroups 失败,用于验证绑组失败时补偿删除刚建的影子(外审 C/P1)。
+// bindFailRepoStub 模拟仓储原子事务在创建/绑组阶段失败。
 type bindFailRepoStub struct {
 	*sparkShadowRepoStub
 }
 
-func (s *bindFailRepoStub) BindGroups(_ context.Context, _ int64, _ []int64) error {
+func (s *bindFailRepoStub) CreateSparkShadowWithGroups(context.Context, int64, *Account, []AccountGroup) error {
 	return errors.New("simulated bind failure")
 }
 
@@ -787,8 +825,7 @@ func TestCreateShadow_DefaultsNameFromParent(t *testing.T) {
 	require.Equal(t, "mum (Spark)", shadow.Name)
 }
 
-// TestCreateShadow_ConcurrentCreateReturns409 验证外审 A/P1:并发竞态下预查放行后
-// Create 撞唯一索引,应映射结构化 409 而非裸 500。
+// TestCreateShadow_ConcurrentCreateReturns409 验证锁内复核错误保持结构化 409。
 func TestCreateShadow_ConcurrentCreateReturns409(t *testing.T) {
 	ctx := context.Background()
 	base := newSparkShadowRepoStub()
@@ -826,8 +863,7 @@ func TestCreateShadow_InvalidGroupRejectedNoOrphan(t *testing.T) {
 	require.Empty(t, shadows, "无效分组应在创建前被拒,不应建出影子")
 }
 
-// TestCreateShadow_BindFailureRollsBackShadow 验证外审 C/P1:绑组失败时补偿删除
-// 刚建的影子,不留孤儿(否则一母一影唯一索引会挡住重试)。
+// TestCreateShadow_BindFailureRollsBackShadow 验证原子仓储失败不会留下影子。
 func TestCreateShadow_BindFailureRollsBackShadow(t *testing.T) {
 	ctx := context.Background()
 	base := newSparkShadowRepoStub()

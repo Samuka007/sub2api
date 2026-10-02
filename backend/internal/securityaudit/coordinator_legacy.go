@@ -14,6 +14,13 @@ func NewLegacyModerationAdapter(svc *service.ContentModerationService) LegacyEng
 	return &LegacyModerationAdapter{service: svc}
 }
 
+func (a *LegacyModerationAdapter) ObserveOnly(ctx context.Context, req Request) bool {
+	if a == nil || a.service == nil {
+		return false
+	}
+	return a.service.IsTrustedAPIKeyObserveOnly(ctx, req.APIKeyID, req.Model, req.Endpoint)
+}
+
 func (a *LegacyModerationAdapter) Check(ctx context.Context, req Request) (*LegacyDecision, error) {
 	if a == nil || a.service == nil {
 		return nil, nil
@@ -31,5 +38,6 @@ func (a *LegacyModerationAdapter) Check(ctx context.Context, req Request) (*Lega
 		Allowed: decision.Allowed, Blocked: decision.Blocked, Flagged: decision.Flagged,
 		Message: decision.Message, StatusCode: decision.StatusCode,
 		ErrorCode: "content_policy_violation", Action: decision.Action,
+		ObserveOnly: decision.Action == service.ContentModerationActionTrustedObserve,
 	}, nil
 }

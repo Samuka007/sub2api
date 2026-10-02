@@ -5,6 +5,7 @@
 
 import { apiClient } from '../client'
 import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
+import type { AdminRole } from '@/types'
 
 export interface AdminBindAuthIdentityChannelRequest {
   channel: string
@@ -132,7 +133,7 @@ export async function create(userData: {
   password: string
   username?: string
   notes?: string
-  role?: 'admin' | 'user'
+  roles?: AdminRole[]
   balance?: number
   concurrency?: number
   rpm_limit?: number
@@ -330,7 +331,12 @@ export async function bindUserAuthIdentity(
 /**
  * Platform quota types
  */
-export type PlatformQuotaPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok'
+// Keep aligned with backend/internal/service/domain_constants.go AllowedQuotaPlatforms.
+export const PLATFORM_QUOTA_PLATFORMS = [
+  'anthropic', 'openai', 'gemini', 'antigravity', 'grok',
+  'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe',
+] as const
+export type PlatformQuotaPlatform = typeof PLATFORM_QUOTA_PLATFORMS[number]
 export type PlatformQuotaWindow = 'daily' | 'weekly' | 'monthly'
 
 export interface PlatformQuotaItem {

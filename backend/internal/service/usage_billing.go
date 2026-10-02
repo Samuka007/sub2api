@@ -3,14 +3,48 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"sync"
+
+	"github.com/shopspring/decimal"
 )
 
 var ErrUsageBillingRequestIDRequired = errors.New("usage billing request_id is required")
 var ErrUsageBillingRequestConflict = errors.New("usage billing request fingerprint conflict")
+
+const usageBillingRequestIDMaxLength = 64
+
+type usageBillingRequestIDState struct {
+	once  sync.Once
+	value string
+}
+
+var usageBillingRequestIDStateInitMu sync.Mutex
+
+func ensureUsageBillingRequestIDState(target **usageBillingRequestIDState) *usageBillingRequestIDState {
+	usageBillingRequestIDStateInitMu.Lock()
+	defer usageBillingRequestIDStateInitMu.Unlock()
+	if *target == nil {
+		*target = &usageBillingRequestIDState{}
+	}
+	return *target
+}
+
+// normalizeUsageBillingRequestID keeps the shared billing key within the
+// usage_logs.request_id limit without collapsing distinct oversized IDs.
+func normalizeUsageBillingRequestID(requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if len(requestID) <= usageBillingRequestIDMaxLength {
+		return requestID
+	}
+	digest := sha256.Sum256([]byte(requestID))
+	return "sha256:" + base64.RawURLEncoding.EncodeToString(digest[:])
+}
 
 // UsageBillingCommand describes one billable request that must be applied at most once.
 type UsageBillingCommand struct {
@@ -45,10 +79,58 @@ func (c *UsageBillingCommand) Normalize() {
 	if c == nil {
 		return
 	}
-	c.RequestID = strings.TrimSpace(c.RequestID)
+	c.RequestID = normalizeUsageBillingRequestID(c.RequestID)
 	if strings.TrimSpace(c.RequestFingerprint) == "" {
 		c.RequestFingerprint = buildUsageBillingFingerprint(c)
 	}
+	// 量化必须在指纹计算之后：指纹是请求幂等键，保持由原始金额派生可以避免
+	// 升级前后同一 request_id 的重试算出不同指纹而被判为 fingerprint conflict。
+	c.quantizeMonetaryFields()
+}
+
+// UsageBillingMonetaryScale 是所有计费金额的规范小数位数，
+// 对齐 users.balance / api_keys.quota_used 的 NUMERIC(20,8)。
+const UsageBillingMonetaryScale = 8
+
+// quantizeMonetaryFields 把命令中的金额统一量化到 NUMERIC(20,8)。
+//
+// 不量化时，同一笔 ActualCost 会在两条方向相反的 SQL 上被 PostgreSQL 分别舍入：
+//
+//	balance    = balance - $1      // 存剩余额度，舍入的是「减法结果」
+//	quota_used = quota_used + $1   // 存累计用量，舍入的是「加法结果」
+//
+// PostgreSQL 对 NUMERIC 采用 half-away-from-zero。当金额在第 9 位出现 half 边界
+// （例：10 输入 token × 0.00000125 + 5 输出 token × 0.00001000，再乘分组倍率
+// 1.25 = 0.000078125）时：
+//
+//	balance:    10000 - 0.000078125 = 9999.999921875 → 9999.99992188（delta 0.00007812）
+//	quota_used:     0 + 0.000078125 =     0.000078125 →     0.00007813（delta 0.00007813）
+//
+// 两个 delta 相差 1e-8，且方向相反——余额少扣、Key 配额多记，随请求量线性累积，
+// 使余额、API Key 配额与用量记录无法精确对账（需要 epsilon 比较才能勉强吻合）。
+//
+// 在参数进入 SQL 之前量化一次，两条语句就都拿到已经落在 8 位刻度上的同一个金额，
+// 存储阶段不再发生任何舍入，delta 精确相等。
+func (c *UsageBillingCommand) quantizeMonetaryFields() {
+	c.BalanceCost = QuantizeUsageBillingAmount(c.BalanceCost)
+	c.SubscriptionCost = QuantizeUsageBillingAmount(c.SubscriptionCost)
+	c.APIKeyQuotaCost = QuantizeUsageBillingAmount(c.APIKeyQuotaCost)
+	c.APIKeyRateLimitCost = QuantizeUsageBillingAmount(c.APIKeyRateLimitCost)
+	c.AccountQuotaCost = QuantizeUsageBillingAmount(c.AccountQuotaCost)
+}
+
+// QuantizeUsageBillingAmount 把金额舍入到 UsageBillingMonetaryScale 位小数，
+// 采用与 PostgreSQL NUMERIC 一致的 half-away-from-zero 规则。
+//
+// 走 decimal 而不是 math.Round(v*1e8)/1e8：后者在乘除过程中会引入额外的二进制
+// 误差，边界值可能被推到错误的一侧。decimal.NewFromFloat 取 float64 的最短十进制
+// 表示，正是 PostgreSQL 把 float8 参数转成 numeric 时所用的表示。
+func QuantizeUsageBillingAmount(v float64) float64 {
+	if v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return v
+	}
+	quantized, _ := decimal.NewFromFloat(v).Round(UsageBillingMonetaryScale).Float64()
+	return quantized
 }
 
 func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
@@ -115,7 +197,8 @@ type UsageBillingApplyResult struct {
 	Applied              bool
 	APIKeyQuotaExhausted bool
 	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)
-	BalanceOverdrafted   bool               // true when the sufficient-balance guard missed and debt was still recorded
+	BalanceCharged       *float64           // amount actually deducted from balance (nil = no balance deduction)
+	BalanceOverdrafted   bool               // true when requested cost exceeded available balance; balance is capped at zero
 	QuotaState           *AccountQuotaState // post-increment quota state (nil = no quota increment)
 }
 

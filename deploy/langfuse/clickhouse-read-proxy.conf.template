@@ -1,0 +1,56 @@
+limit_conn_zone $server_name zone=read_queries:10m;
+limit_req_zone $server_name zone=read_rate:10m rate=${CLICKHOUSE_READ_RATE}r/s;
+
+# Deliberately omit request URI, query arguments, headers, and SQL bodies.
+log_format read_isolation escape=json
+  '{"time":"$time_iso8601",'
+  '"status":$status,'
+  '"request_time":$request_time,'
+  '"upstream_time":"$upstream_response_time",'
+  '"upstream_status":"$upstream_status"}';
+
+upstream clickhouse_primary {
+  server clickhouse:8123;
+  keepalive 16;
+}
+
+server {
+  listen 8080;
+  server_name clickhouse-read-proxy;
+
+  access_log /dev/stdout read_isolation;
+  error_log /dev/stderr crit;
+
+  location = /health {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+  }
+
+  location / {
+    limit_except GET POST { deny all; }
+
+    # Authentication is owned by the proxy; never allow query arguments to
+    # compete with the dedicated read-only credentials below.
+    if ($arg_user != "") { return 400; }
+    if ($arg_password != "") { return 400; }
+
+    limit_conn read_queries ${CLICKHOUSE_READ_MAX_CONCURRENT};
+    limit_conn_status 429;
+    limit_req zone=read_rate burst=${CLICKHOUSE_READ_RATE_BURST} nodelay;
+    limit_req_status 429;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host clickhouse;
+    proxy_set_header Connection "";
+    proxy_set_header Authorization "";
+    proxy_set_header X-ClickHouse-User "langfuse_read";
+    proxy_set_header X-ClickHouse-Key "${CLICKHOUSE_READ_PASSWORD}";
+    proxy_connect_timeout 2s;
+    proxy_send_timeout ${CLICKHOUSE_READ_PROXY_TIMEOUT_SECONDS}s;
+    proxy_read_timeout ${CLICKHOUSE_READ_PROXY_TIMEOUT_SECONDS}s;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_pass http://clickhouse_primary;
+  }
+}

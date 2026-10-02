@@ -14,12 +14,18 @@ import (
 type fakeLegacyEngine struct {
 	decision *LegacyDecision
 	err      error
+	observe  bool
 	calls    atomic.Int64
+	observes atomic.Int64
 }
 
 func (f *fakeLegacyEngine) Check(context.Context, Request) (*LegacyDecision, error) {
 	f.calls.Add(1)
 	return f.decision, f.err
+}
+func (f *fakeLegacyEngine) ObserveOnly(context.Context, Request) bool {
+	f.observes.Add(1)
+	return f.observe
 }
 
 type fakePromptEngine struct {
@@ -28,6 +34,7 @@ type fakePromptEngine struct {
 	err       error
 	enqueues  atomic.Int64
 	evaluates atomic.Int64
+	observes  atomic.Int64
 }
 
 func (f *fakePromptEngine) EffectiveMode() Mode { return f.mode }
@@ -38,6 +45,10 @@ func (f *fakePromptEngine) Enqueue(context.Context, Request) error {
 func (f *fakePromptEngine) Evaluate(context.Context, Request) (*PromptDecision, error) {
 	f.evaluates.Add(1)
 	return f.decision, f.err
+}
+func (f *fakePromptEngine) Observe(context.Context, Request) error {
+	f.observes.Add(1)
+	return f.err
 }
 
 func TestCoordinatorModesAndPriority(t *testing.T) {
@@ -152,6 +163,34 @@ func TestCoordinatorPreservesIndependentEngineFactsAndMapsOnlyGatewayOutcome(t *
 	require.Equal(t, "legacy finding", decision.Legacy.Message)
 	require.Equal(t, []string{"pii"}, decision.Prompt.Result.Categories)
 	require.Equal(t, ErrorCodeBlocked, decision.ErrorCode)
+}
+
+func TestCoordinatorObserveOnlyLegacyNeverLetsPromptBlockGateway(t *testing.T) {
+	promptCases := []*PromptDecision{
+		{Kind: DecisionBlock, ErrorCode: ErrorCodeBlocked},
+		{Kind: DecisionUnavailable, ErrorCode: ErrorCodeUnavailable},
+		{Kind: DecisionInvalid, ErrorCode: ErrorCodeInvalidResponse},
+	}
+	for _, promptDecision := range promptCases {
+		legacyDecision := &LegacyDecision{
+			Allowed: true, ObserveOnly: true, Action: "trusted_observe",
+		}
+		legacy := &fakeLegacyEngine{decision: legacyDecision, observe: true}
+		prompt := &fakePromptEngine{mode: ModeBlocking, decision: promptDecision}
+		decision := NewCoordinator(
+			legacy,
+			prompt,
+		).Check(context.Background(), Request{})
+
+		require.Equal(t, DecisionAllow, decision.Kind)
+		require.True(t, decision.AllowNextStage)
+		require.Same(t, legacyDecision, decision.Legacy)
+		require.Nil(t, decision.Prompt)
+		require.Equal(t, int64(1), legacy.observes.Load())
+		require.Equal(t, int64(1), legacy.calls.Load())
+		require.Equal(t, int64(1), prompt.observes.Load())
+		require.Zero(t, prompt.evaluates.Load())
+	}
 }
 
 func TestCoordinatorAsyncEnqueueFailuresNeverChangeResponseOrDownstreamDispatch(t *testing.T) {

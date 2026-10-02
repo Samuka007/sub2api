@@ -18,6 +18,35 @@ const (
 	NonceTemplate = "__CSP_NONCE__"
 	// CloudflareInsightsDomain is the domain for Cloudflare Web Analytics
 	CloudflareInsightsDomain = "https://static.cloudflareinsights.com"
+	// TencentCaptchaDomain is the Tencent Captcha 2.0 Web SDK and API domain.
+	TencentCaptchaDomain = "https://turing.captcha.qcloud.com"
+	// TencentCaptchaStaticDomain hosts Tencent Captcha scripts and static assets.
+	TencentCaptchaStaticDomain = "https://*.captcha.gtimg.com"
+	// TencentCaptchaCDNDomain hosts the Chinese mainland SDK core script.
+	TencentCaptchaCDNDomain = "https://turing.captcha.gtimg.com"
+	// TencentCaptchaGlobalDomain hosts the international SDK and challenge iframe.
+	TencentCaptchaGlobalDomain = "https://ca.turing.captcha.qcloud.com"
+	// TencentCaptchaGlobalCDNDomain hosts the international SDK core script.
+	TencentCaptchaGlobalCDNDomain = "https://global.turing.captcha.gtimg.com"
+	// TencentCaptchaPrehandleDomain hosts dynamic preprocessing scripts and APIs.
+	TencentCaptchaPrehandleDomain = "https://www.tycaptcha.com"
+	// TencentCaptchaJQueryDomain hosts the jQuery dependency loaded by the mainland SDK.
+	TencentCaptchaJQueryDomain = "https://cloudcache.tencentcs.com"
+	// TencentCaptchaRceDomain hosts the international risk-control API.
+	TencentCaptchaRceDomain = "https://rce.tencentrio.com"
+	// TencentCaptchaWorkerSource allows the international SDK's Web Worker.
+	TencentCaptchaWorkerSource = "blob:"
+	// AliyunCaptchaStaticDomain hosts the Aliyun Captcha 2.0 Web SDK and assets.
+	AliyunCaptchaStaticDomain = "https://*.alicdn.com"
+	// AliyunCaptchaCNStaticDomain hosts China-region Aliyun Captcha assets.
+	AliyunCaptchaCNStaticDomain = "https://static-captcha.aliyuncs.com"
+	// AliyunCaptchaSGPStaticDomain hosts Singapore-region Aliyun Captcha assets.
+	AliyunCaptchaSGPStaticDomain = "https://static-captcha-sgp.aliyuncs.com"
+	// Aliyun Captcha uses prefix-scoped API hosts from these four domain families.
+	AliyunCaptchaAPIDomain     = "https://*.captcha-open.aliyuncs.com"
+	AliyunCaptchaAPIBackup     = "https://*.captcha-open-b.aliyuncs.com"
+	AliyunCaptchaDualAPIDomain = "https://*.captcha-open-dual.aliyuncs.com"
+	AliyunCaptchaDualAPIBackup = "https://*.captcha-open-dual-b.aliyuncs.com"
 	// StripeDomain is the domain for Stripe.js SDK
 	StripeDomain = "https://*.stripe.com"
 	// AirwallexStaticDomain 是 Airwallex 生产环境 SDK 脚本域名。
@@ -34,7 +63,39 @@ var requiredCSPDirectiveValues = []struct {
 	directive string
 	value     string
 }{
+	// 插件配置 UI 使用同源 iframe；目标响应仍必须显式放开 X-Frame-Options，
+	// 因此这里只允许 'self' 不会使其他默认 DENY 的管理/API 页面可被嵌入。
+	{"frame-src", "'self'"},
 	{"script-src", CloudflareInsightsDomain},
+	{"script-src", TencentCaptchaDomain},
+	{"script-src", TencentCaptchaStaticDomain},
+	{"style-src", TencentCaptchaStaticDomain},
+	{"frame-src", TencentCaptchaDomain},
+	{"frame-src", TencentCaptchaStaticDomain},
+	{"connect-src", TencentCaptchaDomain},
+	{"connect-src", TencentCaptchaStaticDomain},
+	{"script-src", TencentCaptchaCDNDomain},
+	{"script-src", TencentCaptchaGlobalDomain},
+	{"script-src", TencentCaptchaGlobalCDNDomain},
+	{"script-src", TencentCaptchaPrehandleDomain},
+	{"script-src", TencentCaptchaJQueryDomain},
+	{"connect-src", TencentCaptchaPrehandleDomain},
+	{"connect-src", TencentCaptchaRceDomain},
+	{"frame-src", TencentCaptchaGlobalDomain},
+	{"frame-src", TencentCaptchaPrehandleDomain},
+	{"worker-src", TencentCaptchaWorkerSource},
+	{"script-src", AliyunCaptchaStaticDomain},
+	{"style-src", AliyunCaptchaStaticDomain},
+	{"script-src", AliyunCaptchaCNStaticDomain},
+	{"style-src", AliyunCaptchaCNStaticDomain},
+	{"frame-src", AliyunCaptchaCNStaticDomain},
+	{"script-src", AliyunCaptchaSGPStaticDomain},
+	{"style-src", AliyunCaptchaSGPStaticDomain},
+	{"frame-src", AliyunCaptchaSGPStaticDomain},
+	{"connect-src", AliyunCaptchaAPIDomain},
+	{"connect-src", AliyunCaptchaAPIBackup},
+	{"connect-src", AliyunCaptchaDualAPIDomain},
+	{"connect-src", AliyunCaptchaDualAPIBackup},
 	{"script-src", StripeDomain},
 	{"frame-src", StripeDomain},
 	{"script-src", AirwallexStaticDomain},
@@ -127,8 +188,8 @@ func isAPIRoutePath(c *gin.Context) bool {
 		strings.HasPrefix(path, "/images")
 }
 
-// enhanceCSPPolicy 确保 CSP 策略包含 nonce 支持和支付 SDK 必需域名。
-// 这样旧配置文件没有及时补域名时，前端支付组件仍能正常加载。
+// enhanceCSPPolicy 确保 CSP 策略包含 nonce 支持和运行时组件必需域名。
+// 这样旧配置文件没有及时补域名时，验证码和支付组件仍能正常加载。
 func enhanceCSPPolicy(policy string) string {
 	// Add nonce placeholder to script-src if not present
 	if !strings.Contains(policy, NonceTemplate) && !strings.Contains(policy, "'nonce-") {
@@ -163,35 +224,41 @@ func directiveHasValue(policy, directive, value string) bool {
 // addToDirective adds a value to a specific CSP directive.
 // If the directive doesn't exist, it will be added after default-src.
 func addToDirective(policy, directive, value string) string {
-	// Find the directive in the policy
-	directivePrefix := directive + " "
-	idx := strings.Index(policy, directivePrefix)
+	if end, ok := cspDirectiveEnd(policy, directive); ok {
+		return policy[:end] + " " + value + policy[end:]
+	}
+	trimmed := strings.TrimSpace(policy)
+	if trimmed == "" {
+		return newCSPDirective(directive, value)
+	}
+	if !strings.HasSuffix(trimmed, ";") {
+		trimmed += ";"
+	}
+	return trimmed + " " + newCSPDirective(directive, value)
+}
 
-	if idx == -1 {
-		// Directive not found, add it after default-src or at the beginning
-		defaultSrcIdx := strings.Index(policy, "default-src ")
-		if defaultSrcIdx != -1 {
-			// Find the end of default-src directive (next semicolon)
-			endIdx := strings.Index(policy[defaultSrcIdx:], ";")
-			if endIdx != -1 {
-				insertPos := defaultSrcIdx + endIdx + 1
-				// Insert new directive after default-src
-				return policy[:insertPos] + " " + directive + " 'self' " + value + ";" + policy[insertPos:]
-			}
+func cspDirectiveEnd(policy, directive string) (int, bool) {
+	start := 0
+	for start <= len(policy) {
+		end := len(policy)
+		if relativeEnd := strings.IndexByte(policy[start:], ';'); relativeEnd >= 0 {
+			end = start + relativeEnd
 		}
-		// Fallback: prepend the directive
-		return directive + " 'self' " + value + "; " + policy
+		fields := strings.Fields(policy[start:end])
+		if len(fields) > 0 && fields[0] == directive {
+			return end, true
+		}
+		if end == len(policy) {
+			break
+		}
+		start = end + 1
 	}
+	return 0, false
+}
 
-	// Find the end of this directive (next semicolon or end of string)
-	endIdx := strings.Index(policy[idx:], ";")
-
-	if endIdx == -1 {
-		// No semicolon found, directive goes to end of string
-		return policy + " " + value
+func newCSPDirective(directive, value string) string {
+	if value == "'self'" {
+		return directive + " 'self';"
 	}
-
-	// Insert value before the semicolon
-	insertPos := idx + endIdx
-	return policy[:insertPos] + " " + value + policy[insertPos:]
+	return directive + " 'self' " + value + ";"
 }

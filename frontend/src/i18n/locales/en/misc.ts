@@ -59,10 +59,12 @@ export default {
     dockerRecreate: 'Recreate the container'
   },
 
-  // Recharge / Subscription Page
+  // Redeem Code Store
   purchase: {
-    title: 'Recharge / Subscription',
-    description: 'Recharge balance or purchase subscription via the embedded page',
+    title: 'Redeem Code Store',
+    description: 'Purchase an API credit code and redeem it automatically to the current account',
+    rechargeDescription: 'Recharge balance via the embedded page',
+    subscriptionDescription: 'Purchase subscription via the embedded page',
     openInNewTab: 'Open in new tab',
     notEnabledTitle: 'Feature not enabled',
     notEnabledDesc: 'The administrator has not enabled the recharge/subscription entry. Please contact admin.',
@@ -153,14 +155,14 @@ export default {
     // Admin tour steps
     admin: {
       welcome: {
-        title: '👋 Welcome to Sub2API',
-        description: '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">Sub2API is a powerful AI service gateway platform that helps you easily manage and distribute AI services.</p><p style="margin-bottom: 12px;"><b>🎯 Core Features:</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>📦 <b>Group Management</b> - Create service tiers (VIP, Free Trial, etc.)</li><li>🔗 <b>Account Pool</b> - Connect multiple upstream AI service accounts</li><li>🔑 <b>Key Distribution</b> - Generate independent API Keys for users</li><li>💰 <b>Billing Control</b> - Flexible rate and quota management</li></ul><p style="color: #10b981; font-weight: 600;">Let\'s complete the initial setup in 3 minutes →</p></div>',
+        title: '👋 Welcome to SCIbuddy',
+        description: '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">SCIbuddy is a powerful AI service gateway platform that helps you easily manage and distribute AI services.</p><p style="margin-bottom: 12px;"><b>🎯 Core Features:</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>📦 <b>Group Management</b> - Create service tiers (VIP, Free Trial, etc.)</li><li>🔗 <b>Account Pool</b> - Connect multiple upstream AI service accounts</li><li>🔑 <b>Key Distribution</b> - Generate independent API Keys for users</li><li>💰 <b>Billing Control</b> - Flexible rate and quota management</li></ul><p style="color: #10b981; font-weight: 600;">Let\'s complete the initial setup in 3 minutes →</p></div>',
         nextBtn: 'Start Setup 🚀',
         prevBtn: 'Skip'
       },
       groupManage: {
         title: '📦 Step 1: Group Management',
-        description: '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;"><b>What is a Group?</b></p><p style="margin-bottom: 12px;">Groups are the core concept of Sub2API, like a "service package":</p><ul style="margin-left: 20px; margin-bottom: 12px; font-size: 13px;"><li>🎯 Each group can contain multiple upstream accounts</li><li>💰 Each group has independent billing multiplier</li><li>👥 Can be set as public or exclusive</li></ul><p style="margin-top: 12px; padding: 8px 12px; background: #f0fdf4; border-left: 3px solid #10b981; border-radius: 4px; font-size: 13px;"><b>💡 Example:</b> You can create "VIP Premium" (high rate) and "Free Trial" (low rate) groups</p><p style="margin-top: 16px; color: #10b981; font-weight: 600;">👉 Click "Group Management" on the left sidebar</p></div>'
+        description: '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;"><b>What is a Group?</b></p><p style="margin-bottom: 12px;">Groups are the core concept of SCIbuddy, like a "service package":</p><ul style="margin-left: 20px; margin-bottom: 12px; font-size: 13px;"><li>🎯 Each group can contain multiple upstream accounts</li><li>💰 Each group has independent billing multiplier</li><li>👥 Can be set as public or exclusive</li></ul><p style="margin-top: 12px; padding: 8px 12px; background: #f0fdf4; border-left: 3px solid #10b981; border-radius: 4px; font-size: 13px;"><b>💡 Example:</b> You can create "VIP Premium" (high rate) and "Free Trial" (low rate) groups</p><p style="margin-top: 16px; color: #10b981; font-weight: 600;">👉 Click "Group Management" on the left sidebar</p></div>'
       },
       createGroup: {
         title: '➕ Create New Group',
@@ -289,6 +291,13 @@ export default {
     amountLabel: 'Amount',
     paymentAmount: 'Payment Amount',
     creditedBalance: 'Credited Balance',
+    rechargeBonus: {
+      creditedShort: 'Get {amount}',
+      payShort: 'Pay {amount}',
+      amountLabel: 'Bonus',
+      amountLabelWithPercent: 'Bonus (+{percent}%)',
+      discountLabelWithPercent: 'Discount ({percent}% OFF)',
+    },
     quickAmounts: 'Quick Amounts',
     customAmount: 'Custom Amount',
     enterAmount: 'Enter amount',
@@ -338,6 +347,14 @@ export default {
       cancelledDesc: 'You have cancelled this payment.',
       waitingPayment: 'Waiting for payment...',
       cancelOrder: 'Cancel Order',
+      alipayOpening: 'Opening Alipay',
+      alipayContinueInApp: 'Complete payment in Alipay',
+      alipayWaitingHint: 'The server will confirm the payment and update this page automatically',
+      alipayFallbackTitle: 'Alipay did not open',
+      alipayFallbackHint: 'Try opening Alipay again, or save the QR code and scan it from your Alipay photo album',
+      reopenAlipay: 'Open Alipay Again',
+      saveQRCode: 'Save QR Code',
+      alipaySaveAndScanHint: 'Save the QR code, open Alipay Scan, then select it from your photo album',
     },
     orders: {
       title: 'My Orders',
@@ -347,6 +364,8 @@ export default {
       amount: 'Amount',
       payAmount: 'Paid',
       creditedAmount: 'Credited Amount',
+      bonusAmount: 'Bonus',
+      bonusIncluded: 'incl. bonus {amount}',
       fee: 'Fee',
       baseAmount: 'Base Amount',
       includedInPayAmount: 'included in paid amount',
@@ -377,12 +396,18 @@ export default {
     tabSubscribe: 'Subscribe',
     noPlans: 'No subscription plans available',
     notAvailable: 'Top-up is currently unavailable',
+    redeemStorePrompt: 'Purchase an API credit redemption code from:',
+    redeemStoreHint: 'After purchase, return here and use the redemption entry below to add the credit to your account.',
+    redeemEntryTitle: 'Redeem Code',
+    redeemEntryHint: 'Already have a code? Open the redemption page to add its API credit to your account.',
+    redeemEntryAction: 'Redeem Code',
+    billingUnavailable: 'Neither top-up nor subscriptions are currently available. Please contact the administrator.',
     confirmSubscription: 'Confirm Subscription',
     confirmCancel: 'Are you sure you want to cancel this order?',
     amountTooLow: 'Minimum amount is {min}',
     amountTooHigh: 'Maximum amount is {max}',
     amountNoMethod: 'No payment method available for this amount',
-    rechargeRatePreview: 'Current rate: 1 CNY = {usd} USD',
+    rechargeRatePreview: 'Current rate: 1 {currency} = {usd} USD',
     refundReason: 'Refund Reason',
     refundReasonPlaceholder: 'Please describe your refund reason',
     stripeLoadFailed: 'Failed to load payment component. Please refresh and try again.',

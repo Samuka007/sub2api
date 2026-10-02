@@ -21,16 +21,16 @@ func (r *idempotencyCleanupRepoStub) CreateProcessing(context.Context, *Idempote
 func (r *idempotencyCleanupRepoStub) GetByScopeAndKeyHash(context.Context, string, string) (*IdempotencyRecord, error) {
 	return nil, nil
 }
-func (r *idempotencyCleanupRepoStub) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+func (r *idempotencyCleanupRepoStub) TryReclaim(context.Context, int64, string, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, nil
 }
-func (r *idempotencyCleanupRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+func (r *idempotencyCleanupRepoStub) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
 	return false, nil
 }
-func (r *idempotencyCleanupRepoStub) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+func (r *idempotencyCleanupRepoStub) MarkSucceeded(context.Context, int64, time.Time, int, string, time.Time) error {
 	return nil
 }
-func (r *idempotencyCleanupRepoStub) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+func (r *idempotencyCleanupRepoStub) MarkFailedRetryable(context.Context, int64, time.Time, string, time.Time, time.Time) error {
 	return nil
 }
 func (r *idempotencyCleanupRepoStub) DeleteExpired(_ context.Context, _ time.Time, limit int) (int64, error) {

@@ -1,0 +1,30 @@
+version: "2.4"
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: sub2api-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - sub2api-network
+      - sub2api-otel
+    depends_on:
+      sub2api:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  sub2api-otel:
+    external: true
+    name: sub2api-langfuse

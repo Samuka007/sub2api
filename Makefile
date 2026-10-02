@@ -1,12 +1,27 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend build-loadtest test test-backend test-frontend test-frontend-critical pr-check
 
 FRONTEND_CRITICAL_VITEST := \
+	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
+	src/api/__tests__/client.spec.ts \
+	src/api/__tests__/tokenRefresh.spec.ts \
+	src/api/__tests__/keys.bulkUpdate.spec.ts \
+	src/components/account/__tests__/OpenAIReferralCell.spec.ts \
+	src/components/account/__tests__/OpenAIReferralCell.transport.spec.ts \
+	src/components/account/__tests__/OpenAIQuotaResetCell.spark_shadow.spec.ts \
+	src/components/keys/__tests__/BulkEditKeysModal.spec.ts \
+	src/components/admin/user/__tests__/UserPlatformQuotaModal.spec.ts \
+	src/views/user/__tests__/KeysView.spec.ts \
+	src/api/__tests__/channelMonitorV2.spec.ts \
 	src/views/auth/__tests__/LinuxDoCallbackView.spec.ts \
 	src/views/auth/__tests__/WechatCallbackView.spec.ts \
 	src/views/user/__tests__/PaymentView.spec.ts \
 	src/views/user/__tests__/PaymentResultView.spec.ts \
+	src/views/user/__tests__/ChannelStatusView.mode.spec.ts \
 	src/components/user/profile/__tests__/ProfileInfoCard.spec.ts \
-	src/views/admin/__tests__/SettingsView.spec.ts
+	src/views/admin/__tests__/SettingsView.spec.ts \
+	src/features/channel-monitor-v2/__tests__/designSystem.structure.spec.ts \
+	src/features/channel-monitor-v2/__tests__/monitorFormat.spec.ts \
+	src/features/channel-monitor-v2/__tests__/monitorZoom.spec.ts
 
 # 一键编译前后端
 build: build-backend build-frontend
@@ -14,6 +29,9 @@ build: build-backend build-frontend
 # 编译后端（复用 backend/Makefile）
 build-backend:
 	@$(MAKE) -C backend build
+
+build-loadtest:
+	@$(MAKE) -C backend build-loadtest
 
 # 编译前端（需要已安装依赖）
 build-frontend:
@@ -28,7 +46,8 @@ test-backend:
 test-frontend:
 	@pnpm --dir frontend run lint:check
 	@pnpm --dir frontend run typecheck
-	@$(MAKE) test-frontend-critical
+	@pnpm --dir frontend run test:run
 
-test-frontend-critical:
-	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+# 创建 Pull Request 前运行与 CI 对齐的完整质量门禁
+pr-check:
+	@./tools/pr_gate.sh

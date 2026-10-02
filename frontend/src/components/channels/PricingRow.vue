@@ -15,11 +15,19 @@ const props = withDefaults(
     value: number | null
     unit: string
     scale: number
+    multiplier?: number | null
   }>(),
-  { value: null }
+  { value: null, multiplier: null }
 )
 
-const display = computed(() =>
-  props.value == null ? '-' : `${formatScaled(props.value, props.scale)} ${props.unit}`
-)
+const display = computed(() => {
+  if (props.value == null) return '-'
+  const price = `${formatScaled(props.value, props.scale)} ${props.unit}`
+  if (props.multiplier == null) return price
+  return `${price}  x${formatMultiplier(props.multiplier)}`
+})
+
+function formatMultiplier(value: number): string {
+  return value.toPrecision(10).replace(/\.?0+$/, '')
+}
 </script>

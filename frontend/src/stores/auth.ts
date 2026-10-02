@@ -5,8 +5,17 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed, readonly } from 'vue'
-import { authAPI, isTotp2FARequired, type LoginResponse } from '@/api'
-import type { User, LoginRequest, RegisterRequest, AuthResponse } from '@/types'
+import { authAPI, isTotp2FARequired, passkeyAPI, type LoginResponse } from '@/api'
+import type {
+  User,
+  AdminRole,
+  AdminPermission,
+  LoginRequest,
+  RegisterRequest,
+  AuthResponse,
+  ActionCaptchaRequestProof
+} from '@/types'
+import { hasAdminRole, hasPermission as checkPermission } from '@/utils/adminPermissions'
 
 const AUTH_TOKEN_KEY = 'auth_token'
 const AUTH_USER_KEY = 'auth_user'
@@ -86,9 +95,17 @@ export const useAuthStore = defineStore('auth', () => {
     return !!token.value && !!user.value
   })
 
+  const roles = computed<AdminRole[]>(() => user.value?.roles ?? [])
+
+  // isAdmin 是「拥有任意管理角色」的布局派生值；兼容旧会话（只有 role 而无 roles）。
   const isAdmin = computed(() => {
-    return user.value?.role === 'admin'
+    return hasAdminRole(roles.value) || user.value?.role === 'admin'
   })
+
+  const hasRole = (role: AdminRole): boolean => roles.value.includes(role)
+
+  const hasPermission = (permission: AdminPermission): boolean =>
+    checkPermission(roles.value, permission)
 
   const isSimpleMode = computed(() => runMode.value === 'simple')
   const hasPendingAuthSession = computed(() => pendingAuthSession.value !== null)
@@ -267,6 +284,17 @@ export const useAuthStore = defineStore('auth', () => {
   async function login2FA(tempToken: string, totpCode: string): Promise<User> {
     try {
       const response = await authAPI.login2FA({ temp_token: tempToken, totp_code: totpCode })
+      setAuthFromResponse(response)
+      return user.value!
+    } catch (error) {
+      clearAuth({ preservePendingAuthSession: pendingAuthSession.value !== null })
+      throw error
+    }
+  }
+
+  async function loginWithPasskey(proof?: ActionCaptchaRequestProof): Promise<User> {
+    try {
+      const response = await passkeyAPI.login(proof)
       setAuthFromResponse(response)
       return user.value!
     } catch (error) {
@@ -481,11 +509,15 @@ export const useAuthStore = defineStore('auth', () => {
     // Computed
     isAuthenticated,
     isAdmin,
+    roles,
+    hasRole,
+    hasPermission,
     isSimpleMode,
     hasPendingAuthSession,
 
     // Actions
     login,
+    loginWithPasskey,
     login2FA,
     register,
     setToken,

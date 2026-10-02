@@ -20,10 +20,15 @@ func NewContentModerationHandler(svc *service.ContentModerationService) *Content
 }
 
 type contentModerationConfigRequest struct {
-	Enabled              *bool               `json:"enabled"`
-	Mode                 *string             `json:"mode"`
-	BaseURL              *string             `json:"base_url"`
-	Model                *string             `json:"model"`
+	Engine           *string                                               `json:"engine"`
+	EngineConfigs    map[string]service.UpdateContentModerationEngineInput `json:"engine_configs"`
+	Enabled          *bool                                                 `json:"enabled"`
+	Mode             *string                                               `json:"mode"`
+	UpstreamProtocol *string                                               `json:"upstream_protocol"`
+	BaseURL          *string                                               `json:"base_url"`
+	Model            *string                                               `json:"model"`
+	// 审计请求使用的代理服务器：null 不修改；0 清除（直连）；>0 指定代理。
+	ProxyID              *int64              `json:"proxy_id"`
 	APIKey               *string             `json:"api_key"`
 	APIKeys              *[]string           `json:"api_keys"`
 	APIKeysMode          string              `json:"api_keys_mode"`
@@ -45,23 +50,28 @@ type contentModerationConfigRequest struct {
 	ViolationWindowHours *int                `json:"violation_window_hours"`
 	// cyber_policy 命中是否排除出自动封号计数；前端 RiskControlView 已发送该字段，
 	// service.UpdateContentModerationConfigInput 已支持，此前 handler 层缺透传导致开关静默失效。
-	CyberPolicyExcludeFromBanCount *bool                                 `json:"cyber_policy_exclude_from_ban_count"`
-	RetryCount                     *int                                  `json:"retry_count"`
-	HitRetentionDays               *int                                  `json:"hit_retention_days"`
-	NonHitRetentionDays            *int                                  `json:"non_hit_retention_days"`
-	PreHashCheckEnabled            *bool                                 `json:"pre_hash_check_enabled"`
-	BlockedKeywords                *[]string                             `json:"blocked_keywords"`
-	KeywordBlockingMode            *string                               `json:"keyword_blocking_mode"`
-	ModelFilter                    *service.ContentModerationModelFilter `json:"model_filter"`
+	CyberPolicyExcludeFromBanCount *bool                                     `json:"cyber_policy_exclude_from_ban_count"`
+	RetryCount                     *int                                      `json:"retry_count"`
+	HitRetentionDays               *int                                      `json:"hit_retention_days"`
+	NonHitRetentionDays            *int                                      `json:"non_hit_retention_days"`
+	PreHashCheckEnabled            *bool                                     `json:"pre_hash_check_enabled"`
+	BlockedKeywords                *[]string                                 `json:"blocked_keywords"`
+	KeywordBlockingMode            *string                                   `json:"keyword_blocking_mode"`
+	ModelFilter                    *service.ContentModerationModelFilter     `json:"model_filter"`
+	TrustedAPIKeys                 *[]service.ContentModerationTrustedAPIKey `json:"trusted_api_keys"`
 }
 
 type contentModerationAPIKeyTestRequest struct {
-	APIKeys   []string `json:"api_keys"`
-	BaseURL   string   `json:"base_url"`
-	Model     string   `json:"model"`
-	TimeoutMS int      `json:"timeout_ms"`
-	Prompt    string   `json:"prompt"`
-	Images    []string `json:"images"`
+	Engine           string              `json:"engine"`
+	Thresholds       *map[string]float64 `json:"thresholds"`
+	APIKeys          []string            `json:"api_keys"`
+	UpstreamProtocol string              `json:"upstream_protocol"`
+	BaseURL          string              `json:"base_url"`
+	Model            string              `json:"model"`
+	TimeoutMS        int                 `json:"timeout_ms"`
+	ProxyID          *int64              `json:"proxy_id"`
+	Prompt           string              `json:"prompt"`
+	Images           []string            `json:"images"`
 }
 
 type contentModerationHashRequest struct {
@@ -84,10 +94,13 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 		return
 	}
 	cfg, err := h.service.UpdateConfig(c.Request.Context(), service.UpdateContentModerationConfigInput{
+		Engine: req.Engine, EngineConfigs: req.EngineConfigs,
 		Enabled:                        req.Enabled,
 		Mode:                           req.Mode,
+		UpstreamProtocol:               req.UpstreamProtocol,
 		BaseURL:                        req.BaseURL,
 		Model:                          req.Model,
+		ProxyID:                        req.ProxyID,
 		APIKey:                         req.APIKey,
 		APIKeys:                        req.APIKeys,
 		APIKeysMode:                    req.APIKeysMode,
@@ -115,6 +128,7 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 		BlockedKeywords:                req.BlockedKeywords,
 		KeywordBlockingMode:            req.KeywordBlockingMode,
 		ModelFilter:                    req.ModelFilter,
+		TrustedAPIKeys:                 req.TrustedAPIKeys,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -130,12 +144,15 @@ func (h *ContentModerationHandler) TestAPIKeys(c *gin.Context) {
 		return
 	}
 	result, err := h.service.TestAPIKeys(c.Request.Context(), service.TestContentModerationAPIKeysInput{
-		APIKeys:   req.APIKeys,
-		BaseURL:   req.BaseURL,
-		Model:     req.Model,
-		TimeoutMS: req.TimeoutMS,
-		Prompt:    req.Prompt,
-		Images:    req.Images,
+		Engine: req.Engine, Thresholds: req.Thresholds,
+		APIKeys:          req.APIKeys,
+		UpstreamProtocol: req.UpstreamProtocol,
+		BaseURL:          req.BaseURL,
+		Model:            req.Model,
+		TimeoutMS:        req.TimeoutMS,
+		ProxyID:          req.ProxyID,
+		Prompt:           req.Prompt,
+		Images:           req.Images,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

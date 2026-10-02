@@ -4,26 +4,32 @@
       <Icon name="search" size="md" class="text-gray-400" />
     </div>
     <input
-      :value="modelValue"
+      v-model="searchValue"
       type="text"
-      class="input pl-10"
+      class="input pl-10 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500 dark:disabled:bg-dark-700 dark:disabled:text-dark-400"
       :placeholder="placeholder"
+      :aria-label="ariaLabel || placeholder"
+      :disabled="disabled"
       @input="handleInput"
     />
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import Icon from '@/components/icons/Icon.vue'
 
 const props = withDefaults(defineProps<{
   modelValue: string
   placeholder?: string
+  ariaLabel?: string
   debounceMs?: number
+  disabled?: boolean
 }>(), {
   placeholder: 'Search...',
-  debounceMs: 300
+  debounceMs: 300,
+  disabled: false
 })
 
 const emit = defineEmits<{
@@ -35,9 +41,11 @@ const debouncedEmitSearch = useDebounceFn((value: string) => {
   emit('search', value)
 }, props.debounceMs)
 
-const handleInput = (event: Event) => {
-  const value = (event.target as HTMLInputElement).value
-  emit('update:modelValue', value)
-  debouncedEmitSearch(value)
-}
+const searchValue = computed({
+  get: () => props.modelValue,
+  set: (value: string) => {
+    emit('update:modelValue', value)
+    debouncedEmitSearch(value)
+  }
+})
 </script>

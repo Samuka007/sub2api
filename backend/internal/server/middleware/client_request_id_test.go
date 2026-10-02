@@ -31,6 +31,25 @@ func TestClientRequestIDGeneratesAndExposesID(t *testing.T) {
 	require.Equal(t, w.Body.String(), w.Header().Get(clientRequestIDHeader))
 }
 
+func TestClientRequestIDPreservesHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(ClientRequestID())
+	router.GET("/", func(c *gin.Context) {
+		value, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+		c.String(http.StatusOK, value)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(clientRequestIDHeader, "caller-correlation-id")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "caller-correlation-id", w.Body.String())
+	require.Equal(t, "caller-correlation-id", w.Header().Get(clientRequestIDHeader))
+}
+
 func TestClientRequestIDBoundsExistingContextID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/google/wire/cmd/wire
+//go:generate go run -mod=mod github.com/google/wire/cmd/wire
 
 import (
 	"context"
@@ -18,7 +18,9 @@ import (
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/securityaudit/deepseekadapter"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
@@ -59,10 +61,20 @@ func main() {
 	// Parse command line flags
 	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
 	showVersion := flag.Bool("version", false, "Show version information")
+	deepSeekPromptAuditAdapter := flag.Bool("prompt-audit-deepseek-adapter", false, "Run the DeepSeek audit adapter")
 	flag.Parse()
 
 	if *showVersion {
 		log.Printf("Sub2API %s (commit: %s, built: %s)\n", Version, Commit, Date)
+		return
+	}
+
+	if *deepSeekPromptAuditAdapter {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := deepseekadapter.Run(ctx); err != nil {
+			log.Fatalf("DeepSeek audit adapter failed: %v", err)
+		}
 		return
 	}
 
@@ -131,6 +143,67 @@ func runSetupServer() {
 	}
 }
 
+func (app *Application) activate() error {
+	if app.Metrics != nil {
+		if err := app.Metrics.Start(); err != nil {
+			return err
+		}
+	}
+	if app.OpsMetrics != nil {
+		app.OpsMetrics.Start()
+	}
+	modeltrace.InstallDefaultConfigManager(app.ModelTraceConfig)
+	if app.ModelTraceConfig != nil {
+		if err := app.ModelTraceConfig.Start(context.Background()); err != nil {
+			log.Printf("Model tracing runtime config started in degraded state: %v", err)
+		}
+	}
+	return nil
+}
+
+func (app *Application) cleanup() {
+	if app == nil {
+		return
+	}
+	app.cleanupOnce.Do(func() {
+		modeltrace.InstallDefaultConfigManager(nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownModelTracing(ctx, app.ModelTraceConfig, app.ModelTrace)
+		cancel()
+
+		if app.OpsMetrics != nil {
+			app.OpsMetrics.Stop()
+		}
+		if app.Metrics != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := app.Metrics.Shutdown(ctx); err != nil {
+				log.Printf("Metrics listener shutdown failed: %v", err)
+			}
+			cancel()
+		}
+		if app.Cleanup != nil {
+			app.Cleanup()
+		}
+	})
+}
+
+type modelTraceShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownModelTracing(ctx context.Context, configManager, runtime modelTraceShutdowner) {
+	if configManager != nil {
+		if err := configManager.Shutdown(ctx); err != nil {
+			log.Printf("Model tracing config refresh shutdown failed: %v", err)
+		}
+	}
+	if runtime != nil {
+		if err := runtime.Shutdown(ctx); err != nil {
+			log.Printf("Model tracing shutdown failed: %v", err)
+		}
+	}
+}
+
 func runMainServer() {
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
@@ -139,6 +212,12 @@ func runMainServer() {
 	if err := logger.Init(logger.OptionsFromConfig(cfg.Log)); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
+	modelTrace, err := modeltrace.NewManager(context.Background(), cfg.ModelTracing)
+	if err != nil {
+		log.Printf("Model tracing disabled after initialization failed: %v", err)
+		modelTrace, _ = modeltrace.NewManager(context.Background(), config.ModelTracingConfig{})
+	}
+
 	if cfg.RunMode == config.RunModeSimple {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
@@ -148,11 +227,25 @@ func runMainServer() {
 		BuildType: BuildType,
 	}
 
-	app, err := initializeApplication(buildInfo)
+	app, err := initializeApplication(buildInfo, modelTrace)
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
+	if err := app.activate(); err != nil {
+		log.Printf("Failed to activate application: %v", err)
+		app.cleanup()
+		return
+	}
+	defer app.cleanup()
+	if app.Metrics != nil && app.Metrics.Addr() != nil {
+		log.Printf("Metrics listener started on %s", app.Metrics.Addr())
+	}
 	defer app.Cleanup()
+	if app.PluginManager != nil {
+		if err := app.PluginManager.Start(context.Background()); err != nil {
+			log.Printf("Plugin manager started in degraded state: %v", err)
+		}
+	}
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
@@ -185,6 +278,7 @@ func runMainServer() {
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
+	app.cleanup()
 
 	log.Println("Server exited")
 }

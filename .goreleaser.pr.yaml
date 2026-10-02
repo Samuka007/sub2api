@@ -1,0 +1,58 @@
+# PR 镜像 goreleaser 配置 - 仅 GHCR linux/amd64，tag = pr-<PR_NUMBER>
+# 复用 .goreleaser.simple.yaml 结构，改 image_templates 为 PR 专属 tag
+version: 2
+
+project_name: sub2api
+
+before:
+  hooks:
+    - go mod tidy -C backend
+
+builds:
+  - id: sub2api
+    dir: backend
+    main: ./cmd/server
+    binary: sub2api
+    flags:
+      - -tags=embed
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X main.Commit={{.Commit}}
+      - -X main.Date={{.Date}}
+      - -X main.BuildType=pr
+
+archives: []
+
+checksum:
+  disable: true
+
+changelog:
+  disable: true
+
+dockers:
+  - id: ghcr-amd64
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/sub2api:pr-{{ .Env.PR_NUMBER }}"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    extra_files:
+      - deploy/docker-entrypoint.sh
+      - backend/resources
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title=Sub2API PR"
+      - "--label=org.opencontainers.image.source=https://github.com/{{ .Env.GITHUB_REPO_OWNER }}/{{ .Env.GITHUB_REPO_NAME }}"
+      - "--label=org.opencontainers.image.revision={{ .Commit }}"
+
+docker_manifests: []
+
+release:
+  disable: true

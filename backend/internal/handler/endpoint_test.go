@@ -23,10 +23,12 @@ func TestNormalizeInboundEndpoint(t *testing.T) {
 	}{
 		// Direct canonical paths.
 		{"/v1/messages", EndpointMessages},
+		{"/v1/systemone", EndpointSystemOne},
 		{"/v1/chat/completions", EndpointChatCompletions},
 		{"/v1/embeddings", EndpointEmbeddings},
 		{"/v1/alpha/search", EndpointAlphaSearch},
 		{"/v1/responses", EndpointResponses},
+		{"/v1/responses/input_tokens", EndpointResponsesInputTokens},
 		{"/v1/responses/compact", EndpointResponsesCompact},
 		{"/v1/responses/compact/detail", EndpointResponsesCompact},
 		{"/v1/images/generations", EndpointImagesGenerations},
@@ -50,6 +52,7 @@ func TestNormalizeInboundEndpoint(t *testing.T) {
 
 		// Bare top-level alias route "/responses" — root vs. compact.
 		{"/responses", EndpointResponses},
+		{"/responses/input_tokens", EndpointResponsesInputTokens},
 		{"/responses/compact", EndpointResponsesCompact},
 		{"/responses/compact/detail", EndpointResponsesCompact},
 		{"/alpha/search", EndpointAlphaSearch},
@@ -57,6 +60,7 @@ func TestNormalizeInboundEndpoint(t *testing.T) {
 
 		// Bare Codex direct alias route — root vs. compact.
 		{"/backend-api/codex/responses", EndpointResponses},
+		{"/backend-api/codex/responses/input_tokens", EndpointResponsesInputTokens},
 		{"/backend-api/codex/responses/compact", EndpointResponsesCompact},
 		{"/backend-api/codex/responses/compact/detail", EndpointResponsesCompact},
 		{"/backend-api/codex/alpha/search", EndpointAlphaSearch},
@@ -94,18 +98,21 @@ func TestDeriveUpstreamEndpoint(t *testing.T) {
 	}{
 		// Anthropic.
 		{"anthropic messages", EndpointMessages, "/v1/messages", service.PlatformAnthropic, EndpointMessages},
+		{"typesafe system one", EndpointSystemOne, "/v1/systemone", service.PlatformTypeSafe, EndpointSystemOne},
 
 		// Gemini.
 		{"gemini models", EndpointGeminiModels, "/v1beta/models/gemini:gen", service.PlatformGemini, EndpointGeminiModels},
 
 		// OpenAI — root Responses.
 		{"openai responses root", EndpointResponses, "/v1/responses", service.PlatformOpenAI, EndpointResponses},
+		{"openai responses input tokens", EndpointResponsesInputTokens, "/v1/responses/input_tokens", service.PlatformOpenAI, EndpointResponsesInputTokens},
 
 		// OpenAI — compact, raw path carries the derivable "/compact"
 		// (or nested) suffix, which must be preserved on the upstream
 		// endpoint.
 		{"openai responses compact", EndpointResponsesCompact, "/openai/v1/responses/compact", service.PlatformOpenAI, "/v1/responses/compact"},
 		{"openai responses nested", EndpointResponsesCompact, "/openai/v1/responses/compact/detail", service.PlatformOpenAI, "/v1/responses/compact/detail"},
+		{"openai responses preserves suffix after first responses segment", EndpointResponses, "/v1/responses/foo/responses/compact", service.PlatformOpenAI, "/v1/responses/foo/responses/compact"},
 		{"openai bare responses compact", EndpointResponsesCompact, "/responses/compact", service.PlatformOpenAI, "/v1/responses/compact"},
 		{"openai bare responses compact detail", EndpointResponsesCompact, "/responses/compact/detail", service.PlatformOpenAI, "/v1/responses/compact/detail"},
 		{"openai codex direct responses compact", EndpointResponsesCompact, "/backend-api/codex/responses/compact", service.PlatformOpenAI, "/v1/responses/compact"},
@@ -146,6 +153,50 @@ func TestDeriveUpstreamEndpoint(t *testing.T) {
 	}
 }
 
+func TestShouldUseAntigravityCompat(t *testing.T) {
+	tests := []struct {
+		name    string
+		account *service.Account
+		want    bool
+	}{
+		{"oauth", &service.Account{Platform: service.PlatformAntigravity, Type: service.AccountTypeOAuth}, true},
+		{"setup token", &service.Account{Platform: service.PlatformAntigravity, Type: service.AccountTypeSetupToken}, false},
+		{"upstream", &service.Account{Platform: service.PlatformAntigravity, Type: service.AccountTypeUpstream}, false},
+		{"api key", &service.Account{Platform: service.PlatformAntigravity, Type: service.AccountTypeAPIKey}, false},
+		{"anthropic oauth", &service.Account{Platform: service.PlatformAnthropic, Type: service.AccountTypeOAuth}, false},
+		{"nil", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shouldUseAntigravityCompat(tt.account))
+		})
+	}
+}
+
+func TestGetUpstreamEndpointPrefersRuntimeOverride(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointChatCompletions, nil)
+	c.Set(ctxKeyInboundEndpoint, EndpointChatCompletions)
+
+	setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
+	require.Equal(t, EndpointAntigravityGenerateContent, GetUpstreamEndpoint(c, service.PlatformAntigravity))
+
+	setActualUpstreamEndpoint(c, "")
+	require.Equal(t, EndpointMessages, GetUpstreamEndpoint(c, service.PlatformAntigravity))
+}
+
+func TestGetUpstreamEndpointUsesOpenAIRuntimeOverride(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointResponses, nil)
+	c.Set(ctxKeyInboundEndpoint, EndpointResponses)
+
+	service.SetActualOpenAIUpstreamEndpoint(c, EndpointChatCompletions)
+	require.Equal(t, EndpointChatCompletions, GetUpstreamEndpoint(c, service.PlatformOpenAI))
+}
+
 func TestResolveOpenAIUpstreamEndpointPrefersForwardResult(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -184,6 +235,18 @@ func TestResolveOpenAIUpstreamEndpointPrefersForwardResult(t *testing.T) {
 			account: &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth},
 			result:  &service.OpenAIForwardResult{},
 			want:    EndpointResponses,
+		},
+		{
+			name:    "opencode go conversion result reports responses",
+			account: &service.Account{Platform: service.PlatformOpenCodeGo, Type: service.AccountTypeAPIKey},
+			result:  &service.OpenAIForwardResult{UpstreamEndpoint: EndpointResponses},
+			want:    EndpointResponses,
+		},
+		{
+			name:    "opencode go empty result without runtime stays inbound",
+			account: &service.Account{Platform: service.PlatformOpenCodeGo, Type: service.AccountTypeAPIKey},
+			result:  &service.OpenAIForwardResult{},
+			want:    EndpointChatCompletions,
 		},
 	}
 

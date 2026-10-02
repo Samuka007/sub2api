@@ -73,6 +73,10 @@ func (s *AnnouncementService) Create(ctx context.Context, input *CreateAnnouncem
 		return nil, ErrAnnouncementNilInput
 	}
 
+	if !isJSONTimeInRange(input.StartsAt) || !isJSONTimeInRange(input.EndsAt) {
+		return nil, ErrAnnouncementInvalidSchedule
+	}
+
 	title := strings.TrimSpace(input.Title)
 	content := strings.TrimSpace(input.Content)
 	if title == "" || len(title) > 200 {
@@ -132,6 +136,11 @@ func (s *AnnouncementService) Create(ctx context.Context, input *CreateAnnouncem
 func (s *AnnouncementService) Update(ctx context.Context, id int64, input *UpdateAnnouncementInput) (*Announcement, error) {
 	if input == nil {
 		return nil, ErrAnnouncementNilInput
+	}
+
+	if (input.StartsAt != nil && !isJSONTimeInRange(*input.StartsAt)) ||
+		(input.EndsAt != nil && !isJSONTimeInRange(*input.EndsAt)) {
+		return nil, ErrAnnouncementInvalidSchedule
 	}
 
 	a, err := s.announcementRepo.GetByID(ctx, id)
@@ -213,6 +222,29 @@ func (s *AnnouncementService) GetByID(ctx context.Context, id int64) (*Announcem
 
 func (s *AnnouncementService) List(ctx context.Context, params pagination.PaginationParams, filters AnnouncementListFilters) ([]Announcement, *pagination.PaginationResult, error) {
 	return s.announcementRepo.List(ctx, params, filters)
+}
+
+// ListPublic returns the newest active popup announcement that is safe to show
+// before authentication. Targeted announcements must never be exposed here.
+func (s *AnnouncementService) ListPublic(ctx context.Context) ([]Announcement, error) {
+	now := time.Now()
+	anns, err := s.announcementRepo.ListActive(ctx, now)
+	if err != nil {
+		return nil, fmt.Errorf("list active announcements: %w", err)
+	}
+
+	for i := range anns {
+		a := anns[i]
+		if !a.IsActiveAt(now) || a.NotifyMode != AnnouncementNotifyModePopup {
+			continue
+		}
+		if len(a.Targeting.AnyOf) != 0 {
+			continue
+		}
+		return []Announcement{a}, nil
+	}
+
+	return []Announcement{}, nil
 }
 
 func (s *AnnouncementService) ListForUser(ctx context.Context, userID int64, unreadOnly bool) ([]UserAnnouncement, error) {

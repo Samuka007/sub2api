@@ -28,9 +28,26 @@ func executeAdminIdempotent(
 	ttl time.Duration,
 	execute func(context.Context) (any, error),
 ) (*service.IdempotencyExecuteResult, error) {
+	return executeAdminIdempotentWithTimeout(c, scope, payload, ttl, 0, execute)
+}
+
+func executeAdminIdempotentWithTimeout(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	executionTimeout time.Duration,
+	execute func(context.Context) (any, error),
+) (*service.IdempotencyExecuteResult, error) {
 	coordinator := service.DefaultIdempotencyCoordinator()
 	if coordinator == nil {
-		data, err := execute(c.Request.Context())
+		ctx := c.Request.Context()
+		if executionTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), executionTimeout)
+			defer cancel()
+		}
+		data, err := execute(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -38,6 +55,32 @@ func executeAdminIdempotent(
 	}
 
 	return coordinator.Execute(c.Request.Context(), service.IdempotencyExecuteOptions{
+		Scope:            scope,
+		ActorScope:       adminActorScope(c),
+		Method:           c.Request.Method,
+		Route:            c.FullPath(),
+		IdempotencyKey:   c.GetHeader("Idempotency-Key"),
+		Payload:          payload,
+		RequireKey:       true,
+		TTL:              ttl,
+		ExecutionTimeout: executionTimeout,
+	}, execute)
+}
+
+func executeAdminTransactionalIdempotent(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	execute func(context.Context) (any, error),
+) (*service.IdempotencyExecuteResult, error) {
+	coordinator := service.DefaultIdempotencyCoordinator()
+	if coordinator == nil {
+		service.RecordIdempotencyStoreUnavailable(c.FullPath(), scope, "transactional_coordinator_nil")
+		return nil, service.ErrIdempotencyStoreUnavail
+	}
+
+	return coordinator.ExecuteTransactional(c.Request.Context(), service.IdempotencyExecuteOptions{
 		Scope:          scope,
 		ActorScope:     adminActorScope(c),
 		Method:         c.Request.Method,
@@ -64,7 +107,36 @@ func executeAdminIdempotentJSON(
 	ttl time.Duration,
 	execute func(context.Context) (any, error),
 ) {
-	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, idempotencyStoreUnavailableFailClose, execute)
+	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, 0, idempotencyStoreUnavailableFailClose, execute)
+}
+
+func executeAdminIdempotentJSONWithTimeout(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	executionTimeout time.Duration,
+	execute func(context.Context) (any, error),
+) {
+	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, executionTimeout, idempotencyStoreUnavailableFailClose, execute)
+}
+
+func executeAdminTransactionalIdempotentJSON(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	execute func(context.Context) (any, error),
+) {
+	result, err := executeAdminTransactionalIdempotent(c, scope, payload, ttl, execute)
+	writeAdminIdempotentJSONResult(
+		c,
+		scope,
+		idempotencyStoreUnavailableFailClose,
+		result,
+		err,
+		execute,
+	)
 }
 
 func executeAdminIdempotentJSONFailOpenOnStoreUnavailable(
@@ -74,7 +146,7 @@ func executeAdminIdempotentJSONFailOpenOnStoreUnavailable(
 	ttl time.Duration,
 	execute func(context.Context) (any, error),
 ) {
-	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, idempotencyStoreUnavailableFailOpen, execute)
+	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, 0, idempotencyStoreUnavailableFailOpen, execute)
 }
 
 func executeAdminIdempotentJSONWithMode(
@@ -82,10 +154,22 @@ func executeAdminIdempotentJSONWithMode(
 	scope string,
 	payload any,
 	ttl time.Duration,
+	executionTimeout time.Duration,
 	mode idempotencyStoreUnavailableMode,
 	execute func(context.Context) (any, error),
 ) {
-	result, err := executeAdminIdempotent(c, scope, payload, ttl, execute)
+	result, err := executeAdminIdempotentWithTimeout(c, scope, payload, ttl, executionTimeout, execute)
+	writeAdminIdempotentJSONResult(c, scope, mode, result, err, execute)
+}
+
+func writeAdminIdempotentJSONResult(
+	c *gin.Context,
+	scope string,
+	mode idempotencyStoreUnavailableMode,
+	result *service.IdempotencyExecuteResult,
+	err error,
+	execute func(context.Context) (any, error),
+) {
 	if err != nil {
 		if infraerrors.Code(err) == infraerrors.Code(service.ErrIdempotencyStoreUnavail) {
 			strategy := "fail_close"
@@ -113,6 +197,10 @@ func executeAdminIdempotentJSONWithMode(
 	}
 	if result != nil && result.Replayed {
 		c.Header("X-Idempotency-Replayed", "true")
+	}
+	if result == nil {
+		response.ErrorFrom(c, service.ErrIdempotencyStoreUnavail)
+		return
 	}
 	response.Success(c, result.Data)
 }

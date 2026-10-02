@@ -1,0 +1,62 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 31590,
+      "protocol": "vless",
+      "tag": "bridge-connection",
+      "settings": {
+        "decryption": "none",
+        "clients": [
+          {
+            "id": "__XRAY_UUID__",
+            "flow": "xtls-rprx-vision",
+            "reverse": {
+              "tag": "reverse-out"
+            }
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "target": "__XRAY_REALITY_TARGET__",
+          "xver": 0,
+          "serverNames": ["__XRAY_REALITY_SERVER_NAME__"],
+          "privateKey": "__XRAY_REALITY_PRIVATE_KEY__",
+          "shortIds": ["__XRAY_REALITY_SHORT_ID__"]
+        }
+      }
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 3100,
+      "protocol": "tunnel",
+      "tag": "langfuse-portal",
+      "settings": {
+        "allowedNetwork": "tcp",
+        "rewriteAddress": "langfuse.internal",
+        "rewritePort": 3000
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": ["langfuse-portal"],
+        "outboundTag": "reverse-out"
+      }
+    ]
+  },
+  "outbounds": [
+    {
+      "protocol": "blackhole",
+      "tag": "blocked-default"
+    }
+  ]
+}

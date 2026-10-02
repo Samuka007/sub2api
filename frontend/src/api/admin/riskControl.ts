@@ -1,6 +1,14 @@
 import { apiClient } from '../client'
 
 export type ModerationMode = 'off' | 'observe' | 'pre_block'
+export type ContentModerationUpstreamProtocol = 'openai_moderations' | 'anthropic_messages'
+export type ModerationEngine = 'openai' | 'typesafe'
+export interface ModerationEngineMeta {
+  engine: ModerationEngine
+  model: string
+  rules_version: string
+  skipped_images: number
+}
 export type KeywordBlockingMode = 'keyword_only' | 'keyword_and_api' | 'api_only'
 export type ContentModerationModelFilterType = 'all' | 'include' | 'exclude'
 
@@ -9,11 +17,23 @@ export interface ContentModerationModelFilter {
   models: string[]
 }
 
+export interface ContentModerationTrustedAPIKey {
+  api_key_id: number
+  models?: string[]
+  endpoints?: string[]
+  expires_at?: string
+  reason: string
+}
+
 export interface ContentModerationConfig {
+  engine?: ModerationEngine
+  engine_configs?: Record<ModerationEngine, ContentModerationConfig>
   enabled: boolean
   mode: ModerationMode
+  upstream_protocol: ContentModerationUpstreamProtocol
   base_url: string
   model: string
+  proxy_id: number | null
   api_key_configured: boolean
   api_key_masked: string
   api_key_count: number
@@ -40,6 +60,7 @@ export interface ContentModerationConfig {
   blocked_keywords: string[]
   keyword_blocking_mode: KeywordBlockingMode
   model_filter: ContentModerationModelFilter
+  trusted_api_keys: ContentModerationTrustedAPIKey[]
   cyber_policy_exclude_from_ban_count: boolean
 }
 
@@ -62,10 +83,15 @@ export interface ContentModerationAPIKeyStatus {
 }
 
 export interface TestContentModerationAPIKeysPayload {
+  engine?: ModerationEngine
+  thresholds?: Record<string, number>
   api_keys?: string[]
+  upstream_protocol?: ContentModerationUpstreamProtocol
   base_url?: string
   model?: string
   timeout_ms?: number
+  // null/undefined 沿用已保存配置的代理；0 强制直连；>0 指定代理
+  proxy_id?: number
   prompt?: string
   images?: string[]
 }
@@ -77,6 +103,7 @@ export interface TestContentModerationAPIKeysResponse {
 }
 
 export interface ContentModerationTestAuditResult {
+  engine_meta?: ModerationEngineMeta
   flagged: boolean
   highest_category: string
   highest_score: number
@@ -86,10 +113,15 @@ export interface ContentModerationTestAuditResult {
 }
 
 export interface UpdateContentModerationConfig {
+  engine?: ModerationEngine
+  engine_configs?: Partial<Record<ModerationEngine, UpdateModerationEngineConfig>>
   enabled?: boolean
   mode?: ModerationMode
+  upstream_protocol?: ContentModerationUpstreamProtocol
   base_url?: string
   model?: string
+  // undefined 不修改；0 清除（直连）；>0 指定代理
+  proxy_id?: number
   api_key?: string
   api_keys?: string[]
   api_keys_mode?: 'append' | 'replace'
@@ -116,10 +148,12 @@ export interface UpdateContentModerationConfig {
   blocked_keywords?: string[]
   keyword_blocking_mode?: KeywordBlockingMode
   model_filter?: ContentModerationModelFilter
+  trusted_api_keys?: ContentModerationTrustedAPIKey[]
   cyber_policy_exclude_from_ban_count?: boolean
 }
 
 export interface ContentModerationRuntimeStatus {
+  engine?: ModerationEngine
   enabled: boolean
   risk_control_enabled: boolean
   mode: ModerationMode
@@ -166,6 +200,7 @@ export interface ContentModerationAPIKeyLoad {
 }
 
 export interface ContentModerationLog {
+  engine_meta?: ModerationEngineMeta | null
   id: number
   request_id: string
   user_id: number | null
@@ -195,6 +230,10 @@ export interface ContentModerationLog {
   queue_delay_ms: number | null
   created_at: string
 }
+
+export type UpdateModerationEngineConfig = Pick<UpdateContentModerationConfig,
+  'base_url' | 'model' | 'proxy_id' | 'api_keys' | 'api_keys_mode' | 'delete_api_key_hashes' |
+  'clear_api_key' | 'timeout_ms' | 'retry_count' | 'thresholds'>
 
 export interface ListContentModerationLogsParams {
   page?: number

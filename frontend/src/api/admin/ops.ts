@@ -67,6 +67,56 @@ export interface OpsDashboardOverview {
   ttft: OpsPercentiles
 }
 
+/**
+ * Read-only runtime snapshot for the Hermes quota-recovery worker.
+ *
+ * The backend intentionally exposes aggregate counters and lifecycle metadata
+ * only; account credentials, upstream responses, and database identifiers are
+ * never part of this contract.
+ */
+export interface OpsHermesRunSnapshot {
+  started_at: string
+  completed_at?: string | null
+  trigger?: string
+  listed?: number
+  checked?: number
+  recovered?: number
+  exhausted?: number
+  skipped?: number
+  unknown?: number
+  cas_misses?: number
+  errors?: number
+  duration_ms?: number
+  last_error?: string | null
+}
+
+export interface OpsHermesConfigSnapshot {
+  interval_seconds: number
+  batch_size: number
+  concurrency: number
+  timeout_seconds: number
+  jitter_seconds: number
+}
+
+export interface OpsHermesStatusResponse {
+  enabled: boolean
+  status: string
+  health_reason?: string | null
+  healthy: boolean
+  lifecycle_state: string
+  lease_held: boolean
+  lease_healthy: boolean
+  started_at?: string | null
+  observed_at?: string | null
+  last_lease_acquired_at?: string | null
+  last_lease_lost_at?: string | null
+  last_reacquired_at?: string | null
+  next_run_at?: string | null
+  current_run?: OpsHermesRunSnapshot | null
+  last_run?: OpsHermesRunSnapshot | null
+  config: OpsHermesConfigSnapshot
+}
+
 export interface OpsPercentiles {
   p50_ms?: number | null
   p90_ms?: number | null
@@ -107,7 +157,7 @@ export interface OpsThroughputTrendResponse {
 
 export type OpsRequestKind = 'success' | 'error'
 export type OpsRequestDetailsKind = OpsRequestKind | 'all'
-export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc'
+export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc' | 'ttft_desc'
 
 export interface OpsRequestDetail {
   kind: OpsRequestKind
@@ -117,6 +167,7 @@ export interface OpsRequestDetail {
   platform?: string
   model?: string
   duration_ms?: number | null
+  first_token_ms?: number | null
   status_code?: number | null
 
   error_id?: number | null
@@ -348,6 +399,12 @@ export async function getConcurrencyStats(platform?: string, groupId?: number | 
   }
 
   const { data } = await apiClient.get<OpsConcurrencyStatsResponse>('/admin/ops/concurrency', { params })
+  return data
+}
+
+/** Fetch the aggregate Hermes worker lifecycle and last-run snapshot. */
+export async function getHermesStatus(): Promise<OpsHermesStatusResponse> {
+  const { data } = await apiClient.get<OpsHermesStatusResponse>('/admin/ops/hermes/status')
   return data
 }
 
@@ -814,12 +871,14 @@ export interface OpsAggregationSettings {
 
 export interface OpsRuntimeLogConfig {
   level: 'debug' | 'info' | 'warn' | 'error'
+  persist_access_logs: boolean
   enable_sampling: boolean
   sampling_initial: number
   sampling_thereafter: number
   caller: boolean
   stacktrace_level: 'none' | 'error' | 'fatal'
   retention_days: number
+  request_retention_days: number
   source?: string
   updated_at?: string
   updated_by_user_id?: number
@@ -1313,6 +1372,7 @@ export const opsAPI = {
   getErrorTrend,
   getErrorDistribution,
   getOpenAITokenStats,
+  getHermesStatus,
   getConcurrencyStats,
   getUserConcurrencyStats,
   getAccountAvailabilityStats,

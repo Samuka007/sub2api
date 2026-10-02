@@ -4,22 +4,28 @@ import { flushPromises, mount } from '@vue/test-utils'
 import type { DOMWrapper, VueWrapper } from '@vue/test-utils'
 
 import RiskControlView from '../RiskControlView.vue'
-import type { ContentModerationConfig, UpdateContentModerationConfig } from '@/api/admin/riskControl'
+import type { ContentModerationAPIKeyStatus, ContentModerationConfig, UpdateContentModerationConfig } from '@/api/admin/riskControl'
 
 const {
   getConfig,
   updateConfig,
+  testAPIKeys,
   getStatus,
   listLogs,
   getGroups,
+  getProxies,
+  testAPIKeys,
   showError,
   showSuccess,
 } = vi.hoisted(() => ({
   getConfig: vi.fn(),
   updateConfig: vi.fn(),
+  testAPIKeys: vi.fn(),
   getStatus: vi.fn(),
   listLogs: vi.fn(),
   getGroups: vi.fn(),
+  getProxies: vi.fn(),
+  testAPIKeys: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn(),
 }))
@@ -31,13 +37,16 @@ vi.mock('@/api/admin', () => ({
       updateConfig,
       getStatus,
       listLogs,
-      testAPIKeys: vi.fn(),
+      testAPIKeys,
       deleteFlaggedHash: vi.fn(),
       clearFlaggedHashes: vi.fn(),
       unbanUser: vi.fn(),
     },
     groups: {
       getAll: getGroups,
+    },
+    proxies: {
+      getAll: getProxies,
     },
   },
 }))
@@ -71,8 +80,10 @@ vi.mock('vue-i18n', async () => {
 const baseConfig = (): ContentModerationConfig => ({
   enabled: true,
   mode: 'pre_block',
+  upstream_protocol: 'openai_moderations',
   base_url: 'https://api.openai.com',
   model: 'omni-moderation-latest',
+  proxy_id: null,
   api_key_configured: false,
   api_key_masked: '',
   api_key_count: 0,
@@ -105,6 +116,8 @@ const baseConfig = (): ContentModerationConfig => ({
     type: 'all',
     models: [],
   },
+  trusted_api_keys: [],
+  cyber_policy_exclude_from_ban_count: false,
 })
 
 const runtimeStatus = () => ({
@@ -175,6 +188,34 @@ const ModelWhitelistSelectorStub = defineComponent({
       })
   },
 })
+const SelectStub = defineComponent({
+  props: {
+    modelValue: {
+      type: [String, Number, Boolean],
+      default: '',
+    },
+    options: {
+      type: Array,
+      default: () => [],
+    },
+  },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { emit }) {
+    const onChange = (event: Event) => {
+      const value = (event.target as HTMLSelectElement).value
+      emit('update:modelValue', value)
+      emit('change', value)
+    }
+    return () =>
+      h(
+        'select',
+        { value: props.modelValue, onChange },
+        (props.options as Array<{ value: string | number; label: string }>).map((option) =>
+          h('option', { value: option.value }, option.label)
+        )
+      )
+  },
+})
 
 function findButtonByText(wrapper: VueWrapper, text: string): DOMWrapper<HTMLButtonElement> {
   const button = wrapper.findAll<HTMLButtonElement>('button').find((item) => item.text().includes(text))
@@ -188,16 +229,19 @@ describe('admin RiskControlView', () => {
   beforeEach(() => {
     getConfig.mockReset()
     updateConfig.mockReset()
+    testAPIKeys.mockReset()
     getStatus.mockReset()
     listLogs.mockReset()
     getGroups.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
+    testAPIKeys.mockReset()
 
     getConfig.mockResolvedValue(baseConfig())
     getStatus.mockResolvedValue(runtimeStatus())
     listLogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 1 })
     getGroups.mockResolvedValue([])
+    getProxies.mockResolvedValue([])
     updateConfig.mockImplementation(async (payload: UpdateContentModerationConfig) => ({
       ...baseConfig(),
       ...payload,
@@ -208,6 +252,124 @@ describe('admin RiskControlView', () => {
       api_key_masks: [],
       api_key_statuses: [],
     }))
+    testAPIKeys.mockResolvedValue({ items: [], image_count: 0 })
+  })
+
+  it.each(['openai', 'typesafe'] as const)('shows the selected draft engine keys while %s remains active', async (activeEngine) => {
+    const openaiKey: ContentModerationAPIKeyStatus = {
+      index: 1, key_hash: 'openai-hash', masked: '********oa01', status: 'frozen',
+      failure_count: 1, success_count: 0, last_error: '', last_latency_ms: 100,
+      last_http_status: 429, last_tested: false, configured: true,
+    }
+    const typesafeKey: ContentModerationAPIKeyStatus = { ...openaiKey, key_hash: 'typesafe-hash', masked: '********ts02', status: 'ok', failure_count: 0, success_count: 1, last_http_status: 200 }
+    const profiles = {
+      openai: { ...baseConfig(), engine: 'openai' as const, api_key_configured: true, api_key_count: 1, api_key_statuses: [openaiKey] },
+      typesafe: { ...baseConfig(), engine: 'typesafe' as const, api_key_configured: true, api_key_count: 1, api_key_statuses: [typesafeKey] },
+    }
+    const otherEngine = activeEngine === 'openai' ? 'typesafe' : 'openai'
+    getConfig.mockResolvedValue({ ...profiles[activeEngine], engine_configs: profiles })
+    getStatus.mockResolvedValue({ ...runtimeStatus(), engine: activeEngine, api_key_statuses: profiles[activeEngine].api_key_statuses })
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    const engine = () => wrapper.findComponent('[data-test="audit-engine-select"]')
+    const keyPanel = () => wrapper.get('[data-test="audit-key-statuses"]')
+    expect(keyPanel().text()).toContain(profiles[activeEngine].api_key_statuses[0].masked)
+    engine().vm.$emit('update:modelValue', otherEngine)
+    await flushPromises()
+    expect(keyPanel().text()).toContain(profiles[otherEngine].api_key_statuses[0].masked)
+    expect(keyPanel().text()).not.toContain(profiles[activeEngine].api_key_statuses[0].masked)
+    expect(keyPanel().text()).toContain(otherEngine === 'openai' ? 'admin.riskControl.apiKeyStatusFrozen' : 'admin.riskControl.apiKeyStatusOk')
+    await findButtonByText(wrapper, 'admin.riskControl.refreshStatus').trigger('click')
+    await flushPromises()
+    expect(keyPanel().text()).toContain(profiles[otherEngine].api_key_statuses[0].masked)
+    expect(keyPanel().text()).not.toContain(profiles[activeEngine].api_key_statuses[0].masked)
+    engine().vm.$emit('update:modelValue', activeEngine)
+    await flushPromises()
+    expect(keyPanel().text()).toContain(profiles[activeEngine].api_key_statuses[0].masked)
+    expect(keyPanel().text()).not.toContain(profiles[otherEngine].api_key_statuses[0].masked)
+    expect(updateConfig).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows an empty key panel for an unconfigured draft engine', async () => {
+    getStatus.mockResolvedValue({ ...runtimeStatus(), api_key_statuses: [{ masked: '********oa01', configured: true, status: 'ok' }] })
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    wrapper.findComponent('[data-test="audit-engine-select"]').vm.$emit('update:modelValue', 'typesafe')
+    await flushPromises()
+    expect(wrapper.get('[data-test="audit-key-statuses"]').text()).toContain('admin.riskControl.apiKeyHealthEmpty')
+    expect(wrapper.get('[data-test="audit-key-statuses"]').text()).not.toContain('********oa01')
+    expect(updateConfig).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('preserves both engine drafts and saves thresholds independently', async () => {
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await wrapper.get('[data-test="audit-base-url"]').setValue('https://openai-edited.example')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.riskThresholds').trigger('click')
+    await wrapper.get('[data-test="risk-threshold-sexual"]').setValue('73')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.basic').trigger('click')
+    const engine = () => wrapper.findComponent('[data-test="audit-engine-select"]')
+    engine().vm.$emit('update:modelValue', 'typesafe')
+    await flushPromises()
+    expect((wrapper.get('[data-test="audit-model"]').element as HTMLInputElement).value).toBe('jev-latest')
+    await wrapper.get('[data-test="audit-base-url"]').setValue('https://typesafe-edited.example')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.riskThresholds').trigger('click')
+    expect((wrapper.get('[data-test="risk-threshold-sexual"]').element as HTMLInputElement).value).toBe('65')
+    await wrapper.get('[data-test="risk-threshold-sexual"]').setValue('91')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.basic').trigger('click')
+    engine().vm.$emit('update:modelValue', 'openai')
+    await flushPromises()
+    expect((wrapper.get('[data-test="audit-base-url"]').element as HTMLInputElement).value).toBe('https://openai-edited.example')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({ engine: 'openai', engine_configs: {
+      openai: expect.objectContaining({ base_url: 'https://openai-edited.example', thresholds: expect.objectContaining({ sexual: 0.73 }) }),
+      typesafe: expect.objectContaining({ base_url: 'https://typesafe-edited.example', thresholds: expect.objectContaining({ sexual: 0.91 }) }),
+    } }))
+    expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('tests the draft engine without switching the active engine', async () => {
+    testAPIKeys.mockResolvedValue({ items: [{ status: 'ok', configured: false }], image_count: 0 })
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    wrapper.findComponent('[data-test="audit-engine-select"]').vm.$emit('update:modelValue', 'typesafe')
+    await flushPromises()
+    await wrapper.get('textarea[autocomplete="new-password"]').setValue('test-only-key')
+    await findButtonByText(wrapper, 'admin.riskControl.testInputApiKeys').trigger('click')
+    await flushPromises()
+    expect(testAPIKeys).toHaveBeenCalledWith(expect.objectContaining({ engine: 'typesafe', api_keys: ['test-only-key'], model: 'jev-latest', thresholds: expect.objectContaining({ sexual: 0.65 }) }))
+    expect(updateConfig).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-test="active-audit-engine"]').text()).not.toContain('TypeSafe AI')
+    wrapper.unmount()
+  })
+
+  it.each(['openai', 'typesafe'] as const)('restores the shared defaults for %s without replacing saved thresholds on load', async (engine) => {
+    getConfig.mockResolvedValue({ ...baseConfig(), engine, thresholds: { sexual: 0.8, harassment: 0.8 } })
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.riskThresholds').trigger('click')
+    expect((wrapper.get('[data-test="risk-threshold-sexual"]').element as HTMLInputElement).value).toBe('80')
+    await findButtonByText(wrapper, 'admin.riskControl.riskThresholdReset').trigger('click')
+    const defaults = {
+      harassment: 98, 'harassment/threatening': 90, hate: 65, 'hate/threatening': 65,
+      illicit: 95, 'illicit/violent': 95, 'self-harm': 65, 'self-harm/intent': 85,
+      'self-harm/instructions': 65, sexual: 65, 'sexual/minors': 65, violence: 95, 'violence/graphic': 95,
+    }
+    for (const [category, value] of Object.entries(defaults)) {
+      expect((wrapper.get(`[data-test="risk-threshold-${category}"]`).element as HTMLInputElement).value).toBe(String(value))
+    }
+    if (engine === 'typesafe') expect(wrapper.text()).toContain('admin.riskControl.typeSafeThresholds')
+    expect(updateConfig).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('saves the selected model filter mode and models', async () => {
@@ -221,6 +383,7 @@ describe('admin RiskControlView', () => {
           Toggle: true,
           Pagination: true,
           ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
         },
       },
     })
@@ -228,6 +391,7 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
     await findButtonByText(wrapper, 'admin.riskControl.tabs.scope').trigger('click')
     await findButtonByText(wrapper, 'admin.riskControl.modelFilterInclude').trigger('click')
     await wrapper.get('[data-test="model-filter-input"]').setValue('gpt-5.5, gpt-5.4')
@@ -243,7 +407,193 @@ describe('admin RiskControlView', () => {
     expect(showError).not.toHaveBeenCalled()
   })
 
-  it('submits edited risk control thresholds when saving moderation config', async () => {
+  it('switches, tests, and saves the Anthropic Messages moderation upstream', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+
+    const protocolSelect = wrapper.get('[data-test="moderation-upstream-protocol"] select')
+    await protocolSelect.setValue('anthropic_messages')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://api.anthropic.com')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', '')
+    expect(wrapper.text()).toContain('admin.riskControl.upstreamProtocolAnthropicHint')
+
+
+    await wrapper.get('[data-test="moderation-model"]').setValue('claude-test')
+    await wrapper.find('textarea').setValue('sk-ant-test')
+    await findButtonByText(wrapper, 'admin.riskControl.testInputApiKeys').trigger('click')
+    await flushPromises()
+    expect(testAPIKeys).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      base_url: 'https://api.anthropic.com',
+      model: 'claude-test',
+      api_keys: ['sk-ant-test'],
+    }))
+
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      base_url: 'https://api.anthropic.com',
+      model: 'claude-test',
+    }))
+
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('openai_moderations')
+    await flushPromises()
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://api.openai.com')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', 'omni-moderation-latest')
+  })
+
+  it('requires explicit API key replacement when switching moderation providers', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      api_key_configured: true,
+      api_key_count: 1,
+      api_key_masks: ['****old'],
+    })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('anthropic_messages')
+    await flushPromises()
+
+    const setupState = (wrapper.vm.$ as unknown as {
+      setupState: { configForm: { api_keys_mode: string } }
+    }).setupState
+    expect(setupState.configForm.api_keys_mode).toBe('replace')
+    expect(findButtonByText(wrapper, 'admin.riskControl.testStoredApiKeys').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-test="moderation-model"]').setValue('claude-test')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(showError).toHaveBeenCalledWith('admin.riskControl.apiKeysReplaceNoInput')
+    expect(updateConfig).not.toHaveBeenCalled()
+
+    await wrapper.find('textarea').setValue('sk-ant-new')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      upstream_protocol: 'anthropic_messages',
+      api_keys: ['sk-ant-new'],
+      api_keys_mode: 'replace',
+    }))
+  })
+
+  it('drops a pending provider key when switching back to the saved protocol', async () => {
+    getConfig.mockResolvedValue({
+      ...baseConfig(),
+      base_url: 'https://openai-gateway.example',
+      model: 'custom-openai-moderation',
+      api_key_configured: true,
+      api_key_count: 1,
+      api_key_masks: ['****old'],
+    })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+
+    const protocolSelect = wrapper.get('[data-test="moderation-upstream-protocol"] select')
+    await protocolSelect.setValue('anthropic_messages')
+    await wrapper.find('textarea').setValue('sk-ant-pending')
+    await protocolSelect.setValue('openai_moderations')
+    await flushPromises()
+
+    const setupState = (wrapper.vm.$ as unknown as {
+      setupState: { configForm: { api_keys_mode: string; api_keys_text: string } }
+    }).setupState
+    expect(setupState.configForm.api_keys_mode).toBe('append')
+    expect(setupState.configForm.api_keys_text).toBe('')
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://openai-gateway.example')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', 'custom-openai-moderation')
+
+    await wrapper.find('textarea').setValue('sk-openai-pending')
+    await protocolSelect.setValue('openai_moderations')
+    expect(wrapper.find('textarea').element).toHaveProperty('value', 'sk-openai-pending')
+    await wrapper.find('textarea').setValue('')
+
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+    expect(updateConfig).toHaveBeenCalledOnce()
+    expect(updateConfig.mock.calls[0]?.[0]).not.toHaveProperty('api_keys')
+  })
+
+  it('keeps an explicitly configured gateway when switching moderation protocols', async () => {
+    getConfig.mockResolvedValue({ ...baseConfig(), base_url: 'https://gateway.example' })
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: SelectStub,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="moderation-upstream-protocol"] select').setValue('anthropic_messages')
+    await flushPromises()
+    expect(wrapper.get('[data-test="moderation-base-url"]').element).toHaveProperty('value', 'https://gateway.example')
+    expect(wrapper.get('[data-test="moderation-model"]').element).toHaveProperty('value', '')
+  })
+
+  it('saves scoped trusted API keys in observe-only mode', async () => {
     const wrapper = mount(RiskControlView, {
       global: {
         stubs: {
@@ -261,6 +611,49 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.addTrustedAPIKey').trigger('click')
+    await wrapper.get('[data-test="trusted-api-key-id-0"]').setValue('42')
+    await wrapper.get('[data-test="trusted-api-key-reason-0"]').setValue('administrator maintenance')
+    await wrapper.get('[data-test="trusted-api-key-models-0"]').setValue('gpt-5.6-sol\ncodex-auto-review')
+    await wrapper.get('[data-test="trusted-api-key-endpoints-0"]').setValue('/v1/responses')
+    await wrapper.get('[data-test="trusted-api-key-expiry-0"]').setValue('')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      trusted_api_keys: [{
+        api_key_id: 42,
+        models: ['gpt-5.6-sol', 'codex-auto-review'],
+        endpoints: ['/v1/responses'],
+        expires_at: undefined,
+        reason: 'administrator maintenance',
+      }],
+    }))
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('submits edited risk control thresholds when saving moderation config', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
     await findButtonByText(wrapper, 'admin.riskControl.tabs.riskThresholds').trigger('click')
     await wrapper.get('[data-test="risk-threshold-sexual"]').setValue('72')
     await wrapper.get('[data-test="risk-threshold-harassment"]').setValue('99')
@@ -274,6 +667,105 @@ describe('admin RiskControlView', () => {
       }),
     }))
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('restores trusted key settings when the dialog is cancelled', async () => {
+    const config = baseConfig()
+    config.trusted_api_keys = [{
+      api_key_id: 42,
+      models: ['gpt-5.6-sol'],
+      endpoints: ['/v1/responses'],
+      reason: 'administrator maintenance',
+    }]
+    getConfig.mockResolvedValue(config)
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await wrapper.get('[aria-label="admin.riskControl.removeTrustedAPIKey"]').trigger('click')
+    await findButtonByText(wrapper, 'common.cancel').trigger('click')
+
+    const setupState = (wrapper.vm.$ as unknown as { setupState: { configForm: { trusted_api_keys: unknown[] } } }).setupState
+    expect(setupState.configForm.trusted_api_keys).toHaveLength(1)
+    expect(updateConfig).not.toHaveBeenCalled()
+  })
+
+  it('rejects trusted key scopes that exceed the server limit', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.addTrustedAPIKey').trigger('click')
+    await wrapper.get('[data-test="trusted-api-key-id-0"]').setValue('42')
+    await wrapper.get('[data-test="trusted-api-key-reason-0"]').setValue('administrator maintenance')
+    await wrapper.get('[data-test="trusted-api-key-models-0"]').setValue(
+      Array.from({ length: 101 }, (_, index) => `model-${index}`).join('\n')
+    )
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('trustedAPIKeyScopeTooMany'))
+    expect(updateConfig).not.toHaveBeenCalled()
+  })
+
+  it('marks expired trusted keys as inactive', async () => {
+    const config = baseConfig()
+    config.trusted_api_keys = [{
+      api_key_id: 42,
+      models: [],
+      endpoints: [],
+      expires_at: '2020-01-01T00:00:00Z',
+      reason: 'expired maintenance window',
+    }]
+    getConfig.mockResolvedValue(config)
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.trustedKeys').trigger('click')
+
+    expect(wrapper.get('[data-test="trusted-api-key-status-0"]').text()).toContain('trustedAPIKeyExpired')
   })
 
   it('describes worker runtime as async audit and pre-block record processing', async () => {
@@ -294,6 +786,7 @@ describe('admin RiskControlView', () => {
           Toggle: true,
           Pagination: true,
           ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
         },
       },
     })
@@ -361,6 +854,7 @@ describe('admin RiskControlView', () => {
           Toggle: true,
           Pagination: true,
           ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
         },
       },
     })

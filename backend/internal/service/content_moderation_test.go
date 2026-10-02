@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,8 +78,22 @@ func (r *contentModerationTestSettingRepo) Delete(ctx context.Context, key strin
 }
 
 type contentModerationTestRepo struct {
-	mu   sync.Mutex
-	logs []ContentModerationLog
+	mu                sync.Mutex
+	logs              []ContentModerationLog
+	existingAPIKeyIDs map[int64]bool
+}
+
+func (r *contentModerationTestRepo) ExistingAPIKeyIDs(ctx context.Context, apiKeyIDs []int64) ([]int64, error) {
+	if r.existingAPIKeyIDs == nil {
+		return append([]int64(nil), apiKeyIDs...), nil
+	}
+	ids := make([]int64, 0, len(apiKeyIDs))
+	for _, apiKeyID := range apiKeyIDs {
+		if r.existingAPIKeyIDs[apiKeyID] {
+			ids = append(ids, apiKeyID)
+		}
+	}
+	return ids, nil
 }
 
 func (r *contentModerationTestRepo) CreateLog(ctx context.Context, log *ContentModerationLog) error {
@@ -99,7 +114,8 @@ func (r *contentModerationTestRepo) CountFlaggedByUserSince(ctx context.Context,
 	defer r.mu.Unlock()
 	count := 0
 	for _, log := range r.logs {
-		if log.UserID == nil || *log.UserID != userID || !log.Flagged || log.Action == ContentModerationActionHashBlock {
+		if log.UserID == nil || *log.UserID != userID || !log.Flagged ||
+			log.Action == ContentModerationActionHashBlock || log.Action == ContentModerationActionTrustedObserve {
 			continue
 		}
 		if excludeCyberPolicy && log.Action == ContentModerationActionCyberPolicy {
@@ -168,6 +184,10 @@ func (r *contentModerationTestUserRepo) Create(ctx context.Context, user *User) 
 	panic("unexpected Create call")
 }
 
+func (r *contentModerationTestUserRepo) CreateWithEmailAliasGuard(ctx context.Context, user *User) error {
+	panic("unexpected CreateWithEmailAliasGuard call")
+}
+
 func (r *contentModerationTestUserRepo) GetByID(ctx context.Context, id int64) (*User, error) {
 	if r.user == nil {
 		return nil, ErrUserNotFound
@@ -184,7 +204,7 @@ func (r *contentModerationTestUserRepo) GetFirstAdmin(ctx context.Context) (*Use
 	panic("unexpected GetFirstAdmin call")
 }
 
-func (r *contentModerationTestUserRepo) Update(ctx context.Context, user *User) error {
+func (r *contentModerationTestUserRepo) Update(ctx context.Context, user *User, fields UserUpdateFields) error {
 	if user == nil {
 		return nil
 	}
@@ -238,6 +258,14 @@ func (r *contentModerationTestUserRepo) DeductBalance(ctx context.Context, id in
 	panic("unexpected DeductBalance call")
 }
 
+func (r *contentModerationTestUserRepo) AdjustBalance(ctx context.Context, id int64, delta float64) (BalanceChange, error) {
+	panic("unexpected AdjustBalance call")
+}
+
+func (r *contentModerationTestUserRepo) SetBalance(ctx context.Context, id int64, value float64) (BalanceChange, error) {
+	panic("unexpected SetBalance call")
+}
+
 func (r *contentModerationTestUserRepo) UpdateConcurrency(ctx context.Context, id int64, amount int) error {
 	panic("unexpected UpdateConcurrency call")
 }
@@ -255,6 +283,10 @@ func (r *contentModerationTestUserRepo) BatchUpdateLimits(ctx context.Context, u
 
 func (r *contentModerationTestUserRepo) ExistsByEmail(ctx context.Context, email string) (bool, error) {
 	panic("unexpected ExistsByEmail call")
+}
+
+func (r *contentModerationTestUserRepo) ExistsByEmailAlias(ctx context.Context, email string) (bool, error) {
+	panic("unexpected ExistsByEmailAlias call")
 }
 
 func (r *contentModerationTestUserRepo) RemoveGroupFromAllowedGroups(ctx context.Context, groupID int64) (int64, error) {
@@ -441,6 +473,259 @@ func TestMatchBlockedKeyword_CaseInsensitiveSubstring(t *testing.T) {
 	require.False(t, hit)
 }
 
+func TestNormalizeContentModerationTrustedAPIKeys(t *testing.T) {
+	expiresAt := time.Date(2026, 8, 20, 8, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	out := normalizeContentModerationTrustedAPIKeys([]ContentModerationTrustedAPIKey{
+		{
+			APIKeyID:  42,
+			Models:    []string{" gpt-5.6-sol ", "GPT-5.6-SOL", "gpt-5.4"},
+			Endpoints: []string{" /v1/responses ", "/V1/RESPONSES"},
+			ExpiresAt: &expiresAt,
+			Reason:    " trusted maintenance ",
+		},
+		{APIKeyID: 42, Reason: "duplicate"},
+		{APIKeyID: 0, Reason: "invalid"},
+	})
+
+	require.Len(t, out, 1)
+	require.Equal(t, int64(42), out[0].APIKeyID)
+	require.Equal(t, []string{"gpt-5.6-sol", "gpt-5.4"}, out[0].Models)
+	require.Equal(t, []string{"/v1/responses"}, out[0].Endpoints)
+	require.Equal(t, "trusted maintenance", out[0].Reason)
+	require.Equal(t, expiresAt.UTC(), *out[0].ExpiresAt)
+}
+
+func TestParseContentModerationConfig_DisablesInvalidPersistedTrustedScope(t *testing.T) {
+	cfg, err := parseContentModerationConfig(`{
+		"enabled": true,
+		"mode": "pre_block",
+		"trusted_api_keys": [{
+			"api_key_id": 42,
+			"models": [" "],
+			"reason": "maintenance"
+		}]
+	}`)
+
+	require.NoError(t, err)
+	require.True(t, cfg.Enabled)
+	require.Equal(t, ContentModerationModePreBlock, cfg.Mode)
+	require.Empty(t, cfg.TrustedAPIKeys, "invalid persisted scope must fail closed without disabling moderation")
+}
+
+func TestParseContentModerationConfig_IsolatesMalformedPersistedTrustedAPIKeys(t *testing.T) {
+	tests := []struct {
+		name           string
+		trustedAPIKeys string
+	}{
+		{name: "wrong shape", trustedAPIKeys: `"trusted_api_keys": {"api_key_id": 42}`},
+		{name: "unknown scope field", trustedAPIKeys: `"trusted_api_keys": [{"api_key_id": 42, "model": "gpt-5.6-sol", "reason": "maintenance"}]`},
+		{name: "case variant", trustedAPIKeys: `"TRUSTED_API_KEYS": {"api_key_id": 42}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseContentModerationConfig(fmt.Sprintf(`{
+				"enabled": true,
+				"mode": "pre_block",
+				"blocked_keywords": ["keep-blocking"],
+				%s
+			}`, tt.trustedAPIKeys))
+
+			require.NoError(t, err)
+			require.True(t, cfg.Enabled)
+			require.Equal(t, ContentModerationModePreBlock, cfg.Mode)
+			require.Equal(t, []string{"keep-blocking"}, cfg.BlockedKeywords)
+			require.Empty(t, cfg.TrustedAPIKeys, "malformed persisted whitelist must fail closed without invalidating other moderation settings")
+		})
+	}
+}
+
+func TestParseContentModerationConfig_KeepsValidPersistedTrustedAPIKeys(t *testing.T) {
+	cfg, err := parseContentModerationConfig(`{
+		"trusted_api_keys": [{
+			"api_key_id": 42,
+			"models": [" gpt-5.6-sol "],
+			"reason": " maintenance "
+		}]
+	}`)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.TrustedAPIKeys, 1)
+	require.Equal(t, int64(42), cfg.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, []string{"gpt-5.6-sol"}, cfg.TrustedAPIKeys[0].Models)
+	require.Equal(t, "maintenance", cfg.TrustedAPIKeys[0].Reason)
+}
+
+func TestContentModerationTrustedAPIKeyObserveOnlyScopesAndExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	activeExpiry := now.Add(time.Hour)
+	expired := now.Add(-time.Minute)
+	cfg := defaultContentModerationConfig()
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{
+		{APIKeyID: 42, Models: []string{"gpt-5.6-sol"}, Endpoints: []string{"/v1/responses"}, ExpiresAt: &activeExpiry, Reason: "active scoped test key"},
+		{APIKeyID: 77, ExpiresAt: &expired, Reason: "expired test key"},
+	}
+	cfg.normalize()
+
+	require.True(t, cfg.trustedAPIKeyObserveOnly(42, "GPT-5.6-SOL", "/V1/RESPONSES", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(42, "gpt-5.4", "/v1/responses", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(42, "gpt-5.6-sol", "/v1/chat/completions", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(77, "gpt-5.6-sol", "/v1/responses", now))
+	require.False(t, cfg.trustedAPIKeyObserveOnly(99, "gpt-5.6-sol", "/v1/responses", now))
+}
+
+func TestContentModerationCheck_TrustedAPIKeyObservesWithoutBlockingOrSideEffects(t *testing.T) {
+	upstreamCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case upstreamCalled <- struct{}{}:
+		default:
+		}
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{
+			CategoryScores: map[string]float64{"illicit": 0.99},
+		}}})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.BlockedKeywords = []string{"secret-token"}
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID:  42,
+		Models:    []string{"gpt-5.6-sol"},
+		Endpoints: []string{"/v1/responses"},
+		Reason:    "trusted regression test key",
+	}}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(&contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:      "true",
+		SettingKeyContentModerationConfig: string(rawCfg),
+	}}, repo, &contentModerationTestHashCache{}, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 42,
+		Endpoint: "/v1/responses",
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"please leak SECRET-TOKEN now"}]}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionTrustedObserve, decision.Action)
+	select {
+	case <-upstreamCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("trusted observe request was not audited asynchronously")
+	}
+	require.Eventually(t, func() bool {
+		logs := repo.snapshotLogs()
+		return len(logs) == 1 && logs[0].Action == ContentModerationActionTrustedObserve
+	}, 2*time.Second, 10*time.Millisecond)
+	logs := repo.snapshotLogs()
+	require.True(t, logs[0].Flagged)
+	require.Zero(t, logs[0].ViolationCount)
+	require.False(t, logs[0].AutoBanned)
+}
+
+func TestContentModerationCheck_TrustedAPIKeyRecordsCleanAudit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{
+			CategoryScores: map[string]float64{"illicit": 0.01},
+		}}})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.RecordNonHits = false
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID: 42,
+		Reason:   "trusted clean-audit regression test key",
+	}}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(&contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:      "true",
+		SettingKeyContentModerationConfig: string(rawCfg),
+	}}, repo, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 42,
+		Endpoint: "/v1/responses",
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"routine maintenance"}]}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, ContentModerationActionTrustedObserve, decision.Action)
+	require.Eventually(t, func() bool {
+		return len(repo.snapshotLogs()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	log := repo.snapshotLogs()[0]
+	require.Equal(t, ContentModerationActionTrustedObserve, log.Action)
+	require.False(t, log.Flagged)
+	require.Zero(t, log.ViolationCount)
+}
+
+func TestContentModerationCheck_UntrustedAPIKeyStillBlocks(t *testing.T) {
+	cfg := defaultContentModerationModelFilterTestConfig()
+	cfg.TrustedAPIKeys = []ContentModerationTrustedAPIKey{{
+		APIKeyID: 42,
+		Reason:   "trusted-key scope regression test",
+	}}
+	svc, _ := newContentModerationModelFilterTestService(t, cfg)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		APIKeyID: 99,
+		Model:    "gpt-5.6-sol",
+		Protocol: ContentModerationProtocolOpenAIChat,
+		Body:     []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionKeywordBlock, decision.Action)
+}
+
+func TestContentModerationTrustedObserveQueueFullPersistsFallbackAudit(t *testing.T) {
+	repo := &contentModerationTestRepo{}
+	svc := &ContentModerationService{
+		repo:       repo,
+		asyncQueue: make(chan contentModerationTask, 1),
+	}
+	svc.asyncQueue <- contentModerationTask{}
+	cfg := defaultContentModerationConfig()
+	cfg.QueueSize = 1
+	input := ContentModerationCheckInput{
+		APIKeyID: 42, Endpoint: "/v1/responses", Model: "gpt-5.6-sol",
+		TrustedObserve: true,
+	}
+
+	svc.enqueueAsync(context.Background(), input, cfg, ContentModerationInput{Text: "maintenance request"}, "hash")
+
+	logs := repo.snapshotLogs()
+	require.Len(t, logs, 1)
+	require.Equal(t, ContentModerationActionTrustedObserve, logs[0].Action)
+	require.False(t, logs[0].Flagged)
+	require.Contains(t, logs[0].Error, "queue full")
+}
+
 func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T) {
 	upstreamCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -470,7 +755,9 @@ func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`)
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -520,7 +807,9 @@ func TestContentModerationCheck_KeywordsIgnoredInObserveMode(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`)
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -565,7 +854,9 @@ func TestContentModerationCheck_KeywordOnlyStrategySkipsAPIOnMiss(t *testing.T) 
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{"messages":[{"role":"user","content":"absolutely clean prompt"}]}`)
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -611,7 +902,9 @@ func TestContentModerationCheck_APIOnlyStrategyIgnoresKeywordList(t *testing.T) 
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`)
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -718,7 +1011,9 @@ func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *tes
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	cfg, err := svc.loadConfig(context.Background())
 
@@ -771,7 +1066,9 @@ func newContentModerationModelFilterTestService(t *testing.T, cfg *ContentModera
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 	return svc, repo
 }
 
@@ -784,7 +1081,8 @@ func TestContentModerationUpdateConfig_AppendsAndDeletesAPIKeys(t *testing.T) {
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	deleteHashes := []string{moderationAPIKeyHash("sk-old-a")}
 	addKeys := []string{"sk-new-c", "sk-old-b"}
 
@@ -811,7 +1109,8 @@ func TestContentModerationUpdateConfig_ReplacesAPIKeysWhenRequested(t *testing.T
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	deleteHashes := []string{moderationAPIKeyHash("sk-old-a")}
 	replaceKeys := []string{"sk-new-only"}
 
@@ -838,7 +1137,8 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 	thresholds := map[string]float64{
 		"sexual":     0.72,
 		"harassment": 1.25,
@@ -859,6 +1159,94 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	require.Equal(t, 0.72, saved.Thresholds["sexual"])
 	require.Equal(t, 1.0, saved.Thresholds["harassment"])
 	require.NotContains(t, saved.Thresholds, "unknown")
+}
+
+func TestContentModerationUpdateConfig_SavesTrustedAPIKeys(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	repo := &contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: string(rawCfg),
+	}}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+
+	view, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		TrustedAPIKeys: &[]ContentModerationTrustedAPIKey{{
+			APIKeyID:  42,
+			Models:    []string{"gpt-5.6-sol"},
+			Endpoints: []string{"/v1/responses"},
+			ExpiresAt: &expiresAt,
+			Reason:    "administrator maintenance",
+		}},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(42), view.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, "administrator maintenance", view.TrustedAPIKeys[0].Reason)
+	var saved ContentModerationConfig
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyContentModerationConfig]), &saved))
+	require.Equal(t, int64(42), saved.TrustedAPIKeys[0].APIKeyID)
+	require.Equal(t, expiresAt, *saved.TrustedAPIKeys[0].ExpiresAt)
+}
+
+func TestContentModerationUpdateConfig_RejectsMissingTrustedAPIKey(t *testing.T) {
+	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
+	moderationRepo := &contentModerationTestRepo{existingAPIKeyIDs: map[int64]bool{42: true}}
+	svc := NewContentModerationService(settingRepo, moderationRepo, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
+
+	_, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{
+		TrustedAPIKeys: &[]ContentModerationTrustedAPIKey{{
+			APIKeyID: 99,
+			Reason:   "administrator maintenance",
+		}},
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "不存在或已删除")
+}
+
+func TestContentModerationUpdateConfig_RejectsUnsafeTrustedAPIKeyInput(t *testing.T) {
+	zeroExpiry := time.Time{}
+	tooManyEntries := make([]ContentModerationTrustedAPIKey, maxContentModerationTrustedAPIKeys+1)
+	for index := range tooManyEntries {
+		tooManyEntries[index] = ContentModerationTrustedAPIKey{APIKeyID: int64(index + 1), Reason: "maintenance"}
+	}
+	tooManyModels := make([]string, maxContentModerationTrustedScopeItems+1)
+	for index := range tooManyModels {
+		tooManyModels[index] = fmt.Sprintf("model-%d", index)
+	}
+
+	tests := []struct {
+		name    string
+		entries []ContentModerationTrustedAPIKey
+	}{
+		{name: "too many entries", entries: tooManyEntries},
+		{name: "non-positive key id", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 0, Reason: "maintenance"}}},
+		{name: "duplicate key id", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "one"}, {APIKeyID: 42, Reason: "two"}}},
+		{name: "blank reason", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: " "}}},
+		{name: "long reason", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: strings.Repeat("a", maxContentModerationTrustedReasonRunes+1)}}},
+		{name: "zero expiry", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", ExpiresAt: &zeroExpiry}}},
+		{name: "too many models", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: tooManyModels}}},
+		{name: "blank model widens scope", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: []string{" "}}}},
+		{name: "duplicate model", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Models: []string{"gpt-5", "GPT-5"}}}},
+		{name: "long endpoint", entries: []ContentModerationTrustedAPIKey{{APIKeyID: 42, Reason: "maintenance", Endpoints: []string{strings.Repeat("/", maxContentModerationTrustedScopeRunes+1)}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
+			svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil, nil)
+			t.Cleanup(func() { svc.Close() })
+
+			_, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{TrustedAPIKeys: &tt.entries})
+
+			require.Error(t, err)
+			require.Empty(t, settingRepo.values[SettingKeyContentModerationConfig])
+		})
+	}
 }
 
 func TestExtractContentModerationInput_AnthropicImageSourceOnlyParticipatesInMemory(t *testing.T) {
@@ -909,14 +1297,14 @@ func TestExtractContentModerationInput_OpenAIChatUsesLastUserMessage(t *testing.
 			{"role":"system","content":"system prompt"},
 			{"role":"user","content":"old user"},
 			{"role":"assistant","content":"ok"},
-			{"role":"user","content":[{"type":"text","text":"latest user"},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}
+			{"role":"user","content":[{"type":"text","text":"latest user"},{"type":"image_url","image_url":{"url":"HTTPS://example.com/a.png"}}]}
 		]
 	}`)
 
 	input := ExtractContentModerationInput(ContentModerationProtocolOpenAIChat, body)
 
 	require.Equal(t, "latest user", input.Text)
-	require.Equal(t, []string{"https://example.com/a.png"}, input.Images)
+	require.Equal(t, []string{"HTTPS://example.com/a.png"}, input.Images)
 	require.NotContains(t, input.Text, "old user")
 	require.NotContains(t, input.Text, "system prompt")
 }
@@ -1022,7 +1410,9 @@ func TestContentModerationCheck_OpenAIResponsesRecordsNonHitForCodexPayload(t *t
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{
 		"model":"gpt-5.5",
@@ -1086,7 +1476,9 @@ func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *t
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{
 		"model":"gpt-5.5",
@@ -1155,7 +1547,9 @@ func TestContentModerationStatusTracksPreBlockSyncMetrics(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	for _, prompt := range []string{"blocked prompt", "clean prompt"} {
 		_, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -1205,7 +1599,9 @@ func TestContentModerationStatusTracksPreBlockAPIKeyLoad(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	for idx := 0; idx < 4; idx++ {
 		_, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -1250,7 +1646,9 @@ func TestContentModerationStatusTracksPreBlockLocalBlocks(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	for _, prompt := range []string{"blocked prompt", "clean prompt"} {
 		_, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -1298,7 +1696,8 @@ func TestContentModerationCallModeration_400DoesNotFreezeAPIKey(t *testing.T) {
 	cfg.BaseURL = server.URL
 	cfg.APIKeys = []string{"sk-test"}
 	cfg.RetryCount = 5
-	svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil)
+	svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	_, err := svc.callModeration(context.Background(), cfg, "hello")
 
@@ -1337,7 +1736,8 @@ func TestContentModerationCallModeration_FreezesByHTTPStatus(t *testing.T) {
 			cfg.BaseURL = server.URL
 			cfg.APIKeys = []string{"sk-test"}
 			cfg.RetryCount = 0
-			svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil)
+			svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+			t.Cleanup(func() { svc.Close() })
 
 			_, err := svc.callModeration(context.Background(), cfg, "hello")
 
@@ -1369,7 +1769,9 @@ func TestContentModerationTestAPIKeys_400DoesNotFreezeAPIKey(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 	result, err := svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{
 		APIKeys: []string{"sk-test"},
 		BaseURL: server.URL,
@@ -1414,7 +1816,9 @@ func TestContentModerationCheck_PreHashUsesRedisHashCache(t *testing.T) {
 		userRepo,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
 		UserID:   1001,
@@ -1481,7 +1885,9 @@ func TestContentModerationCheck_HashBlockLogsDoNotIncreaseNextViolationCount(t *
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
 		UserID:   userID,
@@ -1512,9 +1918,10 @@ func TestContentModerationAutoBanSkipsAdminAccount(t *testing.T) {
 	userID := int64(1001)
 	repo := &contentModerationTestRepo{}
 	require.NoError(t, repo.CreateLog(context.Background(), newContentModerationFlaggedLog(userID)))
-	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Roles: []string{RoleSuperAdmin}, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, invalidator, nil)
+	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1541,7 +1948,8 @@ func TestContentModerationAutoBanDisablesRegularUserAtThreshold(t *testing.T) {
 	require.NoError(t, repo.CreateLog(context.Background(), newContentModerationFlaggedLog(userID)))
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleUser, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, invalidator, nil)
+	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1560,9 +1968,10 @@ func TestContentModerationAdminBelowBanThresholdRecordsViolationOnly(t *testing.
 
 	userID := int64(1001)
 	repo := &contentModerationTestRepo{}
-	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Roles: []string{RoleSuperAdmin}, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, invalidator, nil)
+	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1621,7 +2030,9 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	body := []byte(`{"messages":[{"role":"user","content":"repeat blocked prompt"}]}`)
 	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
@@ -1734,7 +2145,9 @@ func TestContentModerationCheck_AsyncFlaggedWritesRedisHashCache(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
+	t.Cleanup(func() { svc.Close() })
 
 	decision := svc.checkSync(context.Background(), ContentModerationCheckInput{
 		Protocol: ContentModerationProtocolOpenAIChat,
@@ -1771,7 +2184,8 @@ func TestContentModerationUnbanUser_ActivatesUserAndInvalidatesAuthCache(t *test
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1001, Email: "user@example.com", Status: StatusDisabled}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, invalidator, nil)
+	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	result, err := svc.UnbanUser(context.Background(), 1001)
 
@@ -1787,7 +2201,8 @@ func TestContentModerationUnbanUser_ActiveUserOnlyInvalidatesAuthCache(t *testin
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1001, Email: "user@example.com", Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, invalidator, nil)
+	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	result, err := svc.UnbanUser(context.Background(), 1001)
 
@@ -1803,7 +2218,8 @@ func contentModerationIntPtr(v int) *int {
 
 func TestContentModerationUpdateConfig_CyberPolicyExcludeFromBanCount(t *testing.T) {
 	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
-	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil)
+	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { svc.Close() })
 
 	// 默认值必须是 false（计入，保持现状）
 	view, err := svc.GetConfig(context.Background())
@@ -1840,4 +2256,73 @@ func TestContentModerationUpdateConfig_CyberPolicyExcludeFromBanCount(t *testing
 	})
 	require.NoError(t, err)
 	require.False(t, view.CyberPolicyExcludeFromBanCount)
+}
+
+func TestContentModerationOpenAIPreBlockFailsClosedOnStructured422(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        string
+		wantMessage string
+	}{
+		{name: "unusable upstream result", code: "unusable_upstream_result", wantMessage: "content moderation upstream returned an unusable result"},
+		{name: "unsupported input", code: "unsupported_input", wantMessage: "content moderation upstream cannot inspect the request input"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]string{"code": test.code, "message": "redacted test error"},
+				}))
+			}))
+			defer server.Close()
+
+			cfg := defaultContentModerationConfig()
+			cfg.Enabled = true
+			cfg.Mode = ContentModerationModePreBlock
+			cfg.UpstreamProtocol = ContentModerationUpstreamProtocolOpenAIModerations
+			cfg.BaseURL = server.URL
+			cfg.Model = "deepseek-v4-flash"
+			cfg.APIKeys = []string{"adapter-a", "adapter-b", "adapter-c"}
+			cfg.RetryCount = 2
+			rawCfg, err := json.Marshal(cfg)
+			require.NoError(t, err)
+
+			svc := NewContentModerationService(
+				&contentModerationTestSettingRepo{values: map[string]string{
+					SettingKeyRiskControlEnabled:      "true",
+					SettingKeyContentModerationConfig: string(rawCfg),
+				}},
+				&contentModerationTestRepo{},
+				&contentModerationTestHashCache{},
+				nil, nil, nil, nil, nil,
+			)
+			t.Cleanup(func() { svc.Close() })
+
+			decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+				UserID:   1001,
+				Endpoint: "/v1/chat/completions",
+				Provider: "openai",
+				Model:    "gpt-test",
+				Protocol: ContentModerationProtocolOpenAIChat,
+				Body:     []byte(`{"messages":[{"role":"user","content":"classify this"}]}`),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, decision)
+			require.False(t, decision.Allowed)
+			require.True(t, decision.Blocked)
+			require.Equal(t, http.StatusServiceUnavailable, decision.StatusCode)
+			require.Equal(t, ContentModerationActionError, decision.Action)
+			require.Equal(t, test.wantMessage, decision.Message)
+			require.Equal(t, int32(1), requests.Load(), "credential-independent 422 must not rotate keys")
+
+			statuses := svc.apiKeyStatuses(cfg.APIKeys)
+			require.Zero(t, statuses[0].FailureCount)
+			require.Nil(t, statuses[0].FrozenUntil)
+			require.Empty(t, statuses[0].LastError)
+		})
+	}
 }

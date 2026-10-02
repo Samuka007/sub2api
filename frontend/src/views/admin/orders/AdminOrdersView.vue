@@ -45,7 +45,7 @@
               <Icon name="refresh" size="sm" />
               {{ t('payment.admin.retryRefund') }}
             </button>
-            <button v-else-if="row.status === 'REFUND_PENDING'" :disabled="refundQueryingIds.has(row.id)" @click="handleQueryRefund(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-orange-600 hover:bg-orange-50 disabled:opacity-60 dark:text-orange-400 dark:hover:bg-orange-900/20">
+            <button v-else-if="row.status === 'REFUND_PENDING' || row.status === 'REFUNDING'" :disabled="refundQueryingIds.has(row.id)" @click="handleQueryRefund(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-orange-600 hover:bg-orange-50 disabled:opacity-60 dark:text-orange-400 dark:hover:bg-orange-900/20">
               <Icon name="refresh" size="sm" :class="refundQueryingIds.has(row.id) ? 'animate-spin' : ''" />
               {{ t('payment.admin.queryRefundStatus') }}
             </button>
@@ -111,7 +111,7 @@
       </div>
     </BaseDialog>
 
-    <AdminRefundDialog :show="showRefundDialog" :order="selectedOrder" :submitting="refundSubmitting" @confirm="handleRefund" @cancel="showRefundDialog = false" />
+    <AdminRefundDialog :show="showRefundDialog" :order="selectedOrder" :submitting="refundSubmitting" :require-force="refundRequireForce" :warning="refundWarning" @confirm="handleRefund" @cancel="closeRefundDialog" />
   </AppLayout>
 </template>
 
@@ -153,6 +153,8 @@ const selectedOrder = ref<PaymentOrder | null>(null)
 const showDetailDialog = ref(false)
 const showRefundDialog = ref(false)
 const refundSubmitting = ref(false)
+const refundRequireForce = ref(false)
+const refundWarning = ref('')
 const refundQueryingIds = ref(new Set<number>())
 const orderAuditLogs = ref<AuditLog[]>([])
 const creditedAmountSymbol = currencySymbol('USD')
@@ -235,27 +237,46 @@ async function handleRetryOrder(order: PaymentOrder) {
   catch (err: unknown) { appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error'))) }
 }
 
-function openRefundDialog(order: PaymentOrder) { selectedOrder.value = order; showRefundDialog.value = true }
-
-function isRefundPendingWarning(warning: string | undefined): boolean {
-  return /pending|处理中|待/.test(String(warning || '').toLowerCase())
+function openRefundDialog(order: PaymentOrder) {
+  selectedOrder.value = order
+  refundRequireForce.value = false
+  refundWarning.value = ''
+  showRefundDialog.value = true
 }
+
+function closeRefundDialog() {
+  showRefundDialog.value = false
+  refundRequireForce.value = false
+  refundWarning.value = ''
+}
+
 
 async function handleRefund(data: { amount: number; reason: string; deduct_balance: boolean; force: boolean }) {
   if (!selectedOrder.value) return
   refundSubmitting.value = true
   try {
-    const res = await adminPaymentAPI.refundOrder(selectedOrder.value.id, { amount: data.amount, reason: data.reason, deduct_balance: data.deduct_balance, force: data.force })
+    const resumePending = selectedOrder.value.status === 'REFUNDING' || selectedOrder.value.status === 'REFUND_PENDING'
+    const res = resumePending
+      ? await adminPaymentAPI.queryRefund(selectedOrder.value.id, { force: data.force })
+      : await adminPaymentAPI.refundOrder(selectedOrder.value.id, { amount: data.amount, reason: data.reason, deduct_balance: data.deduct_balance, force: data.force })
     if (res.data.success) {
       appStore.showSuccess(t('payment.admin.refundSuccess'))
-      showRefundDialog.value = false
+      closeRefundDialog()
       loadOrders()
       return
     }
-    if (isRefundPendingWarning(res.data.warning)) {
+    if (res.data.state === 'pending') {
       appStore.showSuccess(t('payment.admin.refundPending'))
-      showRefundDialog.value = false
+      closeRefundDialog()
       loadOrders()
+      return
+    }
+    if (res.data.require_force) {
+      // Backend needs an explicit force confirmation (e.g. the user spent their
+      // balance after requesting the refund). Keep the dialog open and surface
+      // the force checkbox instead of dropping the admin back to the list.
+      refundRequireForce.value = true
+      refundWarning.value = res.data.warning || ''
       return
     }
     appStore.showError(res.data.warning || t('common.error'))
@@ -269,7 +290,12 @@ async function handleQueryRefund(order: PaymentOrder) {
     const res = await adminPaymentAPI.queryRefund(order.id)
     if (res.data.success) {
       appStore.showSuccess(t('payment.admin.refundSuccess'))
-    } else if (isRefundPendingWarning(res.data.warning)) {
+    } else if (res.data.require_force) {
+      selectedOrder.value = order
+      refundRequireForce.value = true
+      refundWarning.value = res.data.warning || ''
+      showRefundDialog.value = true
+    } else if (res.data.state === 'pending') {
       appStore.showSuccess(t('payment.admin.refundPending'))
     } else {
       appStore.showError(res.data.warning || t('common.error'))

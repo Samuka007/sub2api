@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,22 +32,89 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestCalls    int
+	recentCalls    int
+	downloadCalls  int
+	checksumCalls  int
 }
 
 func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
+	s.latestCalls++
 	return s.release, nil
 }
 
 func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+	s.recentCalls++
 	return s.recentReleases, s.recentErr
 }
 
 func (s *updateServiceGitHubClientStub) DownloadFile(context.Context, string, string, int64) error {
+	s.downloadCalls++
 	panic("DownloadFile should not be called when no update is available")
 }
 
 func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, string) ([]byte, error) {
+	s.checksumCalls++
 	panic("FetchChecksumFile should not be called when no update is available")
+}
+
+func TestUpdateServiceRejectsOfficialBinaryChangesForNonReleaseBuilds(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(*UpdateService) error
+	}{
+		{name: "update", run: func(svc *UpdateService) error {
+			return svc.PerformUpdate(context.Background())
+		}},
+		{name: "version rollback", run: func(svc *UpdateService) error {
+			return svc.RollbackToVersion(context.Background(), "0.1.163")
+		}},
+	}
+
+	for _, buildType := range []string{"source", "internal"} {
+		for _, operation := range operations {
+			t.Run(buildType+"/"+operation.name, func(t *testing.T) {
+				client := &updateServiceGitHubClientStub{}
+				svc := NewUpdateService(
+					&updateServiceCacheStub{},
+					client,
+					"0.1.164+company.1",
+					buildType,
+				)
+
+				err := operation.run(svc)
+
+				require.ErrorIs(t, err, ErrOfficialUpdateUnsupported)
+				require.Equal(t, 409, infraerrors.Code(err))
+				require.Equal(t, "OFFICIAL_UPDATE_UNSUPPORTED", infraerrors.Reason(err))
+				require.Zero(t, client.latestCalls)
+				require.Zero(t, client.recentCalls)
+				require.Zero(t, client.downloadCalls)
+				require.Zero(t, client.checksumCalls)
+			})
+		}
+	}
+}
+
+func TestCompareVersionsUsesSemanticVersioning(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		latest  string
+		want    int
+	}{
+		{name: "company metadata matches upstream", current: "0.1.164+company.1", latest: "0.1.164", want: 0},
+		{name: "company build is newer than prior upstream", current: "0.1.164+company.1", latest: "0.1.163", want: 1},
+		{name: "company build is older than next upstream", current: "0.1.164+company.1", latest: "0.1.165", want: -1},
+		{name: "mixed v prefix", current: "v0.1.164", latest: "0.1.164", want: 0},
+		{name: "prerelease is older", current: "0.1.164-rc.1", latest: "v0.1.164", want: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, compareVersions(tt.current, tt.latest))
+		})
+	}
 }
 
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {

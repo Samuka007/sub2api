@@ -2,12 +2,13 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/smartwalle/alipay/v3"
@@ -36,6 +37,12 @@ var (
 	}
 	alipayTradePagePay = func(client *alipay.Client, param alipay.TradePagePay) (*url.URL, error) {
 		return client.TradePagePay(param)
+	}
+	alipayTradeRefund = func(ctx context.Context, client *alipay.Client, param alipay.TradeRefund) (*alipay.TradeRefundRsp, error) {
+		return client.TradeRefund(ctx, param)
+	}
+	alipayTradeFastPayRefundQuery = func(ctx context.Context, client *alipay.Client, param alipay.TradeFastPayRefundQuery) (*alipay.TradeFastPayRefundQueryRsp, error) {
+		return client.TradeFastPayRefundQuery(ctx, param)
 	}
 )
 
@@ -104,7 +111,9 @@ func (a *Alipay) MerchantIdentityMetadata() map[string]string {
 }
 
 // CreatePayment creates an Alipay payment using the following routing:
-//   - Mobile (H5): alipay.trade.wap.pay — browser redirect into Alipay.
+//   - Mobile (H5), default: alipay.trade.wap.pay — browser redirect into Alipay.
+//   - Mobile with AlipayMobilePrecreate: alipay.trade.precreate — return the
+//     dynamic QR payload so the frontend can open it through the Alipay app.
 //   - Desktop, default: prefer alipay.trade.precreate (FACE_TO_FACE_PAYMENT) to
 //     get a scannable QR payload. If precreate is unavailable for the merchant,
 //     fall back to alipay.trade.page.pay and expose pay_url only — the frontend
@@ -131,6 +140,9 @@ func (a *Alipay) CreatePayment(ctx context.Context, req payment.CreatePaymentReq
 	}
 
 	if req.IsMobile {
+		if req.AlipayMobilePrecreate {
+			return a.createPrecreateTrade(ctx, client, req, notifyURL)
+		}
 		return a.createWapTrade(client, req, notifyURL, returnURL)
 	}
 	return a.createDesktopTrade(ctx, client, req, notifyURL, returnURL)
@@ -333,14 +345,18 @@ func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		return nil, err
 	}
 
-	result, err := client.TradeRefund(ctx, alipay.TradeRefund{
+	requestID := alipayRefundRequestID(req.OrderID, req.Amount)
+	result, err := alipayTradeRefund(ctx, client, alipay.TradeRefund{
 		OutTradeNo:   req.OrderID,
 		RefundAmount: req.Amount,
 		RefundReason: req.Reason,
-		OutRequestNo: fmt.Sprintf("%s-refund-%d", req.OrderID, time.Now().UnixNano()),
+		OutRequestNo: requestID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("alipay TradeRefund: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("alipay TradeRefund returned an empty response")
 	}
 
 	refundStatus := payment.ProviderStatusPending
@@ -348,15 +364,41 @@ func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		refundStatus = payment.ProviderStatusSuccess
 	}
 
-	refundID := result.TradeNo
-	if refundID == "" {
-		refundID = req.OrderID + alipayRefundSuffix
-	}
+	refundID := requestID
 
 	return &payment.RefundResponse{
 		RefundID: refundID,
 		Status:   refundStatus,
 	}, nil
+}
+
+// QueryRefund resolves an earlier Alipay refund by its deterministic request ID.
+func (a *Alipay) QueryRefund(ctx context.Context, req payment.RefundQueryRequest) (*payment.RefundResponse, error) {
+	client, err := a.getClient()
+	if err != nil {
+		return nil, err
+	}
+	requestID := alipayRefundRequestID(req.OrderID, req.Amount)
+	result, err := alipayTradeFastPayRefundQuery(ctx, client, alipay.TradeFastPayRefundQuery{
+		OutTradeNo:   req.OrderID,
+		OutRequestNo: requestID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("alipay TradeFastPayRefundQuery: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("alipay TradeFastPayRefundQuery returned an empty response")
+	}
+	status := payment.ProviderStatusFailed
+	if result.IsSuccess() && strings.EqualFold(strings.TrimSpace(result.RefundStatus), "REFUND_SUCCESS") {
+		status = payment.ProviderStatusSuccess
+	}
+	return &payment.RefundResponse{RefundID: requestID, Status: status}, nil
+}
+
+func alipayRefundRequestID(orderID, amount string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(orderID) + "\x00" + strings.TrimSpace(amount)))
+	return "sub2-refund-" + hex.EncodeToString(digest[:16])
 }
 
 // CancelPayment closes a pending trade on Alipay.

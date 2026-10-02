@@ -15,15 +15,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"golang.org/x/mod/semver"
 )
 
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
+	ErrOfficialUpdateUnsupported = infraerrors.Conflict("OFFICIAL_UPDATE_UNSUPPORTED", "official binary updates are disabled for this build")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
 )
 
@@ -64,7 +65,7 @@ type UpdateService struct {
 	cache          UpdateCache
 	githubClient   GitHubReleaseClient
 	currentVersion string
-	buildType      string // "source" for manual builds, "release" for CI builds
+	buildType      string // "source", "internal", or "release"
 }
 
 // NewUpdateService creates a new UpdateService
@@ -85,7 +86,7 @@ type UpdateInfo struct {
 	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	BuildType      string       `json:"build_type"` // "source", "internal", or "release"
 }
 
 // ReleaseInfo contains GitHub release details
@@ -163,6 +164,10 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.buildType != "release" {
+		return ErrOfficialUpdateUnsupported
+	}
+
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -327,6 +332,10 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.buildType != "release" {
+		return ErrOfficialUpdateUnsupported
+	}
+
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -639,28 +648,13 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 
 // compareVersions compares two semantic versions
 func compareVersions(current, latest string) int {
-	currentParts := parseVersion(current)
-	latestParts := parseVersion(latest)
-
-	for i := 0; i < 3; i++ {
-		if currentParts[i] < latestParts[i] {
-			return -1
-		}
-		if currentParts[i] > latestParts[i] {
-			return 1
-		}
-	}
-	return 0
+	return semver.Compare(normalizeUpdateVersion(current), normalizeUpdateVersion(latest))
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
-		if parsed, err := strconv.Atoi(parts[i]); err == nil {
-			result[i] = parsed
-		}
+func normalizeUpdateVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if !strings.HasPrefix(version, "v") {
+		version = "v" + version
 	}
-	return result
+	return version
 }

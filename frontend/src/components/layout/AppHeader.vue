@@ -1,6 +1,14 @@
 <template>
-  <header class="glass sticky top-0 z-30 border-b border-gray-200/50 dark:border-dark-700/50">
-    <div class="flex h-16 items-center justify-between gap-2 px-2 sm:px-4 md:px-6">
+  <header
+    class="sticky top-0 z-30 border-b"
+    :class="variant === 'user'
+      ? 'user-console-header border-[#dde3e1] bg-white/95 dark:border-[#253237] dark:bg-[#111b1f]/95'
+      : 'glass border-gray-200/50 dark:border-dark-700/50'"
+  >
+    <div
+      class="flex items-center justify-between gap-2 px-2 sm:px-4 md:px-6"
+      :class="variant === 'user' ? 'h-[68px]' : 'h-16'"
+    >
       <!-- Left: Mobile Menu Toggle + Page Title -->
       <div class="flex shrink-0 items-center gap-2 sm:gap-4">
         <button
@@ -38,16 +46,31 @@
           <span class="hidden sm:inline">{{ t('nav.docs') }}</span>
         </a>
 
+        <!-- Model Plaza Entry (icon only below sm) -->
+        <router-link
+          v-if="user && modelPlazaEnabled"
+          :to="{ path: '/model-plaza', query: { embedded: '1' } }"
+          :title="t('nav.modelPlaza')"
+          :aria-label="t('nav.modelPlaza')"
+          class="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-dark-400 dark:hover:bg-dark-800 dark:hover:text-white"
+        >
+          <Icon name="grid" size="sm" />
+          <span class="hidden sm:inline">{{ t('nav.modelPlaza') }}</span>
+        </router-link>
+
         <!-- Language Switcher -->
         <LocaleSwitcher />
 
-        <!-- Subscription Progress (for users with active subscriptions) -->
-        <SubscriptionProgressMini v-if="user" />
+        <!-- Subscription Progress (for users with active subscriptions; not mounted at all when the feature is off) -->
+        <SubscriptionProgressMini v-if="user && subscriptionFeatureEnabled" />
 
         <!-- Balance Display -->
         <div
           v-if="user"
-          class="group relative hidden items-center gap-2 rounded-xl bg-primary-50 px-3 py-1.5 dark:bg-primary-900/20 sm:flex"
+          class="group relative hidden items-center gap-2 px-3 py-1.5 sm:flex"
+          :class="variant === 'user'
+            ? 'rounded-md border border-[#dbe3e0] bg-[#f7faf9] dark:border-[#2c3b40] dark:bg-[#182428]'
+            : 'rounded-xl bg-primary-50 dark:bg-primary-900/20'"
         >
           <svg
             class="h-4 w-4 text-primary-600 dark:text-primary-400"
@@ -95,10 +118,14 @@
         <div v-if="user" class="relative" ref="dropdownRef">
           <button
             @click="toggleDropdown"
-            class="flex items-center gap-2 rounded-xl p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
+            class="flex items-center gap-2 p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
+            :class="variant === 'user' ? 'rounded-md' : 'rounded-xl'"
             :aria-label="t('common.userMenu')"
           >
-            <div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-medium text-white shadow-sm">
+            <div
+              class="flex h-8 w-8 items-center justify-center overflow-hidden bg-primary-600 text-sm font-medium text-white shadow-sm"
+              :class="variant === 'user' ? 'rounded-md' : 'rounded-xl bg-gradient-to-br from-primary-500 to-primary-600'"
+            >
               <img
                 v-if="avatarUrl"
                 :src="avatarUrl"
@@ -111,8 +138,8 @@
               <div class="text-sm font-medium text-gray-900 dark:text-white">
                 {{ displayName }}
               </div>
-              <div class="text-xs capitalize text-gray-500 dark:text-dark-400">
-                {{ user.role }}
+              <div class="text-xs text-gray-500 dark:text-dark-400">
+                {{ t('admin.users.roles.' + user.role) }}
               </div>
             </div>
             <Icon name="chevronDown" size="sm" class="hidden text-gray-400 md:block" />
@@ -250,6 +277,9 @@ import SubscriptionProgressMini from '@/components/common/SubscriptionProgressMi
 import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
+import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
+import { resolveRouteMetaKeys } from '@/router/title'
+import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 
 const router = useRouter()
 const route = useRoute()
@@ -259,11 +289,18 @@ const authStore = useAuthStore()
 const adminSettingsStore = useAdminSettingsStore()
 const onboardingStore = useOnboardingStore()
 
+withDefaults(defineProps<{
+  variant?: 'admin' | 'user'
+}>(), {
+  variant: 'admin'
+})
+
 const user = computed(() => authStore.user)
 const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
 const contactInfo = computed(() => appStore.contactInfo)
 const docUrl = computed(() => sanitizeUrl(appStore.docUrl))
+const modelPlazaEnabled = computed(() => isFeatureFlagEnabled(FeatureFlags.modelPlaza))
 const avatarUrl = computed(() => user.value?.avatar_url?.trim() || '')
 const availableBalance = computed(() => Number(user.value?.balance || 0))
 const frozenBalance = computed(() => Number(user.value?.frozen_balance || 0))
@@ -275,7 +312,7 @@ const balanceFrozenLabel = computed(() => `${balanceFrozenText.value} ${formatHe
 
 // 只在标准模式的管理员下显示新手引导按钮
 const showOnboardingButton = computed(() => {
-  return !authStore.isSimpleMode && user.value?.role === 'admin'
+  return !authStore.isSimpleMode && authStore.isAdmin
 })
 
 const userInitials = computed(() => {
@@ -297,6 +334,14 @@ const displayName = computed(() => {
   return user.value.username || user.value.email?.split('@')[0] || ''
 })
 
+// 订阅功能关闭时不挂载顶栏订阅徽章（组件 onMounted 会拉取订阅接口）。
+const subscriptionFeatureEnabled = computed(() => isFeatureFlagEnabled(FeatureFlags.subscription))
+
+// /purchase 的标题/描述随站点计费模式切换，与 document.title 共用同一解析。
+const routeMetaKeys = computed(() => resolveRouteMetaKeys(route, {
+  billingMode: resolveSiteBillingMode(appStore.cachedPublicSettings),
+}))
+
 const pageTitle = computed(() => {
   // For custom pages, use the menu item's label instead of generic "自定义页面"
   if (route.name === 'CustomPage') {
@@ -306,7 +351,7 @@ const pageTitle = computed(() => {
       ?? (authStore.isAdmin ? adminSettingsStore.customMenuItems.find((item) => item.id === id) : undefined)
     if (menuItem?.label) return menuItem.label
   }
-  const titleKey = route.meta.titleKey as string
+  const titleKey = routeMetaKeys.value.titleKey
   if (titleKey) {
     return t(titleKey)
   }
@@ -314,7 +359,7 @@ const pageTitle = computed(() => {
 })
 
 const pageDescription = computed(() => {
-  const descKey = route.meta.descriptionKey as string
+  const descKey = routeMetaKeys.value.descriptionKey
   if (descKey) {
     return t(descKey)
   }
@@ -379,5 +424,16 @@ onBeforeUnmount(() => {
 .dropdown-leave-to {
   opacity: 0;
   transform: scale(0.95) translateY(-4px);
+}
+
+.user-console-header {
+  backdrop-filter: blur(12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropdown-enter-active,
+  .dropdown-leave-active {
+    transition: none;
+  }
 }
 </style>

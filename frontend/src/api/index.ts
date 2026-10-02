@@ -19,8 +19,17 @@ export { userGroupsAPI } from './groups'
 export { userChannelsAPI } from './channels'
 export * as batchImageAPI from './batchImage'
 export { totpAPI } from './totp'
+export { passkeyAPI, type PasskeyCredentialSummary } from './passkey'
 export { default as announcementsAPI } from './announcements'
 export { channelMonitorUserAPI } from './channelMonitor'
+export { modelIqAPI } from './modelIq'
+export type {
+  ModelIqComparison,
+  ModelIqCurrentResponse,
+  ModelIqData,
+  ModelIqDayResult,
+  ModelIqLatestResult,
+} from './modelIq'
 
 // Admin APIs
 export { adminAPI } from './admin'

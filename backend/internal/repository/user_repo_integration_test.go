@@ -4,6 +4,8 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +63,44 @@ func (s *UserRepoSuite) mustCreateUser(u *service.User) *service.User {
 
 	s.Require().NoError(s.repo.Create(s.ctx, u), "create user")
 	return u
+}
+
+func (s *UserRepoSuite) TestCreateWithEmailAliasGuardAndDomainLimitConcurrent() {
+	domain := "race-" + strings.ToLower(strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "")) + ".example"
+	users := []*service.User{
+		{Email: "first@" + domain, PasswordHash: "hash", Role: service.RoleUser, Status: service.StatusActive},
+		{Email: "second@" + domain, PasswordHash: "hash", Role: service.RoleUser, Status: service.StatusActive},
+	}
+
+	errs := make(chan error, len(users))
+	var wg sync.WaitGroup
+	for _, user := range users {
+		wg.Add(1)
+		go func(user *service.User) {
+			defer wg.Done()
+			errs <- s.repo.CreateWithEmailAliasGuardAndDomainLimit(s.ctx, user, domain)
+		}(user)
+	}
+	wg.Wait()
+	close(errs)
+
+	var success, limited int
+	for err := range errs {
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, service.ErrEmailDomainRegistrationLimit):
+			limited++
+		default:
+			s.Require().NoError(err)
+		}
+	}
+	s.Require().Equal(1, success)
+	s.Require().Equal(1, limited)
+
+	count, err := s.repo.CountUsersByEmailDomain(s.ctx, domain)
+	s.Require().NoError(err)
+	s.Require().Equal(1, count)
 }
 
 func (s *UserRepoSuite) mustCreateGroup(name string) *service.Group {
@@ -154,7 +194,7 @@ func (s *UserRepoSuite) TestUpdate() {
 	got, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err)
 	got.Username = "updated"
-	s.Require().NoError(s.repo.Update(s.ctx, got), "Update")
+	s.Require().NoError(s.repo.Update(s.ctx, got, service.UserUpdateFields{Username: true}), "Update")
 
 	updated, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err, "GetByID after update")
@@ -232,7 +272,7 @@ func (s *UserRepoSuite) TestUpdateIgnoresNoRowsFromConflictingEmailIdentityUpser
 	got, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err)
 	got.Username = "updated"
-	s.Require().NoError(s.repo.Update(s.ctx, got), "Update should tolerate ON CONFLICT DO NOTHING returning no rows")
+	s.Require().NoError(s.repo.Update(s.ctx, got, service.UserUpdateFields{Username: true}), "Update should tolerate ON CONFLICT DO NOTHING returning no rows")
 
 	updated, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err)
@@ -479,6 +519,71 @@ func (s *UserRepoSuite) TestDeductBalance_AllowsOverdraft() {
 	s.Require().InDelta(-5.0, got.Balance, 1e-6, "Balance should be -5.0 after overdraft")
 }
 
+func (s *UserRepoSuite) TestRefundBalanceReservation_ReleaseAndCapture() {
+	for _, tc := range []struct {
+		name        string
+		balance     float64
+		requested   float64
+		capture     bool
+		wantReserve float64
+		wantBalance float64
+	}{
+		{name: "release restores balance", balance: 10, requested: 7, wantReserve: 7, wantBalance: 10},
+		{name: "capture consumes clamped balance", balance: 5, requested: 10, capture: true, wantReserve: 5, wantBalance: 0},
+	} {
+		s.Run(tc.name, func() {
+			user := s.mustCreateUser(&service.User{Email: "refund-reserve-" + strings.ReplaceAll(tc.name, " ", "-") + "@test.com", Balance: tc.balance})
+			reserved, err := s.repo.ReserveRefundBalance(s.ctx, user.ID, tc.requested)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.wantReserve, reserved, 1e-6)
+			reservedUser, err := s.repo.GetByID(s.ctx, user.ID)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.balance-tc.wantReserve, reservedUser.Balance, 1e-6)
+			s.Require().InDelta(tc.wantReserve, reservedUser.FrozenBalance, 1e-6)
+
+			if tc.capture {
+				err = s.repo.CaptureRefundBalance(s.ctx, user.ID, reserved)
+			} else {
+				err = s.repo.ReleaseRefundBalance(s.ctx, user.ID, reserved)
+			}
+			s.Require().NoError(err)
+			finalUser, err := s.repo.GetByID(s.ctx, user.ID)
+			s.Require().NoError(err)
+			s.Require().InDelta(tc.wantBalance, finalUser.Balance, 1e-6)
+			s.Require().Zero(finalUser.FrozenBalance)
+		})
+	}
+}
+
+func (s *UserRepoSuite) TestRefundBalanceReservation_RollsBackWithCallerTransaction() {
+	user := s.mustCreateUser(&service.User{Email: "refund-reserve-rollback@test.com", Balance: 10})
+	tx, err := s.client.Tx(s.ctx)
+	s.Require().NoError(err)
+	txCtx := dbent.NewTxContext(s.ctx, tx)
+	reserved, err := s.repo.ReserveRefundBalance(txCtx, user.ID, 7)
+	s.Require().NoError(err)
+	s.Require().InDelta(7, reserved, 1e-6)
+	s.Require().NoError(tx.Rollback())
+
+	got, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	s.Require().InDelta(10, got.Balance, 1e-6)
+	s.Require().Zero(got.FrozenBalance)
+}
+
+func (s *UserRepoSuite) TestRefundBalanceReservation_RejectsOverCapture() {
+	user := s.mustCreateUser(&service.User{Email: "refund-reserve-over-capture@test.com", Balance: 10})
+	reserved, err := s.repo.ReserveRefundBalance(s.ctx, user.ID, 4)
+	s.Require().NoError(err)
+	s.Require().InDelta(4, reserved, 1e-6)
+	s.Require().Error(s.repo.CaptureRefundBalance(s.ctx, user.ID, 5))
+
+	got, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	s.Require().InDelta(6, got.Balance, 1e-6)
+	s.Require().InDelta(4, got.FrozenBalance, 1e-6)
+}
+
 // --- Concurrency ---
 
 func (s *UserRepoSuite) TestUpdateConcurrency() {
@@ -658,7 +763,7 @@ func (s *UserRepoSuite) TestCRUD_And_Filters_And_AtomicUpdates() {
 	s.Require().Equal(user2.ID, gotByEmail.ID, "GetByEmail ID mismatch")
 
 	got.Username = "Alice2"
-	s.Require().NoError(s.repo.Update(s.ctx, got), "Update")
+	s.Require().NoError(s.repo.Update(s.ctx, got, service.UserUpdateFields{Username: true}), "Update")
 	got2, err := s.repo.GetByID(s.ctx, user1.ID)
 	s.Require().NoError(err, "GetByID after update")
 	s.Require().Equal("Alice2", got2.Username, "Update did not persist")
