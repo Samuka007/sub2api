@@ -819,7 +819,7 @@ func TestOpenAIQuotaAgentIdentityReceiptMismatchStopsBeforeUpstream(t *testing.T
 		upstreamCalls++
 	}))
 	defer server.Close()
-	service := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(server))
+	service := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(server), nil)
 	ctx, receipt := quotaRecoveryCredentialProbeContext(t, account, account)
 
 	_, err := service.QueryUsageStrict(ctx, account.ID)
@@ -856,7 +856,7 @@ func TestOpenAIQuotaAgentIdentityReceiptRejectsReauthorizationAfterPrepare(t *te
 		upstreamCalls++
 	}))
 	defer server.Close()
-	service := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(server))
+	service := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(server), nil)
 	ctx, receipt := quotaRecoveryCredentialProbeContext(t, account, account)
 
 	_, err := service.QueryUsageStrict(ctx, account.ID)

@@ -101,7 +101,7 @@ func TestModelTraceChatConversionSSEComplete(t *testing.T) {
 		``,
 	}, "\n")))}
 
-	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now(), false)
+	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "hello")
@@ -128,7 +128,7 @@ func TestModelTraceChatConversionSSEUpstreamError(t *testing.T) {
 		err: upstreamErr,
 	}}
 
-	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now(), false)
+	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now())
 	require.NoError(t, err, "existing Chat response semantics stay fail-open after partial output")
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "partial")
@@ -147,7 +147,7 @@ func TestModelTraceChatConversionSSECancelled(t *testing.T) {
 	c.Request = c.Request.WithContext(cancelled)
 	resp := &http.Response{Header: http.Header{"x-request-id": []string{"rid_chat_cancelled"}}, Body: io.NopCloser(strings.NewReader(""))}
 
-	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now(), false)
+	result, err := (&GatewayService{}).handleCCStreamingFromAnthropic(resp, c, "gpt-client", "claude-test", nil, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, capture.started)

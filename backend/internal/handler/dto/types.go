@@ -218,6 +218,7 @@ type Account struct {
 	Extra                   map[string]any                    `json:"extra"`
 	OllamaCloudUsage        *service.OllamaCloudUsageState    `json:"ollama_cloud_usage,omitempty"`
 	CodexTurnTickets        []service.OpenAICodexTicketStatus `json:"codex_turn_tickets,omitempty"`
+	OpenCodeGoUsage         *service.OpenCodeGoUsageState     `json:"opencode_go_usage,omitempty"`
 	ProxyID                 *int64                            `json:"proxy_id"`
 	ProxyFallbackOriginID   *int64                            `json:"proxy_fallback_origin_id"`
 	ProxyFallbackOriginName *string                           `json:"proxy_fallback_origin_name,omitempty"`
@@ -343,6 +344,7 @@ type AccountListItem struct {
 	Extra             map[string]any                    `json:"extra,omitempty"`
 	OllamaCloudUsage  *service.OllamaCloudUsageState    `json:"ollama_cloud_usage,omitempty"`
 	CodexTurnTickets  []service.OpenAICodexTicketStatus `json:"codex_turn_tickets,omitempty"`
+	OpenCodeGoUsage   *service.OpenCodeGoUsageState     `json:"opencode_go_usage,omitempty"`
 
 	ProxyID                 *int64     `json:"proxy_id"`
 	ProxyFallbackOriginID   *int64     `json:"proxy_fallback_origin_id"`

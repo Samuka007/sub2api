@@ -279,6 +279,8 @@ func RegisterGatewayRoutes(
 
 		// Model execution candidates.
 		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, messagesHandler)
+		// System One carries only JSON text, so it uses the text body limit.
+		gateway.POST("/systemone", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, textBodyLimit, h.Gateway.SystemOne)
 		gateway.POST("/live", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, h.OpenAIGateway.Live)
 		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, responsesHandler)
 		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, groupModelAllowlist, compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))

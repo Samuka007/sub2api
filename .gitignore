@@ -161,8 +161,17 @@ docs/*
 !docs/LANGFUSE_SESSION_GRAPH.md
 !docs/PROMPT_AUDIT_DEEPSEEK.md
 !docs/MODEL_TRACING_IMPLEMENTATION_LOG.md
+!docs/COMPOSITE_GROUPS.md
+!docs/PLUGIN_DEVELOPMENT.md
+!docs/channel-monitor-v2-safe-defaults.md
+!docs/codex-credits.md
 !docs/legal/
 !docs/legal/*.md
+!docs/screenshots/
+docs/screenshots/*
+!docs/screenshots/mobile-account-actions-menu.png
+!docs/screenshots/codex-referral-dialog.png
+!docs/screenshots/codex-referral-success.png
 .serena/
 .codex/*
 !.codex/skills
@@ -177,6 +186,8 @@ exports/
 /frontend/history/
 /.pnpm-store/
 /.vite/
+.codegraph/
+issues/
 
 # Vitest / Vite cache at repo root
 .vite/

@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      dry_run:
+        description: 'Build and verify all selected artifacts without publishing'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -213,6 +218,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
           ref: ${{ needs.resolve-release.outputs.tag_name }}
 
@@ -267,11 +273,9 @@ jobs:
 
       - name: Verify Go version
         run: test "$(go env GOVERSION)" = "go1.27.0"
-
       - name: Set up QEMU
         if: needs.resolve-release.outputs.release_mode == 'full'
         uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -285,8 +289,8 @@ jobs:
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
-
       - name: Login to GitHub Container Registry
+        if: ${{ env.DRY_RUN != 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -336,7 +340,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ needs.resolve-release.outputs.semantic_tag }}
           GITHUB_REPO_OWNER: ${{ github.repository_owner }}
-          GITHUB_REPO_OWNER_LOWER: ${{ steps.lowercase.outputs.owner }}
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           DOCKERHUB_USERNAME: ${{ env.DOCKERHUB_USERNAME || 'skip' }}
 
@@ -415,6 +418,7 @@ jobs:
         if: needs.resolve-release.outputs.release_mode == 'full'
         continue-on-error: true
         env:
+          TAG_MESSAGE: ${{ steps.tag_message.outputs.message }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TAG_NAME: ${{ needs.resolve-release.outputs.tag_name }}

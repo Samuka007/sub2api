@@ -861,7 +861,7 @@ func TestUsageLogRepositoryGetUserUsageTrendIncludesUserNotes(t *testing.T) {
 		WithArgs(start, end, 10, start, end).
 		WillReturnRows(rows)
 
-	got, err := repo.GetUserUsageTrend(context.Background(), start, end, "day", 10)
+	got, err := repo.GetUserUsageTrend(context.Background(), start, end, "day", 10, "tokens")
 	require.NoError(t, err)
 	require.Equal(t, []usagestats.UserUsageTrendPoint{{
 		Date: "2025-01-01", UserID: 7, Email: "user@example.com", Username: "user", Notes: "admin note",
